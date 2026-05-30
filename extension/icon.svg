@@ -1,0 +1,36 @@
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#7C3AED"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded-square backdrop -->
+  <rect x="0" y="0" width="128" height="128" rx="28" fill="url(#bg)"/>
+
+  <!-- soft drop shadow for the card -->
+  <rect x="24" y="26" width="66" height="84" rx="12" fill="#000000" opacity="0.16"/>
+
+  <!-- task card -->
+  <rect x="24" y="22" width="66" height="84" rx="12" fill="#FFFFFF"/>
+
+  <!-- row 1: checked -->
+  <rect x="34" y="36" width="13" height="13" rx="3.5" fill="#22C55E"/>
+  <path d="M37 42.8 l2.6 2.6 l4.2 -4.8" fill="none" stroke="#FFFFFF" stroke-width="2.2"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="52" y="39" width="30" height="7" rx="3.5" fill="#CBD5E1"/>
+
+  <!-- row 2: pending -->
+  <rect x="34.8" y="58.8" width="11.4" height="11.4" rx="3" fill="none" stroke="#CBD5E1" stroke-width="2"/>
+  <rect x="52" y="61" width="34" height="7" rx="3.5" fill="#E2E8F0"/>
+
+  <!-- row 3: pending -->
+  <rect x="34.8" y="80.8" width="11.4" height="11.4" rx="3" fill="none" stroke="#CBD5E1" stroke-width="2"/>
+  <rect x="52" y="83" width="22" height="7" rx="3.5" fill="#E2E8F0"/>
+
+  <!-- auto-dispatch bolt badge -->
+  <circle cx="97" cy="97" r="21" fill="#FBBF24"/>
+  <circle cx="97" cy="97" r="21" fill="none" stroke="#FFFFFF" stroke-width="3"/>
+  <path d="M100 84 l-12 16 l7 0 l-3 12 l14 -18 l-7 0 z" fill="#FFFFFF"/>
+</svg>

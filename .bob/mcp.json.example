@@ -1,0 +1,27 @@
+{
+  "$schema": "https://bob-code.com/schemas/mcp-config.schema.json",
+  "mcpServers": {
+    "bob-tasks": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/absolute/path/to/ibm-bob-connector/dist/server.js"],
+      "env": {
+        "BOB_TASKS_DB": "/absolute/path/to/ibm-bob-connector/data/tasks.db"
+      },
+      "cwd": "/absolute/path/to/ibm-bob-connector",
+      "timeout": 60,
+      "disabled": false,
+      "alwaysAllow": [
+        "list_tasks",
+        "get_task",
+        "get_next_task",
+        "claim_task",
+        "update_task_status",
+        "add_task_note",
+        "submit_result",
+        "create_task"
+      ],
+      "watchPaths": ["/absolute/path/to/ibm-bob-connector/dist/server.js"]
+    }
+  }
+}

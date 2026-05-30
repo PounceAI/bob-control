@@ -1,0 +1,27 @@
+{
+  "name": "ibm-bob-task-connector",
+  "version": "0.1.0",
+  "description": "MCP server that provisions tasks for IBM Bob (and any other MCP-capable agent).",
+  "type": "module",
+  "bin": {
+    "bob-tasks": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "server": "node dist/server.js",
+    "task": "node dist/cli.js",
+    "worker": "node dist/worker.js",
+    "smoke": "node dist/smoke.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

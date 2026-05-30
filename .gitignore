@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+extension/node_modules/
+
+# Build output (regenerated via `npm run build` / `tsc`)
+dist/
+extension/out/
+
+# Packaged extension artifact (produced by `vsce package`)
+extension/*.vsix
+
+# Runtime data (SQLite task/audit DBs)
+data/
+
+# Logs
+*.log
+
+# Backups
+*.bak
+*.bak2
+
+# Claude Code local (machine-specific) settings
+.claude/settings.local.json
+
+# Live Bob MCP config holds absolute machine paths; ship .example instead
+.bob/mcp.json
+
+# Planning / design notes, not part of the shipped project
+docs/
+
+# Scratch: ignore everything except the reusable verification harnesses
+scratch/*
+!scratch/verify-extension.mjs
+!scratch/dummy-pipe-server.mjs
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db

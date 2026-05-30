@@ -1,0 +1,90 @@
+{
+  "name": "bob-tasks",
+  "displayName": "Bob Tasks",
+  "description": "Auto-dispatch queued tasks to IBM Bob, with mode routing, a safety gate, defer-while-chatting, and native notifications.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": { "vscode": "^1.94.0" },
+  "categories": ["Other"],
+  "icon": "icon.png",
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Bob Tasks",
+      "properties": {
+        "bobTasks.projectRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the IBM Bob Connector project (containing dist/worker.js). Empty = the first workspace folder."
+        },
+        "bobTasks.nodePath": {
+          "type": "string",
+          "default": "node",
+          "description": "Node executable used to run the worker. Must be Node >= 22.5 (node:sqlite). Set an absolute path if 'node' on PATH is older."
+        },
+        "bobTasks.dbPath": {
+          "type": "string",
+          "default": "",
+          "description": "SQLite task DB (BOB_TASKS_DB). Empty = the project's data/tasks.db. Must match the MCP server's DB."
+        },
+        "bobTasks.pipe": {
+          "type": "string",
+          "default": "\\\\.\\pipe\\pipe\\bob-ipc",
+          "description": "Bob IPC named pipe."
+        },
+        "bobTasks.maxRisk": {
+          "type": "string",
+          "enum": ["safe", "standard", "elevated"],
+          "default": "standard",
+          "description": "Only auto-dispatch tasks whose mode risk is at or below this. 'advanced' (browser/commands) is elevated."
+        },
+        "bobTasks.pollMs": { "type": "number", "default": 3000, "description": "Idle poll interval (ms)." },
+        "bobTasks.timeoutMs": { "type": "number", "default": 300000, "description": "Per-task dispatch timeout (ms)." },
+        "bobTasks.assignee": { "type": "string", "default": "bob", "description": "Assignee recorded when the worker claims a task." },
+        "bobTasks.tag": { "type": "string", "default": "", "description": "Only process tasks with this tag. Empty = all tasks." },
+        "bobTasks.autoStart": { "type": "boolean", "default": false, "description": "Start the worker automatically when Bob launches." },
+        "bobTasks.notify.enabled": { "type": "boolean", "default": true, "description": "Show a notification when a task finishes." },
+        "bobTasks.dispatch.surface": {
+          "type": "string",
+          "enum": ["sidebar", "newTab"],
+          "default": "sidebar",
+          "description": "Where dispatched tasks render. 'sidebar' = quiet same-tab; 'newTab' = isolated editor tab (steals focus)."
+        },
+        "bobTasks.dispatch.bringToFront": {
+          "type": "boolean",
+          "default": false,
+          "description": "On each dispatch, bring the IBM BOB view to the front. Off = quiet, no window jump."
+        },
+        "bobTasks.deferWhileChatting": {
+          "type": "boolean",
+          "default": true,
+          "description": "Pause auto-dispatch while you are actively chatting with Bob, so the worker never aborts your live chat."
+        },
+        "bobTasks.deferIdleMs": {
+          "type": "number",
+          "default": 60000,
+          "description": "How long Bob's chat must be idle (ms) before the worker resumes."
+        }
+      }
+    },
+    "commands": [
+      { "command": "bobTasks.startWorker", "title": "Bob Tasks: Start Worker" },
+      { "command": "bobTasks.stopWorker", "title": "Bob Tasks: Stop Worker" },
+      { "command": "bobTasks.toggleWorker", "title": "Bob Tasks: Toggle Worker" }
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p ./",
+    "watch": "tsc -w -p ./",
+    "vscode:prepublish": "tsc -p ./",
+    "package": "vsce package --no-dependencies --allow-missing-repository"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.94.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.5.0"
+  }
+}
