@@ -15,7 +15,7 @@ Apply the dispatcher's resolution order — **first match wins**:
 1. **explicit** — task has a `mode` set → use it.
 2. **tag** — a tag equal to `ask` / `code` / `advanced` / `orchestrator` → that mode.
 3. **auto-router** — scan title + description + tags, in this priority:
-   - `advanced` — `browser, webpage, website, url, scrape, crawl, navigate, screenshot, mcp tool, fetch the, http`
+   - `advanced` — `browser, webpage, website, url, scrape, crawl, navigate, screenshot, mcp tool, fetch the, http(s)`
    - `orchestrator` — `orchestrate, coordinate, multi-step, break down, sub-tasks, workflow, epic, several steps`
    - `ask` — `explain, describe, document, docs, summarize, analyze, research, investigate, what is, what are, how does, how do, why does, why is, question, clarify, review the concept/approach/design, understand`
 4. **default** — none of the above → `code`.

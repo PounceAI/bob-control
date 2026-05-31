@@ -27,9 +27,9 @@ Do this:
      - `orchestrator` — coordinating a multi-step epic with sub-tasks.
 
 **How the auto-router will read your task** (so you can pick tags/wording that route well — it matches title + description + tags, first rule wins):
-- → `advanced` if it mentions browser, webpage, website, url, scrape, crawl, navigate, screenshot, http, fetch.
-- → `orchestrator` if it mentions orchestrate, coordinate, multi-step, break down, sub-tasks, workflow, epic.
-- → `ask` if it mentions explain, describe, document, summarize, analyze, research, investigate, "what is", "how does", review the concept/approach/design.
+- → `advanced` if it mentions browser, webpage, website, url, scrape, crawl, navigate, screenshot, mcp tool, fetch the, http(s).
+- → `orchestrator` if it mentions orchestrate, coordinate, multi-step, break down, sub-tasks, workflow, epic, several steps.
+- → `ask` if it mentions explain, describe, document, docs, summarize, analyze, research, investigate, "what is", "what are", "how does", "how do", "why does", "why is", question, clarify, understand, review the concept/approach/design.
 - → `code` otherwise.
 - A tag that names a mode (`ask`, `code`, `advanced`, `orchestrator`) is treated as a mode hint.
 

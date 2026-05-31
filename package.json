@@ -12,7 +12,8 @@
     "server": "node dist/server.js",
     "task": "node dist/cli.js",
     "worker": "node dist/worker.js",
-    "smoke": "node dist/smoke.js"
+    "smoke": "node dist/smoke.js",
+    "test": "tsc && node --test dist/*.test.js"
   },
   "engines": {
     "node": ">=22.5.0"

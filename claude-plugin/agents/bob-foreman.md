@@ -31,9 +31,9 @@ large request into a set of clean, independently-runnable tasks queued via
 
 The dispatcher resolves mode by: explicit `mode` › a tag naming a mode › keyword router › `code`.
 Keyword router (first match wins), scanning title + description + tags:
-- `advanced` — browser, webpage, website, url, scrape, crawl, navigate, screenshot, http, fetch
-- `orchestrator` — orchestrate, coordinate, multi-step, break down, sub-tasks, workflow, epic
-- `ask` — explain, describe, document, summarize, analyze, research, investigate, what is, how does, review the concept/approach/design
+- `advanced` — browser, webpage, website, url, scrape, crawl, navigate, screenshot, mcp tool, fetch the, http(s)
+- `orchestrator` — orchestrate, coordinate, multi-step, break down, sub-tasks, workflow, epic, several steps
+- `ask` — explain, describe, document, docs, summarize, analyze, research, investigate, what is, what are, how does, how do, why does, why is, question, clarify, understand, review the concept/approach/design
 - else `code`
 
 Risk by mode (the worker auto-dispatches only at/below `--max-risk`, default `standard`):

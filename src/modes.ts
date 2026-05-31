@@ -15,8 +15,11 @@ export function isBuiltInMode(slug: string): slug is BuiltInMode {
 // advanced > orchestrator > ask, then code as fallback.
 const RULES: { mode: BuiltInMode; re: RegExp }[] = [
   // Needs MCP/Browser tools, which plain code mode lacks; must win.
-  { mode: "advanced", re: /\b(browser|web ?page|website|url|scrape|crawl|navigate|screenshot|mcp tool|fetch the|http)\b/i },
-  { mode: "orchestrator", re: /\b(orchestrat|coordinate|multi[- ]step|break (it |this )?down|sub-?tasks?|workflow|epic|several steps)\b/i },
+  // `https?` so an https URL matches too (bare `http` before \b misses "https").
+  { mode: "advanced", re: /\b(browser|web ?page|website|url|scrape|crawl|navigate|screenshot|mcp tool|fetch the|https?)\b/i },
+  // `orchestrat\w*` so the stem matches orchestrate / orchestrator / orchestration
+  // (a bare `orchestrat` before the trailing \b never matches the full word).
+  { mode: "orchestrator", re: /\b(orchestrat\w*|coordinate|multi[- ]step|break (it |this )?down|sub-?tasks?|workflow|epic|several steps)\b/i },
   { mode: "ask", re: /\b(explain|describe|document|docs|summari[sz]e|analy[sz]e|research|investigate|what is|what are|how does|how do|why does|why is|question|clarify|review (the )?(concept|approach|design)|understand)\b/i },
 ];
 

@@ -16,9 +16,9 @@ Otherwise report:
   1. an explicit `mode` on the task → use it (source: explicit);
   2. else a tag that names a mode (`ask`/`code`/`advanced`/`orchestrator`) → that mode (source: tag);
   3. else the keyword router on title+description+tags:
-     `advanced` (browser/url/scrape/screenshot/http/fetch) ›
-     `orchestrator` (orchestrate/coordinate/multi-step/break down/sub-tasks/workflow/epic) ›
-     `ask` (explain/describe/document/summarize/analyze/research/investigate/what is/how does) ›
+     `advanced` (browser/webpage/website/url/scrape/crawl/navigate/screenshot/mcp tool/fetch the/http(s)) ›
+     `orchestrator` (orchestrate/coordinate/multi-step/break down/sub-tasks/workflow/epic/several steps) ›
+     `ask` (explain/describe/document/docs/summarize/analyze/research/investigate/what is/what are/how does/how do/why does/why is/question/clarify/understand) ›
      else `code` (source: auto-router);
   4. else `code` (source: default).
 - the risk level of that mode: `ask`=safe, `code`/`orchestrator`=standard, `advanced`=elevated.
