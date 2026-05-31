@@ -103,6 +103,7 @@ node dist/cli.js show 1
 node dist/cli.js claim 1 --assignee bob
 node dist/cli.js note 1 "Waiting on test data"
 node dist/cli.js result 1 "Done; 3 procedures extracted"
+node dist/cli.js next                                 # next pending task + its routed mode
 node dist/cli.js stats
 ```
 

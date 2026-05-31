@@ -78,6 +78,7 @@ Commands:
   status <id> <${TASK_STATUSES.join("|")}>
   mode <id> <slug>                         set the Bob mode for a task ('' to clear)
   route <id>                               show which mode the auto-router would pick
+  next                                     show the next pending task the worker would pull, and its routed mode
   note <id> <text> [--author <name>]
   result <id> <text> [--open]
   delete <id>
@@ -206,6 +207,17 @@ function main(): void {
       if (!task) die(`task ${id} not found`);
       const { mode, source } = resolveMode(task);
       console.log(`#${id} would dispatch in mode {${mode}} (${source})`);
+      break;
+    }
+
+    case "next": {
+      const [task] = repo.listTasks({ status: "pending", limit: 1 });
+      if (!task) {
+        console.log("(no pending tasks)");
+        break;
+      }
+      const { mode } = resolveMode(task);
+      console.log(`${fmtTask(task)} -> {${mode}}`);
       break;
     }
 
