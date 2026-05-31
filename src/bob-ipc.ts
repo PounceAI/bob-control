@@ -37,8 +37,10 @@ export interface DispatchOptions {
 
 export interface DispatchResult {
   taskId: string | null;
-  /** Bob's completion_result text (falls back to last streamed text). */
+  /** Genuine attempt_completion text Bob emitted, or "" if it never did. */
   result: string;
+  /** Last non-empty streamed say text (e.g. a tool call) — diagnostics only, NOT a completion. */
+  lastText: string;
   status: "completed" | "aborted" | "timeout";
 }
 
@@ -203,7 +205,11 @@ export class BobClient {
     this.active = null;
     a.settle({
       taskId: a.ourTaskId,
-      result: a.lastCompletion || a.lastText || "",
+      // Only a genuine completion_result counts as the result; the trailing
+      // streamed text (e.g. an updateTodoList tool-say) is diagnostics only, so a
+      // timeout with no completion_result yields result:"" → worker parks blocked.
+      result: a.lastCompletion,
+      lastText: a.lastText,
       status,
     });
   }

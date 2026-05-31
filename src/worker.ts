@@ -145,9 +145,12 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     },
   });
 
-  // A captured completion_result counts as success regardless of the terminal
-  // event: in multi-step ask-mode tasks Bob sometimes emits completion_result
-  // then fires taskAborted instead of taskCompleted. Don't discard a real result.
+  // Mark done only on a GENUINE completion: Bob fired taskCompleted, or it
+  // emitted a real attempt_completion (completion_result). In some multi-step
+  // tasks Bob emits completion_result then taskAborted/timeout — we still keep
+  // that real result. A trailing tool payload (e.g. updateTodoList) is NOT a
+  // completion: bob-ipc keeps it in res.lastText, never in res.result, so a pure
+  // timeout with no completion_result now falls through to 'blocked' below.
   const captured = res.result.trim();
   if (res.status === "completed" || captured) {
     const result = captured || "(completed; no completion_result text captured)";
@@ -168,7 +171,9 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     }
     // Park as blocked so the loop doesn't spin on it.
     repo.updateStatus(task.id, "blocked");
-    repo.addNote(task.id, `Dispatch ended as '${res.status}' with no result.`, "worker");
+    const lastText = res.lastText.trim().replace(/\s+/g, " ").slice(0, 140);
+    const lastNote = lastText ? ` Last activity: ${lastText}` : "";
+    repo.addNote(task.id, `Dispatch ended as '${res.status}' with no completion_result.${lastNote}`, "worker");
     console.log(`  ✗ ${res.status} — task marked blocked`);
     emit(opts, "taskFail", { id: task.id, title: task.title, status: res.status });
     if (opts.notify) notify(`Bob task #${task.id} ${res.status}`, task.title);
