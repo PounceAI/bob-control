@@ -39,15 +39,43 @@ Access via the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 - **Bob Tasks: Stop Worker** — Stop the task worker
 - **Bob Tasks: Toggle Worker** — Toggle the worker on/off
 
+## External trigger (URI handler)
+
+The extension registers a URL handler so a process **outside** Bob — e.g. Claude Code
+running in WSL — can drive the worker without a Command Palette click. The editor's URL
+protocol routes the URI to the extension; the path selects the action:
+
+| URI | Action |
+| --- | --- |
+| `vscode://local.bob-tasks/start` | Start the worker |
+| `vscode://local.bob-tasks/stop` | Stop the worker |
+| `vscode://local.bob-tasks/toggle` | Toggle the worker |
+
+The authority is `<publisher>.<name>` = `local.bob-tasks`. Use the scheme your editor
+registers — for **IBM Bob** that is `ibm-bob://` (its `product.json` `urlProtocol`); stock
+VS Code uses `vscode://`. Trigger it from WSL by letting Windows dispatch the URL to the
+registered handler (the URL has no spaces, so quoting is trivial):
+
+```bash
+cmd.exe /c start "" "ibm-bob://local.bob-tasks/start"
+```
+
+> Note: the `code` CLI on a WSL PATH points at **stock VS Code** (the Remote-WSL server, or
+> the Windows `code.cmd`), which is a *different editor* than IBM Bob — don't use it to drive
+> or install this extension. IBM Bob's own CLI is `bobide` (`bobide --open-url "…"`).
+
+This makes the extension the **single owner** of the worker, so its status bar reflects
+every dispatch and there's no two-worker contention on Bob's IPC pipe. Enqueue tasks as
+usual (`./bob create …`); the extension's worker drains them.
+
 ## Status Bar
 
-When the extension is active, a status-bar item shows the worker state:
+When the extension is active, a status-bar item shows the worker state (click it to toggle):
 
-- `$(sync~spin) Bob worker: running` — worker is active
-- `$(debug-pause) Bob worker: deferred (chat active)` — worker is paused because you're chatting with Bob
-- `$(circle-slash) Bob worker: stopped` — worker is not running
-
-Click the status-bar item to toggle the worker.
+- `$(rocket) Bob Tasks: running` — worker is running (appends `#<id> {<mode>}` while a task dispatches)
+- `$(watch) Bob Tasks: idle` — worker is up but the board has no eligible task (`(N gated)` if some exceed the risk gate)
+- `$(debug-pause) Bob Tasks: deferred (chat active)` — paused because you're chatting with Bob
+- `$(circle-slash) Bob Tasks: stopped` — worker is not running
 
 ## Build & Install
 

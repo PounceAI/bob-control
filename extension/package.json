@@ -7,7 +7,7 @@
   "engines": { "vscode": "^1.94.0" },
   "categories": ["Other"],
   "icon": "icon.png",
-  "activationEvents": ["onStartupFinished"],
+  "activationEvents": ["onStartupFinished", "onUri"],
   "main": "./out/extension.js",
   "contributes": {
     "configuration": {

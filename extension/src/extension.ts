@@ -29,9 +29,13 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("bobTasks.startWorker", () => startWorker()),
     vscode.commands.registerCommand("bobTasks.stopWorker", () => stopWorker()),
-    vscode.commands.registerCommand("bobTasks.toggleWorker", () =>
-      worker ? stopWorker() : startWorker(),
-    ),
+    vscode.commands.registerCommand("bobTasks.toggleWorker", () => toggleWorker()),
+    // URI handler so a process outside Bob (e.g. Claude Code in WSL) can drive the
+    // worker without a VS Code command, via the editor's URL protocol:
+    //   code.exe --open-url "<scheme>://local.bob-tasks/start"   (also /stop, /toggle)
+    // The extension is then the single owner of the worker, so its status bar
+    // reflects every dispatch and there's no two-worker contention on Bob's pipe.
+    vscode.window.registerUriHandler({ handleUri }),
   );
 
   if (cfg().get<boolean>("autoStart")) startWorker();
@@ -178,6 +182,36 @@ function stopWorker(): void {
   // it; here just clear the watchdog and reflect intent in the UI.
   worker.kill();
   setStatus("stopped");
+}
+
+function toggleWorker(): void {
+  if (worker) stopWorker();
+  else startWorker();
+}
+
+/**
+ * Handle an external URL dispatched to the extension (vscode.window.registerUriHandler).
+ * The path selects the action: /start | /stop | /toggle. Lets a WSL-side process
+ * trigger the worker that a VS Code command would otherwise be needed for.
+ */
+function handleUri(uri: vscode.Uri): void {
+  const action = uri.path.replace(/^\/+/, "").toLowerCase();
+  out.appendLine(`[uri] ${uri.toString()} → ${action || "(none)"}`);
+  switch (action) {
+    case "start":
+      startWorker();
+      break;
+    case "stop":
+      stopWorker();
+      break;
+    case "toggle":
+      toggleWorker();
+      break;
+    default:
+      vscode.window.showWarningMessage(
+        `Bob Tasks: unknown URI action '${action}'. Use /start, /stop, or /toggle.`,
+      );
+  }
 }
 
 function handleEvent(json: string): void {
