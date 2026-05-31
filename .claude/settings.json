@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(./bob:*)",
+      "Bash(node.exe:*)",
+      "Bash(node dist/cli.js:*)",
+      "Bash(node dist/worker.js:*)",
+      "Bash(npm run build)",
+      "Bash(npm run build:*)",
+      "Bash(npm run worker:*)"
+    ]
+  },
+  "attribution": {
+    "commit": ""
+  }
+}

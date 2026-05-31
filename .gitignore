@@ -6,6 +6,9 @@ extension/node_modules/
 dist/
 extension/out/
 
+# Plugin server bundle (regenerated via `npm run build:plugin`)
+claude-plugin/server/
+
 # Packaged extension artifact (produced by `vsce package`)
 extension/*.vsix
 

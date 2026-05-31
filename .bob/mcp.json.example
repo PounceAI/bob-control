@@ -6,7 +6,7 @@
       "command": "node",
       "args": ["/absolute/path/to/ibm-bob-connector/dist/server.js"],
       "env": {
-        "BOB_TASKS_DB": "/absolute/path/to/ibm-bob-connector/data/tasks.db"
+        "BOB_TASKS_PORTABLE": "1"
       },
       "cwd": "/absolute/path/to/ibm-bob-connector",
       "timeout": 60,
@@ -19,7 +19,9 @@
         "update_task_status",
         "add_task_note",
         "submit_result",
-        "create_task"
+        "create_task",
+        "set_task_mode",
+        "delete_task"
       ],
       "watchPaths": ["/absolute/path/to/ibm-bob-connector/dist/server.js"]
     }

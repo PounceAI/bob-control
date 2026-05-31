@@ -1,0 +1,13 @@
+{
+  "name": "ibm-bob-connector",
+  "owner": {
+    "name": "Joshua Gilbert"
+  },
+  "plugins": [
+    {
+      "name": "bob-foreman",
+      "source": "./claude-plugin",
+      "description": "Claude Code foreman + worker for the IBM Bob task board. Self-contained MCP server; works in any repo against a shared board."
+    }
+  ]
+}

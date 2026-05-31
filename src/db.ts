@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Task, TaskNote, TaskStatus, TaskPriority } from "./types.js";
@@ -10,9 +11,14 @@ const requireModule = createRequire(import.meta.url);
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 
-// SQLite path: BOB_TASKS_DB env var, else <project-root>/data/tasks.db.
+// SQLite path resolution, in order:
+//   1. BOB_TASKS_DB         — explicit path wins.
+//   2. BOB_TASKS_PORTABLE   — a shared board in the user's home (~/.bob-tasks/tasks.db),
+//      so the Claude Code plugin and Bob can agree on one queue from any repo.
+//   3. else                 — the repo-local <project-root>/data/tasks.db.
 export function defaultDbPath(): string {
   if (process.env.BOB_TASKS_DB) return resolve(process.env.BOB_TASKS_DB);
+  if (process.env.BOB_TASKS_PORTABLE) return resolve(homedir(), ".bob-tasks", "tasks.db");
   return resolve(moduleDir, "..", "data", "tasks.db");
 }
 
@@ -26,6 +32,10 @@ export function getDb(path = defaultDbPath()): DatabaseSync {
   const { DatabaseSync } = requireModule("node:sqlite") as typeof import("node:sqlite");
   db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL;");
+  // busy_timeout retries a transient "database is locked" instead of throwing; Bob
+  // keeps several concurrent connections on this board. Access it from the Windows
+  // side only -- WAL's shared memory can't cross the WSL/Windows boundary.
+  db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA foreign_keys = ON;");
   migrate(db);
   return db;

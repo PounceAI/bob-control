@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# bob — run the connector CLI against Bob's board from WSL or Windows.
+#
+# Bob holds the board open in WAL on the Windows side, and WAL's shared memory
+# can't cross the WSL/Windows boundary, so Linux-side node fails with "disk I/O
+# error 4618". Under WSL this routes through Windows node.exe (via interop), which
+# co-opens the board cleanly; on a native-Windows shell it uses plain node.
+# Background: project memory wsl-sqlite-wal-gotcha.
+#
+# Usage: bob <create|list|show|claim|status|note|result|delete|stats|route|help> [args]
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cli="$script_dir/dist/cli.js"
+
+if [[ ! -f "$cli" ]]; then
+  echo "bob: $cli not found; run 'npm run build' first." >&2
+  exit 1
+fi
+
+if command -v wslpath >/dev/null 2>&1; then
+  # WSL: must use Windows node.exe — Linux node can't open the WAL board.
+  if ! command -v node.exe >/dev/null 2>&1; then
+    echo "bob: under WSL but node.exe is not on PATH (need Windows Node via interop)." >&2
+    exit 1
+  fi
+  win_cli="$(wslpath -w "$cli")" || { echo "bob: wslpath could not convert $cli" >&2; exit 1; }
+  exec node.exe "$win_cli" "$@"
+elif command -v node >/dev/null 2>&1; then
+  exec node "$cli" "$@"
+else
+  echo "bob: no Node found on PATH (need node.exe under WSL, or node on Windows)." >&2
+  exit 1
+fi

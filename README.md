@@ -8,13 +8,14 @@ results. Bob is the MCP client; this is the server it connects to.
 ## Setup
 
 ```powershell
-npm install --ignore-scripts
-npm run build
+npm install        # not --ignore-scripts: esbuild's postinstall fetches its binary
+npm run build      # tsc -> dist/, then bundles claude-plugin/server/server.mjs
 npm run smoke      # optional self-test
 ```
 
-Needs Node 22.5+ (uses the built-in `node:sqlite`, so there's no native build
-step). The board lives at `data/tasks.db`; override with `BOB_TASKS_DB`.
+Needs Node 22.5+ (uses the built-in `node:sqlite`, so there's no native build step).
+The board lives at `data/tasks.db`; override with `BOB_TASKS_DB`, or set
+`BOB_TASKS_PORTABLE=1` for a shared `~/.bob-tasks/tasks.db` (see the plugin below).
 
 ## Connecting Bob
 
@@ -34,6 +35,45 @@ same `mcpServers` block in the global file instead:
 %APPDATA%\IBM Bob\User\globalStorage\ibm.bob-code\settings\mcp_settings.json
 ```
 
+## Claude Code companion (plugin)
+
+Because the connector is an MCP server and Claude Code is an MCP client, Claude Code can
+work the **same board Bob drains** — as the *foreman* (provision / route / triage) and as
+a *worker* (claim and execute tasks itself). It ships as a self-contained Claude Code
+plugin in [claude-plugin/](claude-plugin/README.md) so you can use it **from any repo**,
+not just this one.
+
+The plugin bundles the connector into a single `server/server.mjs` (esbuild; no native
+deps thanks to `node:sqlite`), so install is all that's required — no checkout needed at
+runtime. Build it, add the local marketplace, install:
+
+```powershell
+npm install && npm run build      # build also bundles claude-plugin/server/server.mjs
+# in Claude Code, from anywhere:
+#   /plugin marketplace add /absolute/path/to/ibm-bob-connector
+#   /plugin install bob-foreman@ibm-bob-connector
+```
+
+| Surface | What it does |
+| ------- | ------------ |
+| `/bob-new <desc>` | Turn a rough ask into one well-formed task (title, criteria, priority, tags, routed mode) |
+| `/bob-board [tag]` | The board grouped by status, in pull order |
+| `/bob-next [tag]` | What Bob pulls next and the mode it routes to (read-only; never claims) |
+| `/bob-route <id\|text>` | Predict the dispatch mode for a task or a hypothetical |
+| `/bob-triage [focus]` | Review the board, propose fixes, apply the safe ones on confirm |
+| `/bob-work [tag] [--max N]` | **Worker:** claim pending tasks Claude can do, execute them, submit results |
+| `bob-foreman` subagent | Split a large request into several correctly-routed, ordered tasks |
+
+### Shared board
+
+The plugin sets `BOB_TASKS_PORTABLE=1`, which puts the board at a fixed
+`~/.bob-tasks/tasks.db` (Windows: `%USERPROFILE%\.bob-tasks\tasks.db`) regardless of which
+repo you're in. Set the **same flag** in Bob's `.bob/mcp.json` (`"env": { "BOB_TASKS_PORTABLE":
+"1" }`) and both tools share one queue. `/bob-work` claims tasks as `claude` and leaves
+IBM-i/RPG work for Bob, so the two never double-work a task. The server logs the resolved
+board path on startup. (`BOB_TASKS_DB` still overrides with an explicit path; without either
+flag the board stays repo-local at `data/tasks.db`.)
+
 ## Tools
 
 | Tool | Purpose |
@@ -46,6 +86,8 @@ same `mcpServers` block in the global file instead:
 | `update_task_status` | pending / in_progress / blocked / done / cancelled |
 | `add_task_note` | Append a progress note |
 | `submit_result` | Attach a result and mark done |
+| `set_task_mode` | Set or clear a task's mode slug |
+| `delete_task` | Permanently delete a task and its notes |
 
 A typical Bob loop: `get_next_task {claim:true}` then `add_task_note` while
 working, then `submit_result`.

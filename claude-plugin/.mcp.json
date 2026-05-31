@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "bob-tasks": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/server.mjs"],
+      "env": {
+        "BOB_TASKS_PORTABLE": "1"
+      }
+    }
+  }
+}

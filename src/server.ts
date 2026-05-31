@@ -193,12 +193,48 @@ server.registerTool(
   },
 );
 
+// ---------------------------------------------------------------------------
+// Management (foreman / triage)
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "set_task_mode",
+  {
+    title: "Set Task Mode",
+    description:
+      "Set or clear a task's Bob mode slug. Pass an empty string to clear it and let the dispatcher auto-route.",
+    inputSchema: {
+      id: z.number().int(),
+      mode: z
+        .string()
+        .describe("Mode slug ('code' | 'advanced' | 'ask' | 'orchestrator' | custom), or '' to clear"),
+    },
+  },
+  async ({ id, mode }) => {
+    const task = repo.setMode(id, mode.trim() ? mode.trim() : null);
+    if (!task) return fail(`Task ${id} not found`);
+    return json(task);
+  },
+);
+
+server.registerTool(
+  "delete_task",
+  {
+    title: "Delete Task",
+    description:
+      "Permanently delete a task and its notes. Use for duplicates or mistakes; prefer update_task_status 'cancelled' when you want to keep a record.",
+    inputSchema: { id: z.number().int().describe("Task id") },
+  },
+  async ({ id }) => json({ id, deleted: repo.deleteTask(id) }),
+);
+
 async function main(): Promise<void> {
   // Open the DB up front so schema errors surface at startup, not first call.
   repo.getDb();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("[ibm-bob-task-connector] MCP server ready on stdio");
+  console.error(`[ibm-bob-task-connector] board: ${repo.defaultDbPath()}`);
 }
 
 main().catch((err) => {
