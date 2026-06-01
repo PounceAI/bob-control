@@ -105,6 +105,36 @@
           "type": "string",
           "default": "",
           "description": "Path to the `claude` executable for the cli backend. Empty = resolve `claude` on PATH."
+        },
+        "bobTasks.verifyAndContinue": {
+          "type": "boolean",
+          "default": false,
+          "description": "After Bob completes a task, run an acceptance check and loop back to Bob to fix issues until it passes or max-continues is reached. Catches broken builds/tests without human intervention."
+        },
+        "bobTasks.verifyCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Command to run for acceptance checks when verifyAndContinue is on. Empty = use built-in heuristics (git working-tree check). Exit code 0 = pass, non-zero = fail."
+        },
+        "bobTasks.maxContinues": {
+          "type": "number",
+          "default": 3,
+          "description": "Maximum number of fix loops when verifyAndContinue is on. After this many attempts, the task is marked as failed."
+        },
+        "bobTasks.detectPlanStop": {
+          "type": "boolean",
+          "default": false,
+          "description": "Check if Bob did real work (git working-tree changed) after completion. If the tree is clean (plan-only, no code written), auto-continue asking Bob to implement the plan."
+        },
+        "bobTasks.maxRetryAttempts": {
+          "type": "number",
+          "default": 0,
+          "description": "Auto-retry transient failures (timeout/abort) up to this many total attempts. 0 = no retries."
+        },
+        "bobTasks.allowCommands": {
+          "type": "string",
+          "default": "",
+          "description": "Comma-separated command prefixes to extend the safe allowlist for advanced mode (e.g., 'git,npm test'). Empty = use built-in allowlist only."
         }
       }
     },

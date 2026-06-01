@@ -108,6 +108,21 @@ function startWorker(): void {
     const cliPath = c.get<string>("classifierCliPath");
     if (cliPath && cliPath.trim()) args.push("--classifier-cli", cliPath.trim());
   }
+  // Verify-and-continue: loop back to Bob to fix issues until acceptance check passes
+  if (c.get<boolean>("verifyAndContinue")) {
+    args.push("--verify-and-continue");
+    const verifyCmd = c.get<string>("verifyCommand");
+    if (verifyCmd && verifyCmd.trim()) args.push("--verify-command", verifyCmd.trim());
+    args.push("--max-continues", String(c.get<number>("maxContinues") ?? 3));
+  }
+  // Detect plan-only completions (no code written) and auto-continue
+  if (c.get<boolean>("detectPlanStop")) args.push("--detect-plan-stop");
+  // Auto-retry transient failures (timeout/abort)
+  const maxRetryAttempts = c.get<number>("maxRetryAttempts") ?? 0;
+  if (maxRetryAttempts > 0) args.push("--retry", String(maxRetryAttempts));
+  // Extend the safe command allowlist for advanced mode
+  const allowCommands = c.get<string>("allowCommands");
+  if (allowCommands && allowCommands.trim()) args.push("--allow-commands", allowCommands.trim());
 
   const env = { ...process.env };
   const dbPath = c.get<string>("dbPath");

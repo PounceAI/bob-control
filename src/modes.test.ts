@@ -194,3 +194,39 @@ test("commandPolicy drives the derived allowedCommands", () => {
   );
   assert.ok(dispatchAutoApprove(profileFor("advanced")).allowedCommands.includes("npm "));
 });
+
+test("dispatchAutoApprove with empty extraCommands returns just SAFE_COMMANDS", () => {
+  const aa = dispatchAutoApprove(profileFor("code"), []);
+  assert.ok(aa.allowedCommands.includes("npm "));
+  assert.ok(aa.allowedCommands.includes("git "));
+  assert.ok(!aa.allowedCommands.includes("docker "));
+  assert.ok(!aa.allowedCommands.includes("make "));
+});
+
+test("dispatchAutoApprove merges extraCommands into the allowlist for allowlist/classifier policies", () => {
+  // code mode (allowlist policy) should merge extra commands
+  const codeAa = dispatchAutoApprove(profileFor("code"), ["docker ", "make "]);
+  assert.ok(codeAa.allowedCommands.includes("npm "), "should include SAFE_COMMANDS");
+  assert.ok(codeAa.allowedCommands.includes("git "), "should include SAFE_COMMANDS");
+  assert.ok(codeAa.allowedCommands.includes("docker "), "should include extra command");
+  assert.ok(codeAa.allowedCommands.includes("make "), "should include extra command");
+
+  // advanced mode (classifier policy) should also merge extra commands
+  const advancedAa = dispatchAutoApprove(profileFor("advanced"), ["docker ", "make "]);
+  assert.ok(advancedAa.allowedCommands.includes("npm "), "should include SAFE_COMMANDS");
+  assert.ok(advancedAa.allowedCommands.includes("docker "), "should include extra command");
+  assert.ok(advancedAa.allowedCommands.includes("make "), "should include extra command");
+});
+
+test("dispatchAutoApprove ignores extraCommands for 'none' policy", () => {
+  // ask mode (none policy) should ignore extra commands and return empty list
+  const askAa = dispatchAutoApprove(profileFor("ask"), ["docker ", "make "]);
+  assert.deepEqual(askAa.allowedCommands, [], "none policy should return empty list regardless of extraCommands");
+});
+
+test("dispatchAutoApprove ignores extraCommands for 'auto' policy", () => {
+  // auto policy should ignore extra commands and return ["*"]
+  const autoProfile = { ...profileFor("code"), commandPolicy: "auto" as const };
+  const autoAa = dispatchAutoApprove(autoProfile, ["docker ", "make "]);
+  assert.deepEqual(autoAa.allowedCommands, ["*"], "auto policy should return ['*'] regardless of extraCommands");
+});

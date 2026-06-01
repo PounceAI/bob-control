@@ -166,12 +166,20 @@ const WORKFLOW_AUTO_APPROVE = {
  * commandPolicy, and the always-on workflow toggles. allowlist and classifier share
  * the SAFE_COMMANDS fast-path — the difference is what handles the gray zone (a human
  * prompt vs the Claude classifier), which happens Bob-side, not in this config.
+ *
+ * @param profile - The mode profile containing the command policy
+ * @param extraCommands - Additional command prefixes to merge into the allowlist (from --allow-commands)
  */
 export function dispatchAutoApprove(
   profile: ModeProfile,
+  extraCommands: string[] = [],
 ): ModeProfile["autoApprove"] & { allowedCommands: string[] } & typeof WORKFLOW_AUTO_APPROVE {
-  const allowedCommands =
+  const baseCommands =
     profile.commandPolicy === "auto" ? ["*"] : profile.commandPolicy === "none" ? [] : SAFE_COMMANDS;
+  // Merge extra commands into the base allowlist (on top of SAFE_COMMANDS for allowlist/classifier policies)
+  const allowedCommands = profile.commandPolicy === "none" || profile.commandPolicy === "auto"
+    ? baseCommands
+    : [...baseCommands, ...extraCommands];
   return { ...profile.autoApprove, allowedCommands, ...WORKFLOW_AUTO_APPROVE };
 }
 

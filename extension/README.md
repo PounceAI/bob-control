@@ -16,6 +16,8 @@ The Bob Tasks extension runs the project's `dist/worker.js` to automatically cla
 
 All settings are under the `bobTasks.*` namespace:
 
+### Core Settings
+
 - **`bobTasks.projectRoot`** — Path to the IBM Bob Connector project (containing `dist/worker.js`). Empty = the first workspace folder.
 - **`bobTasks.nodePath`** — Node executable used to run the worker. Must be Node >= 22.5 (for `node:sqlite`). Set an absolute path if `node` on PATH is older.
 - **`bobTasks.dbPath`** — SQLite task DB (`BOB_TASKS_DB`). Empty = the project's `data/tasks.db`. Must match the MCP server's DB.
@@ -24,12 +26,41 @@ All settings are under the `bobTasks.*` namespace:
 - **`bobTasks.pollMs`** — Idle poll interval (ms). Default: `3000`.
 - **`bobTasks.timeoutMs`** — Per-task dispatch timeout (ms). Default: `300000` (5 minutes).
 - **`bobTasks.assignee`** — Assignee recorded when the worker claims a task. Default: `bob`.
+- **`bobTasks.tag`** — Only process tasks with this tag. Empty = all tasks.
 - **`bobTasks.autoStart`** — Start the worker automatically when Bob launches. Default: `false`.
+
+### UI Settings
+
 - **`bobTasks.notify.enabled`** — Show a notification when a task finishes. Default: `true`.
 - **`bobTasks.dispatch.surface`** — Where dispatched tasks render. `sidebar` = quiet same-tab in the IBM BOB chat; `newTab` = isolated editor tab (steals focus). Default: `sidebar`.
 - **`bobTasks.dispatch.bringToFront`** — On each dispatch, bring the IBM BOB view to the front (opt-in re-focus). Off = quiet, no window jump. Default: `false`.
+
+### Defer-While-Chatting
+
 - **`bobTasks.deferWhileChatting`** — Pause auto-dispatch while you are actively chatting with Bob, so the worker never aborts your live chat. Resumes when the chat goes idle. Default: `true`.
 - **`bobTasks.deferIdleMs`** — How long Bob's chat must be idle (ms) before the worker resumes dispatching. Default: `60000` (1 minute).
+
+### Command Classifier & Followup Answerer
+
+- **`bobTasks.commandClassifier`** — Let Claude approve/deny commands that fall outside the safe allowlist (instead of Bob's manual prompt) for code, orchestrator, and advanced modes. Requires the Bob button patch (`tools/patch-bob-buttons.mjs`). Default: `false`.
+- **`bobTasks.answerFollowups`** — Let Claude answer Bob's followup questions during a task (sending the reply over IPC), escalating to you when it's unsure. Off = questions wait for you. Default: `false`.
+- **`bobTasks.escalateAll`** — Escalate ALL followup questions to you for review (including plan approvals), instead of auto-answering. Only applies when `answerFollowups` is on. Default: `false`.
+- **`bobTasks.reviewPlans`** — Escalate plan/design-approval questions to you for review, while auto-answering mechanical clarifications (file paths, flag names, etc.). Only applies when `answerFollowups` is on. Takes precedence over `escalateAll` when both are on. Default: `false`.
+- **`bobTasks.classifierBackend`** — How the command classifier reaches Claude. Options: `cli` (run the installed `claude` CLI headless), `api` (one raw Anthropic API call). Default: `cli`.
+- **`bobTasks.classifierModel`** — Model the command classifier uses. Empty = per-backend default (`cli`→`claude-sonnet-4-6`, `api`→`claude-haiku-4-5`).
+- **`bobTasks.classifierCliPath`** — Path to the `claude` executable for the cli backend. Empty = resolve `claude` on PATH.
+
+### Verify-and-Continue
+
+- **`bobTasks.verifyAndContinue`** — After Bob completes a task, run an acceptance check and loop back to Bob to fix issues until it passes or `maxContinues` is reached. Catches broken builds/tests without human intervention. Default: `false`.
+- **`bobTasks.verifyCommand`** — Command to run for acceptance checks when `verifyAndContinue` is on. Empty = use built-in heuristics (git working-tree check). Exit code 0 = pass, non-zero = fail.
+- **`bobTasks.maxContinues`** — Maximum number of fix loops when `verifyAndContinue` is on. After this many attempts, the task is marked as failed. Default: `3`.
+- **`bobTasks.detectPlanStop`** — Check if Bob did real work (git working-tree changed) after completion. If the tree is clean (plan-only, no code written), auto-continue asking Bob to implement the plan. Default: `false`.
+
+### Retry & Command Allowlist
+
+- **`bobTasks.maxRetryAttempts`** — Auto-retry transient failures (timeout/abort) up to this many total attempts. `0` = no retries. Default: `0`.
+- **`bobTasks.allowCommands`** — Comma-separated command prefixes to extend the safe allowlist for advanced mode (e.g., `git,npm test`). Empty = use built-in allowlist only.
 
 ## Commands
 

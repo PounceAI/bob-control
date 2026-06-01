@@ -3,6 +3,17 @@ import type { Task, TaskNote, TaskStatus } from "./types.js";
 // An in_progress task whose updated_at is older than this is flagged as stalled.
 const STALLED_MS = 30 * 60_000;
 
+// Estimated cost per classifier decision (approve/deny) in USD
+const CLASSIFIER_COST_PER_DECISION = 0.10;
+
+interface AuditCounts {
+  classifierApprove: number;
+  classifierDeny: number;
+  answererAnswer: number;
+  answererEscalate: number;
+  humanAnswer: number;
+}
+
 // Status groups in display order: most actionable first.
 const GROUP_ORDER: TaskStatus[] = ["in_progress", "blocked", "pending", "done", "cancelled"];
 
@@ -24,6 +35,66 @@ export interface ReportOptions {
 }
 
 /**
+ * Count autonomous-decision activity from a task's notes. Pure function that
+ * analyzes note authors and content to extract classifier, answerer, and human
+ * answer-back activity.
+ */
+function countAuditActivity(notes: TaskNote[]): AuditCounts {
+  const counts: AuditCounts = {
+    classifierApprove: 0,
+    classifierDeny: 0,
+    answererAnswer: 0,
+    answererEscalate: 0,
+    humanAnswer: 0,
+  };
+
+  for (const note of notes) {
+    if (note.author === "classifier") {
+      // Classifier notes contain "approve" or "deny" in the text
+      if (/\bapprove\b/i.test(note.note)) {
+        counts.classifierApprove++;
+      } else if (/\bdeny\b/i.test(note.note)) {
+        counts.classifierDeny++;
+      }
+    } else if (note.author === "answerer") {
+      // Answerer notes: "Answered" = auto-answer, "escalated" = escalation
+      if (/\bAnswered\b/.test(note.note)) {
+        counts.answererAnswer++;
+      } else if (/\bescalated\b/i.test(note.note)) {
+        counts.answererEscalate++;
+      }
+    } else if (note.author === "human") {
+      // Human answer-back notes
+      counts.humanAnswer++;
+    }
+  }
+
+  return counts;
+}
+
+/**
+ * Format audit counts into a compact one-line summary. Returns empty string if
+ * no autonomous activity occurred.
+ */
+function formatAuditSummary(counts: AuditCounts): string {
+  const parts: string[] = [];
+
+  if (counts.classifierApprove > 0 || counts.classifierDeny > 0) {
+    parts.push(`classifier: ${counts.classifierApprove}✓/${counts.classifierDeny}✗`);
+  }
+
+  if (counts.answererAnswer > 0 || counts.answererEscalate > 0) {
+    parts.push(`answerer: ${counts.answererAnswer}✓/${counts.answererEscalate}⤴`);
+  }
+
+  if (counts.humanAnswer > 0) {
+    parts.push(`human: ${counts.humanAnswer}✓`);
+  }
+
+  return parts.length > 0 ? ` [${parts.join(", ")}]` : "";
+}
+
+/**
  * Render the board as a markdown standup/audit. Pure: pass `now` (epoch ms) and the
  * data — no DB or IO — so the output is deterministic and unit-testable. `tasks` is
  * assumed to already be in pull order (priority desc, then oldest), as
@@ -40,6 +111,16 @@ export function buildReport(
 
   const out: string[] = ["# Board report", ""];
   let total = 0;
+
+  // Accumulate board-level audit totals
+  const boardAudit: AuditCounts = {
+    classifierApprove: 0,
+    classifierDeny: 0,
+    answererAnswer: 0,
+    answererEscalate: 0,
+    humanAnswer: 0,
+  };
+
   for (const status of groups) {
     const inGroup = tasks.filter((t) => t.status === status);
     total += inGroup.length;
@@ -53,21 +134,50 @@ export function buildReport(
     const isTerminal = status === "done" || status === "cancelled";
     const cap = isTerminal && opts.limit && inGroup.length > opts.limit ? opts.limit : undefined;
     const shown = cap ? inGroup.slice(0, cap) : inGroup;
-    for (const t of shown) out.push(taskLine(t, notesByTask.get(t.id) ?? [], now, stalledMs));
+    for (const t of shown) {
+      const notes = notesByTask.get(t.id) ?? [];
+      const audit = countAuditActivity(notes);
+      // Accumulate into board totals
+      boardAudit.classifierApprove += audit.classifierApprove;
+      boardAudit.classifierDeny += audit.classifierDeny;
+      boardAudit.answererAnswer += audit.answererAnswer;
+      boardAudit.answererEscalate += audit.answererEscalate;
+      boardAudit.humanAnswer += audit.humanAnswer;
+      out.push(taskLine(t, notes, now, stalledMs, audit));
+    }
     if (cap) out.push(`_… and ${inGroup.length - cap} more_`);
     out.push("");
   }
+
+  // Add board-level audit summary if there's any autonomous activity
+  const totalDecisions = boardAudit.classifierApprove + boardAudit.classifierDeny;
+  if (totalDecisions > 0 || boardAudit.answererAnswer > 0 || boardAudit.answererEscalate > 0 || boardAudit.humanAnswer > 0) {
+    out.push("## Autonomous Activity Summary", "");
+    if (totalDecisions > 0) {
+      const estimatedCost = (totalDecisions * CLASSIFIER_COST_PER_DECISION).toFixed(2);
+      out.push(`- **Classifier**: ${boardAudit.classifierApprove} approved, ${boardAudit.classifierDeny} denied (~$${estimatedCost} estimated)`);
+    }
+    if (boardAudit.answererAnswer > 0 || boardAudit.answererEscalate > 0) {
+      out.push(`- **Answerer**: ${boardAudit.answererAnswer} answered, ${boardAudit.answererEscalate} escalated`);
+    }
+    if (boardAudit.humanAnswer > 0) {
+      out.push(`- **Human**: ${boardAudit.humanAnswer} answer${boardAudit.humanAnswer === 1 ? "" : "s"}`);
+    }
+    out.push("");
+  }
+
   out.push(`_${total} task${total === 1 ? "" : "s"} · generated ${new Date(now).toISOString()}_`);
   return out.join("\n");
 }
 
-function taskLine(t: Task, notes: TaskNote[], now: number, stalledMs: number): string {
+function taskLine(t: Task, notes: TaskNote[], now: number, stalledMs: number, audit?: AuditCounts): string {
   const meta = [t.priority, t.assignee && `@${t.assignee}`, t.mode && `{${t.mode}}`].filter(Boolean).join(" ");
   const idleMs = now - Date.parse(t.updated_at);
   const stalled = t.status === "in_progress" && idleMs >= stalledMs ? " ⚠ stalled" : "";
   const last = notes.at(-1);
   const note = last ? ` — ${last.author ? `${last.author}: ` : ""}${oneLine(last.note)}` : "";
-  return `- **#${t.id}** ${t.title} (${meta}) · age ${humanize(now - Date.parse(t.created_at))} · idle ${humanize(idleMs)}${stalled}${note}`;
+  const auditSummary = audit ? formatAuditSummary(audit) : "";
+  return `- **#${t.id}** ${t.title} (${meta}) · age ${humanize(now - Date.parse(t.created_at))} · idle ${humanize(idleMs)}${stalled}${auditSummary}${note}`;
 }
 
 /** Coarse duration: seconds, minutes, hours, or days. Clamps negatives/NaN to 0. */

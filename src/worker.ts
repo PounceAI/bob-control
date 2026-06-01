@@ -97,6 +97,7 @@ interface Opts {
   detectPlanStop: boolean;
   retry: boolean;
   maxRetryAttempts: number;
+  allowCommands: string[];
 }
 
 function parseOpts(argv: string[]): Opts {
@@ -126,6 +127,11 @@ function parseOpts(argv: string[]): Opts {
   const surface = val("--surface");
   const newTab = has("--new-tab") || surface === "newTab";
   const maxRetryAttempts = num("--retry", 0);
+  // Parse --allow-commands: comma-separated prefixes to extend the allowlist.
+  const allowCommandsStr = val("--allow-commands");
+  const allowCommands = allowCommandsStr
+    ? allowCommandsStr.split(",").map((s) => s.trim()).filter((s) => s.length > 0)
+    : [];
   return {
     once: has("--once"),
     newTab,
@@ -154,6 +160,7 @@ function parseOpts(argv: string[]): Opts {
     detectPlanStop: has("--detect-plan-stop"),
     retry: maxRetryAttempts > 0,
     maxRetryAttempts,
+    allowCommands,
   };
 }
 
@@ -314,7 +321,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
       return await client.dispatch({
         text,
         mode,
-        config: dispatchAutoApprove(profile),
+        config: dispatchAutoApprove(profile, opts.allowCommands),
         newTab: opts.newTab,
         timeoutMs: opts.timeoutMs,
         onEvent: (name, { say, ask, text, partial }) => {
