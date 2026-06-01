@@ -2,7 +2,7 @@
 import "./suppress-warnings.js";
 import * as repo from "./db.js";
 import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, type Risk } from "./modes.js";
-import { classifyCommand } from "./classify.js";
+import { createCommandGate } from "./command-gate.js";
 import { BobClient, resolvePipe } from "./bob-ipc.js";
 import { ExternalActivity } from "./defer.js";
 import { notify } from "./notify.js";
@@ -148,8 +148,19 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   // The api backend can't run without a key; the cli backend reuses Claude's login.
   const classifierBlocked = opts.classifierBackend === "api" && !apiKey;
-  const handledAsks = new Set<string>();
-  let warnedNoKey = false;
+  const commandGate = createCommandGate({
+    enabled: classifierOn,
+    blocked: classifierBlocked,
+    backend: opts.classifierBackend,
+    model: opts.classifierModel,
+    apiKey,
+    cliPath: opts.classifierCli,
+    task: { id: task.id, title: task.title },
+    cwd: process.cwd(),
+    client: { approve: () => client.approve(), reject: () => client.reject() },
+    addNote: repo.addNote,
+    log: (m) => console.log(m),
+  });
 
   let lastSay = "";
   const res = await client.dispatch({
@@ -165,41 +176,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
         console.log(`  · ${name}/${say}${t ? `: ${t}` : ""}`);
       }
 
-      if (!classifierOn || partial) return;
-      if (ask !== "command" && ask !== "command_security_warning") return;
-      const command = (text ?? "").trim();
-      if (!command || handledAsks.has(command)) return;
-      handledAsks.add(command);
-
-      if (classifierBlocked) {
-        if (!warnedNoKey) {
-          console.log("  ⚠ classifier=api but ANTHROPIC_API_KEY unset — leaving command for a human.");
-          warnedNoKey = true;
-        }
-        return;
-      }
-      const short = command.replace(/\s+/g, " ").slice(0, 60);
-      console.log(`  ⟲ classifying command (${opts.classifierBackend}): ${short}`);
-      void classifyCommand(
-        command,
-        { task: task.title, cwd: process.cwd() },
-        {
-          backend: opts.classifierBackend,
-          model: opts.classifierModel,
-          apiKey,
-          cliPath: opts.classifierCli,
-        },
-      )
-        .then(({ decision, reason }) => {
-          if (decision === "approve") {
-            client.approve();
-            console.log(`  ✓ classifier approved (${reason})`);
-          } else {
-            client.reject();
-            console.log(`  ⛔ classifier ${decision === "deny" ? "denied" : "deferred→rejected"} (${reason})`);
-          }
-          repo.addNote(task.id, `Classifier ${decision} for \`${short}\`: ${reason}`, "classifier");
-        });
+      void commandGate({ ask, text, partial });
     },
   });
 
