@@ -108,6 +108,13 @@ test("ignores empty command text", async () => {
   assert.equal(h.classifyArgs.length, 0);
 });
 
+test("ignores whitespace-only command (tabs and newlines)", async () => {
+  const h = harness();
+  await h.gate(cmd("\t\n  "));
+  assert.equal(h.classifyArgs.length, 0);
+  assert.deepEqual(h.calls, { approve: 0, reject: 0 });
+});
+
 test("blocked (api, no key) warns exactly once and never classifies", async () => {
   const h = harness({ blocked: true, backend: "api" });
   await h.gate(cmd("npm test"));

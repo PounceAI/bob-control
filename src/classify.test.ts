@@ -72,6 +72,21 @@ test("classifyCommand returns the model's parsed decision on success", async () 
   assert.deepEqual(r, { decision: "approve", reason: "safe build" });
 });
 
+test("api backend fails safe to 'ask' when AbortController timeout fires", async () => {
+  const fetchImpl = (async (_url: string, init: any) => {
+    // Simulate a fetch that never resolves before the abort signal fires
+    return new Promise((resolve, reject) => {
+      init.signal.addEventListener("abort", () => {
+        reject(new Error("The operation was aborted"));
+      });
+      // Never resolve, let the timeout trigger abort
+    });
+  }) as unknown as typeof fetch;
+  const r = await classifyCommand("npm test", { task: "t", cwd: "/repo" }, { apiKey: "k", fetchImpl, timeoutMs: 10 });
+  assert.equal(r.decision, "ask");
+  assert.match(r.reason, /aborted/);
+});
+
 test("cli backend unwraps the claude --output-format json envelope", async () => {
   const envelope = JSON.stringify({ type: "result", result: '{"decision":"approve","reason":"runs tests"}' });
   const r = await classifyCommand(
@@ -156,6 +171,22 @@ test("cli backend rejects an invalid model name without spawning", async () => {
   assert.equal(spawned, false);
   assert.equal(r.decision, "ask");
   assert.match(r.reason, /invalid model name/);
+});
+
+test("cli backend rejects an invalid cli path without spawning", async () => {
+  let spawned = false;
+  const spawnImpl = (() => {
+    spawned = true;
+    throw new Error("should not be called");
+  }) as any;
+  const r = await classifyCommand(
+    "npm test",
+    { task: "t", cwd: "/repo" },
+    { backend: "cli", cliPath: "bad;path&cmd", spawnImpl },
+  );
+  assert.equal(spawned, false);
+  assert.equal(r.decision, "ask");
+  assert.match(r.reason, /invalid cli path/);
 });
 
 test("cli backend fails safe to 'ask' when spawn throws synchronously", async () => {

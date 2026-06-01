@@ -136,6 +136,7 @@ export async function classifyViaCli(
   const cli = deps.cliPath ?? "claude";
   const model = deps.model ?? "claude-sonnet-4-6";
   if (!/^[a-z0-9.\-]+$/i.test(model)) return { decision: "ask", reason: "invalid model name" };
+  if (!/^[a-z0-9 .\-_\\/:]+$/i.test(cli)) return { decision: "ask", reason: "invalid cli path" };
   const argv = ["-p", "--model", model, "--output-format", "json", "--disallowed-tools", "Bash", "Write", "Edit", "NotebookEdit"];
   return new Promise<Classification>((resolve) => {
     let done = false;
