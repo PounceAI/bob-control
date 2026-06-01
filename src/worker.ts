@@ -124,15 +124,47 @@ function parseOpts(argv: string[]): Opts {
 }
 
 /**
- * Highest-priority pending task whose mode's risk is at or below the gate.
- * Returns the task plus a count of pending tasks skipped because they exceed it.
+ * Check if a task's dependencies are all satisfied (all must be 'done').
+ * Returns null if satisfied, or a description of blocking dependencies if not.
  */
-function pickEligible(opts: Opts): { task: Task | null; gated: number } {
+function checkDependencies(task: Task): string | null {
+  if (!task.depends_on.length) return null;
+
+  const blocking: string[] = [];
+  for (const depId of task.depends_on) {
+    const dep = repo.getTask(depId);
+    if (!dep) {
+      blocking.push(`#${depId}[missing]`);
+    } else if (dep.status !== "done") {
+      blocking.push(`#${depId}[${dep.status}]`);
+    }
+  }
+
+  return blocking.length ? blocking.join(", ") : null;
+}
+
+/**
+ * Highest-priority pending task whose mode's risk is at or below the gate
+ * and whose dependencies are all satisfied.
+ * Returns the task plus counts of tasks skipped due to risk gate or blocked dependencies.
+ */
+function pickEligible(opts: Opts): { task: Task | null; gated: number; blocked: number } {
   const max = RISK_RANK[opts.maxRisk];
   const pending = repo.listTasks({ status: "pending", tag: opts.tag });
   let gated = 0;
+  let blocked = 0;
   let task: Task | null = null;
+
   for (const t of pending) {
+    // Check dependencies first
+    const depBlock = checkDependencies(t);
+    if (depBlock) {
+      console.log(`  skipping #${t.id} (blocked on ${depBlock})`);
+      blocked++;
+      continue;
+    }
+
+    // Then check risk gate
     const { mode } = resolveMode(t);
     if (RISK_RANK[profileFor(mode).risk] <= max) {
       task = t;
@@ -140,7 +172,8 @@ function pickEligible(opts: Opts): { task: Task | null; gated: number } {
     }
     gated++;
   }
-  return { task, gated };
+
+  return { task, gated, blocked };
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -381,19 +414,23 @@ async function main(): Promise<void> {
       deferring = false;
     }
 
-    const { task, gated } = pickEligible(opts);
+    const { task, gated, blocked } = pickEligible(opts);
     if (!task) {
       const gatedMsg =
         gated > 0
           ? ` (${gated} pending task${gated > 1 ? "s" : ""} gated above --max-risk ${opts.maxRisk} — dispatch manually)`
           : "";
+      const blockedMsg =
+        blocked > 0
+          ? ` (${blocked} pending task${blocked > 1 ? "s" : ""} blocked on dependencies)`
+          : "";
       if (opts.once) {
-        console.log(`bob-worker: no eligible pending tasks — exiting (--once)${gatedMsg}.`);
+        console.log(`bob-worker: no eligible pending tasks — exiting (--once)${gatedMsg}${blockedMsg}.`);
         break;
       }
       if (!idled) {
-        console.log(`bob-worker: no eligible tasks — idle-polling every ${opts.pollMs}ms${gatedMsg}. (Ctrl-C to stop)`);
-        emit(opts, "idle", { gated });
+        console.log(`bob-worker: no eligible tasks — idle-polling every ${opts.pollMs}ms${gatedMsg}${blockedMsg}. (Ctrl-C to stop)`);
+        emit(opts, "idle", { gated, blocked });
         idled = true;
       }
       await sleep(opts.pollMs);

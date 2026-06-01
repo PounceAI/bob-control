@@ -71,6 +71,7 @@ function migrate(d: DatabaseSync): void {
 
   // node:sqlite has no "ADD COLUMN IF NOT EXISTS", so probe and add what's missing.
   addColumnIfMissing(d, "tasks", "mode", "TEXT");
+  addColumnIfMissing(d, "tasks", "depends_on", "TEXT");
 }
 
 function addColumnIfMissing(
@@ -106,6 +107,74 @@ function parseTags(raw: unknown): string[] {
   }
 }
 
+// Dependencies are a JSON array of task IDs; tolerate malformed/legacy values instead of throwing.
+function parseDependsOn(raw: unknown): number[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(String(raw));
+    return Array.isArray(parsed) ? (parsed as number[]).filter((id) => Number.isInteger(id)) : [];
+  } catch {
+    return [];
+  }
+}
+
+// Detect cycles in task dependencies using DFS. Returns an error message if a cycle is found, null otherwise.
+function detectCycle(d: DatabaseSync, taskId: number, newDeps: number[]): string | null {
+  // Self-dependency is a cycle
+  if (newDeps.includes(taskId)) {
+    return `Task #${taskId} cannot depend on itself`;
+  }
+
+  // Build a dependency graph including the proposed change
+  const graph = new Map<number, number[]>();
+  const rows = d.prepare("SELECT id, depends_on FROM tasks").all() as Array<{ id: number; depends_on: unknown }>;
+  for (const row of rows) {
+    const deps = row.id === taskId ? newDeps : parseDependsOn(row.depends_on);
+    graph.set(Number(row.id), deps);
+  }
+
+  // DFS to detect cycles starting from any dependency of taskId
+  const visited = new Set<number>();
+  const recStack = new Set<number>();
+
+  function hasCycle(node: number): number[] | null {
+    if (recStack.has(node)) {
+      // Found a cycle - return the path
+      return [node];
+    }
+    if (visited.has(node)) return null;
+
+    visited.add(node);
+    recStack.add(node);
+
+    const deps = graph.get(node) ?? [];
+    for (const dep of deps) {
+      const cyclePath = hasCycle(dep);
+      if (cyclePath) {
+        cyclePath.unshift(node);
+        return cyclePath;
+      }
+    }
+
+    recStack.delete(node);
+    return null;
+  }
+
+  // Check if adding these dependencies would create a cycle
+  for (const dep of newDeps) {
+    visited.clear();
+    recStack.clear();
+    recStack.add(taskId); // Start with taskId in the recursion stack
+    const cyclePath = hasCycle(dep);
+    if (cyclePath) {
+      cyclePath.unshift(taskId);
+      return `Dependency cycle detected: ${cyclePath.map((id) => `#${id}`).join(" → ")}`;
+    }
+  }
+
+  return null;
+}
+
 // node:sqlite returns plain row objects; map them to our typed shape.
 function rowToTask(r: Record<string, unknown>): Task {
   return {
@@ -120,6 +189,7 @@ function rowToTask(r: Record<string, unknown>): Task {
     result: (r.result as string) ?? null,
     created_at: String(r.created_at),
     updated_at: String(r.updated_at),
+    depends_on: parseDependsOn(r.depends_on),
   };
 }
 
@@ -144,15 +214,26 @@ export interface CreateTaskInput {
   tags?: string[];
   /** Bob mode slug, or null/undefined to let the dispatcher auto-route. */
   mode?: string | null;
+  /** Task IDs this task depends on. */
+  depends_on?: number[];
 }
 
 export function createTask(input: CreateTaskInput): Task {
   const d = getDb();
+  const deps = input.depends_on ?? [];
+
+  // Validate dependencies and check for cycles
+  for (const depId of deps) {
+    if (!getTask(depId)) {
+      throw new Error(`Cannot create task: dependency #${depId} does not exist`);
+    }
+  }
+
   const now = nowIso();
   const info = d
     .prepare(
-      `INSERT INTO tasks (title, description, status, priority, tags, mode, created_at, updated_at)
-       VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (title, description, status, priority, tags, mode, depends_on, created_at, updated_at)
+       VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       input.title,
@@ -160,10 +241,48 @@ export function createTask(input: CreateTaskInput): Task {
       input.priority ?? "medium",
       JSON.stringify(input.tags ?? []),
       input.mode ?? null,
+      JSON.stringify(deps),
       now,
       now,
     );
-  return getTask(Number(info.lastInsertRowid))!;
+
+  const taskId = Number(info.lastInsertRowid);
+
+  // Check for cycles after creation (self-dependency is caught here)
+  const cycleError = detectCycle(d, taskId, deps);
+  if (cycleError) {
+    // Rollback by deleting the task
+    d.prepare("DELETE FROM tasks WHERE id = ?").run(taskId);
+    throw new Error(cycleError);
+  }
+
+  return getTask(taskId)!;
+}
+
+/** Set (or clear) a task's dependencies. Empty array clears all dependencies. */
+export function setDependencies(id: number, depends_on: number[]): Task | null {
+  const task = getTask(id);
+  if (!task) return null;
+
+  const d = getDb();
+
+  // Validate dependencies exist
+  for (const depId of depends_on) {
+    if (!getTask(depId)) {
+      throw new Error(`Cannot set dependencies: task #${depId} does not exist`);
+    }
+  }
+
+  // Check for cycles before committing
+  const cycleError = detectCycle(d, id, depends_on);
+  if (cycleError) {
+    throw new Error(cycleError);
+  }
+
+  d.prepare("UPDATE tasks SET depends_on = ?, updated_at = ? WHERE id = ?")
+    .run(JSON.stringify(depends_on), nowIso(), id);
+
+  return getTask(id);
 }
 
 /** Set (or clear) a task's mode slug. */

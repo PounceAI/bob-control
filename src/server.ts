@@ -61,10 +61,19 @@ server.registerTool(
         .describe(
           "Bob mode to run this task in: 'code' | 'advanced' (adds MCP/Browser) | 'ask' (read-only) | 'orchestrator', or a custom mode slug. Omit to let the dispatcher auto-route from the task content.",
         ),
+      depends_on: z
+        .array(z.number().int())
+        .optional()
+        .describe("Task IDs this task depends on (all must be 'done' before this task is eligible)"),
     },
   },
-  async ({ title, description, priority, tags, mode }) =>
-    json(repo.createTask({ title, description, priority, tags, mode })),
+  async ({ title, description, priority, tags, mode, depends_on }) => {
+    try {
+      return json(repo.createTask({ title, description, priority, tags, mode, depends_on }));
+    } catch (err) {
+      return fail((err as Error).message);
+    }
+  },
 );
 
 // ---------------------------------------------------------------------------
@@ -215,6 +224,30 @@ server.registerTool(
     const task = repo.setMode(id, mode.trim() ? mode.trim() : null);
     if (!task) return fail(`Task ${id} not found`);
     return json(task);
+  },
+);
+
+server.registerTool(
+  "set_task_dependencies",
+  {
+    title: "Set Task Dependencies",
+    description:
+      "Set or clear a task's dependencies. All dependencies must be 'done' before the task is eligible. Pass an empty array to clear dependencies.",
+    inputSchema: {
+      id: z.number().int().describe("Task id"),
+      depends_on: z
+        .array(z.number().int())
+        .describe("Task IDs this task depends on (empty array clears dependencies)"),
+    },
+  },
+  async ({ id, depends_on }) => {
+    try {
+      const task = repo.setDependencies(id, depends_on);
+      if (!task) return fail(`Task ${id} not found`);
+      return json(task);
+    } catch (err) {
+      return fail((err as Error).message);
+    }
   },
 );
 

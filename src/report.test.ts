@@ -18,6 +18,7 @@ function task(over: Partial<Task> & Pick<Task, "id" | "status">): Task {
     result: null,
     created_at: ago(60 * MIN),
     updated_at: ago(60 * MIN),
+    depends_on: [],
     ...over,
   };
 }
@@ -123,7 +124,7 @@ test("limit caps done and cancelled groups with 'more' line, never truncates act
     task({ id: 14, status: "cancelled" }),
   ];
   const md = buildReport(tasks, new Map(), NOW, { limit: 2 });
-  
+
   // Active groups (in_progress, blocked, pending) should show all tasks
   assert.match(md, /#1/);
   assert.match(md, /#2/);
@@ -132,23 +133,23 @@ test("limit caps done and cancelled groups with 'more' line, never truncates act
   assert.match(md, /#5/);
   assert.match(md, /#6/);
   assert.match(md, /#7/);
-  
+
   // Done group should show only first 2 tasks
   assert.match(md, /#8/);
   assert.match(md, /#9/);
   assert.doesNotMatch(md, /#10/);
   assert.doesNotMatch(md, /#11/);
-  
+
   // Cancelled group should show only first 2 tasks
   assert.match(md, /#12/);
   assert.match(md, /#13/);
   assert.doesNotMatch(md, /#14/);
-  
+
   // Check for 'more' lines
   const lines = md.split("\n");
   const doneSection = lines.slice(lines.indexOf("## Done (4)"));
   const cancelledSection = lines.slice(lines.indexOf("## Cancelled (3)"));
-  
+
   assert.ok(doneSection.some((l) => l.includes("… and 2 more")), "Done section should have '… and 2 more'");
   assert.ok(cancelledSection.some((l) => l.includes("… and 1 more")), "Cancelled section should have '… and 1 more'");
 });

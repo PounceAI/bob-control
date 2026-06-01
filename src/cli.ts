@@ -51,11 +51,27 @@ function str(v: string | boolean | undefined): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
-function fmtTask(t: Task): string {
+function fmtTask(t: Task, showBlocked = false): string {
   const tags = t.tags.length ? ` [${t.tags.join(", ")}]` : "";
   const who = t.assignee ? ` @${t.assignee}` : "";
   const mode = t.mode ? ` {${t.mode}}` : "";
-  return `#${t.id} (${t.priority}/${t.status})${who}${mode} ${t.title}${tags}`;
+  let blocked = "";
+
+  if (showBlocked && t.depends_on.length > 0) {
+    // Check which dependencies are blocking
+    const blockingDeps: number[] = [];
+    for (const depId of t.depends_on) {
+      const dep = repo.getTask(depId);
+      if (!dep || dep.status !== "done") {
+        blockingDeps.push(depId);
+      }
+    }
+    if (blockingDeps.length > 0) {
+      blocked = ` (blocked on ${blockingDeps.map((id) => `#${id}`).join(", ")})`;
+    }
+  }
+
+  return `#${t.id} (${t.priority}/${t.status})${who}${mode} ${t.title}${tags}${blocked}`;
 }
 
 function die(msg: string): never {
@@ -72,13 +88,14 @@ function requireId(positional: string[]): number {
 const HELP = `bob-tasks — provision tasks for IBM Bob
 
 Commands:
-  create <title> [--desc <text>] [--priority low|medium|high|urgent] [--tags a,b,c] [--mode <slug>] [--template <name>]
+  create <title> [--desc <text>] [--priority low|medium|high|urgent] [--tags a,b,c] [--mode <slug>] [--template <name>] [--depends-on <id,id,...>]
   templates                                list available task templates
   list [--status <status>] [--tag <tag>] [--limit <n>]
   show <id>
   claim <id> [--assignee <name>]
   status <id> <${TASK_STATUSES.join("|")}>
   mode <id> <slug>                         set the Bob mode for a task ('' to clear)
+  deps <id> <id,id,...>                    set task dependencies (empty string clears)
   route <id>                               show which mode the auto-router would pick
   next                                     show the next pending task the worker would pull, and its routed mode
   note <id> <text> [--author <name>]
@@ -108,6 +125,16 @@ function main(): void {
         .map((s) => s.trim())
         .filter(Boolean);
 
+      // Parse dependencies
+      const depsStr = str(flags["depends-on"]);
+      const depends_on = depsStr
+        ? depsStr.split(",").map((s) => {
+            const id = Number(s.trim());
+            if (!Number.isInteger(id)) die(`invalid dependency id '${s}' (must be an integer)`);
+            return id;
+          })
+        : undefined;
+
       // Template supplies defaults; explicit flags override.
       const tplName = str(flags.template);
       const tpl = tplName ? getTemplate(tplName) : undefined;
@@ -120,15 +147,21 @@ function main(): void {
         console.error(`warning: '${mode}' is not a built-in mode (${BUILT_IN_MODES.join(", ")}); using it as a custom mode slug`);
       }
       const tags = cliTags ?? tpl?.tags;
-      const task = repo.createTask({
-        title,
-        description:
-          str(flags.desc) ?? str(flags.description) ?? tpl?.scaffold(title) ?? null,
-        priority: (priority as Task["priority"] | undefined) ?? tpl?.priority,
-        tags,
-        mode: mode ?? null,
-      });
-      console.log(`created ${fmtTask(task)}`);
+
+      try {
+        const task = repo.createTask({
+          title,
+          description:
+            str(flags.desc) ?? str(flags.description) ?? tpl?.scaffold(title) ?? null,
+          priority: (priority as Task["priority"] | undefined) ?? tpl?.priority,
+          tags,
+          mode: mode ?? null,
+          depends_on,
+        });
+        console.log(`created ${fmtTask(task)}`);
+      } catch (err) {
+        die((err as Error).message);
+      }
       break;
     }
 
@@ -159,7 +192,9 @@ function main(): void {
         console.log("(no tasks)");
         break;
       }
-      for (const t of tasks) console.log(fmtTask(t));
+      // Show blocked status for pending tasks
+      const showBlocked = !status || status === "pending";
+      for (const t of tasks) console.log(fmtTask(t, showBlocked));
       break;
     }
 
@@ -204,6 +239,31 @@ function main(): void {
       break;
     }
 
+    case "deps": {
+      const id = requireId(positional);
+      const depsStr = positional[1] ?? "";
+      const depends_on = depsStr
+        ? depsStr.split(",").map((s) => {
+            const depId = Number(s.trim());
+            if (!Number.isInteger(depId)) die(`invalid dependency id '${s}' (must be an integer)`);
+            return depId;
+          })
+        : [];
+
+      try {
+        const task = repo.setDependencies(id, depends_on);
+        if (!task) die(`task ${id} not found`);
+        if (depends_on.length) {
+          console.log(`set dependencies [${depends_on.map((d) => `#${d}`).join(", ")}] on ${fmtTask(task)}`);
+        } else {
+          console.log(`cleared dependencies on ${fmtTask(task)}`);
+        }
+      } catch (err) {
+        die((err as Error).message);
+      }
+      break;
+    }
+
     case "route": {
       const id = requireId(positional);
       const task = repo.getTask(id);
@@ -220,7 +280,7 @@ function main(): void {
         break;
       }
       const { mode } = resolveMode(task);
-      console.log(`${fmtTask(task)} -> {${mode}}`);
+      console.log(`${fmtTask(task, true)} -> {${mode}}`);
       break;
     }
 

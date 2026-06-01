@@ -24,6 +24,8 @@ export interface Task {
   result: string | null;
   created_at: string;
   updated_at: string;
+  /** Task IDs this task depends on (must all be 'done' before this task is eligible). */
+  depends_on: number[];
 }
 
 export interface TaskNote {
