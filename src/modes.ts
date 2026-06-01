@@ -44,9 +44,7 @@ export interface ModeProfile {
   risk: Risk;
   commandPolicy: CommandPolicy;
   autoApprove: {
-    // Master switch. Roo/Bob treats every alwaysAllow* flag below as INERT unless
-    // this is true (it gates the whole auto-approve row), so an unattended dispatch
-    // MUST send it — otherwise Bob prompts for everything, even a file read.
+    // Master switch: Bob ignores every alwaysAllow* flag below unless this is true.
     autoApprovalEnabled: boolean;
     alwaysAllowReadOnly: boolean;
     alwaysAllowWrite: boolean;
@@ -64,6 +62,10 @@ export interface ModeProfile {
 // deniedCommands (which hard-*rejects* without asking) so risky commands pause for
 // a human (or, under the classifier policy, for Claude). A chained command (a && b)
 // auto-runs only if every part matches.
+// Arg-taking entries end in a space ("npm ") so they can't match a longer word.
+// `ls`/`dir`/`pwd`/`tsc` are bare because they're valid with no args; they over-match
+// (ls→lsof) but only read-only tools, and no destructive command shares their prefix
+// (pinned by the SAFE_COMMANDS test).
 export const SAFE_COMMANDS = [
   "npm ", "npx ", "pnpm ", "yarn ", "node ", "tsc",
   "git ", "ls", "dir", "pwd", "cat ", "type ", "echo ",
@@ -89,8 +91,7 @@ export const MODE_PROFILES: Record<string, ModeProfile> = {
     risk: "safe",
     commandPolicy: "none",
     autoApprove: {
-      // Master on so reads/MCP auto-run; write+execute stay false, so any attempted
-      // mutation still hits a prompt the unattended worker never approves => no writes.
+      // Master on for reads/MCP; write+execute false, so a mutation still prompts.
       autoApprovalEnabled: true,
       alwaysAllowReadOnly: true,
       alwaysAllowWrite: false,
@@ -123,13 +124,23 @@ export function profileFor(mode: string): ModeProfile {
 }
 
 /**
+ * True if any classifier-policy mode is within the risk gate. If none is, the
+ * classifier never fires (those tasks aren't dispatched) — the worker warns on this.
+ */
+export function classifierReachable(maxRisk: Risk): boolean {
+  const max = RISK_RANK[maxRisk];
+  return Object.values(MODE_PROFILES).some(
+    (p) => p.commandPolicy === "classifier" && RISK_RANK[p.risk] <= max,
+  );
+}
+
+/**
  * The autoApprove block sent to Bob on dispatch: the mode's bool toggles (incl. the
  * autoApprovalEnabled master switch) plus the allowedCommands list derived from its
  * commandPolicy. allowlist and classifier share the SAFE_COMMANDS fast-path — the
  * difference is what handles the gray zone (a human prompt vs the extension's Claude
  * classifier), which happens Bob-side, not in this config. alwaysApproveResubmit is
- * forced on so a transient API error auto-retries instead of stranding the unattended
- * task at a "retry?" prompt no one is there to answer.
+ * forced on so a transient API error retries instead of stalling at a "retry?" prompt.
  */
 export function dispatchAutoApprove(profile: ModeProfile): ModeProfile["autoApprove"] & {
   allowedCommands: string[];

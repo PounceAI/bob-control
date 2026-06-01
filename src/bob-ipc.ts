@@ -276,6 +276,7 @@ export class BobClient {
    * — without it Bob's IPC switch ignores these commandNames.
    */
   approve(): void {
+    if (!this.active) return; // no dispatch in flight — don't press a stray button
     this.send({
       type: "TaskCommand",
       origin: "client",
@@ -285,6 +286,7 @@ export class BobClient {
   }
 
   reject(): void {
+    if (!this.active) return; // no dispatch in flight — don't press a stray button
     this.send({
       type: "TaskCommand",
       origin: "client",

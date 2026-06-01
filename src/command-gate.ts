@@ -32,6 +32,12 @@ export interface GateDeps {
   client: GateClient;
   addNote: (taskId: number, note: string, author?: string) => void;
   log: (msg: string) => void;
+  /**
+   * True while this dispatch is still live. A slow (cli) verdict can land after the
+   * dispatch ended, where a press would hit the next task's prompt — checked before
+   * pressing. Defaults to always-active when omitted.
+   */
+  isActive?: () => boolean;
   /** Injectable for tests; defaults to the real classifier. */
   classify?: typeof classifyCommand;
 }
@@ -43,10 +49,15 @@ export interface GateDeps {
  * pressed (or immediately for events it ignores) — callers in the worker fire it
  * with `void`, while tests await it to observe the press.
  */
+// A cli "ask" with one of these reasons is a transport failure (binary missing,
+// not logged in, timeout), not the model judging — so it rejects EVERYTHING.
+const CLI_TRANSPORT_FAILURE = /^(cli |classifier timeout|invalid )/;
+
 export function createCommandGate(deps: GateDeps): (ev: GateEvent) => Promise<void> {
   const classify = deps.classify ?? classifyCommand;
   const handled = new Set<string>();
   let warnedNoKey = false;
+  let warnedCliFail = false;
 
   return function onCommandAsk(ev: GateEvent): Promise<void> {
     if (!deps.enabled || ev.partial) return Promise.resolve();
@@ -71,12 +82,23 @@ export function createCommandGate(deps: GateDeps): (ev: GateEvent) => Promise<vo
       { task: deps.task.title, cwd: deps.cwd },
       { backend: deps.backend, model: deps.model, apiKey: deps.apiKey, cliPath: deps.cliPath },
     ).then(({ decision, reason }) => {
+      // Dispatch ended mid-classify: drop the press (still record the verdict).
+      if (deps.isActive && !deps.isActive()) {
+        deps.log(`  ~ stale classifier ${decision} arrived after dispatch ended — not pressing (${reason})`);
+        deps.addNote(deps.task.id, `Classifier ${decision} for \`${short}\` (stale, not pressed): ${reason}`, "classifier");
+        return;
+      }
       if (decision === "approve") {
         deps.client.approve();
         deps.log(`  ✓ classifier approved (${reason})`);
       } else {
         deps.client.reject();
         deps.log(`  ⛔ classifier ${decision === "deny" ? "denied" : "deferred→rejected"} (${reason})`);
+        // Surface a failing cli backend once, so reject-everything isn't read as caution.
+        if (deps.backend === "cli" && !warnedCliFail && CLI_TRANSPORT_FAILURE.test(reason)) {
+          deps.log(`  ⚠ classifier cli backend is failing ("${reason}") — ALL gray-zone commands will be rejected. Check \`claude\` is installed and logged in.`);
+          warnedCliFail = true;
+        }
       }
       deps.addNote(deps.task.id, `Classifier ${decision} for \`${short}\`: ${reason}`, "classifier");
     });

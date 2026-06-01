@@ -1,12 +1,31 @@
 #!/usr/bin/env node
 import "./suppress-warnings.js";
 import * as repo from "./db.js";
-import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, type Risk } from "./modes.js";
+import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, MODE_PROFILES, classifierReachable, type Risk } from "./modes.js";
 import { createCommandGate } from "./command-gate.js";
 import { BobClient, resolvePipe } from "./bob-ipc.js";
 import { ExternalActivity } from "./defer.js";
 import { notify } from "./notify.js";
 import type { Task } from "./types.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+/**
+ * Best-effort check that tools/patch-bob-buttons.mjs is applied — without it Bob
+ * drops approve/reject presses and classified commands stall. null = can't locate
+ * the bundle (don't warn).
+ */
+function buttonPatchPresent(): boolean | null {
+  try {
+    const target = join(
+      process.env.LOCALAPPDATA ?? join(process.env.USERPROFILE ?? "", "AppData", "Local"),
+      "Programs", "IBM Bob", "resources", "app", "extensions", "bob-code", "dist", "extension.js",
+    );
+    return readFileSync(target, "utf8").includes('"PressPrimaryButton"');
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Auto-dispatch loop. Polls the task board for the highest-priority pending
@@ -58,6 +77,18 @@ function parseOpts(argv: string[]): Opts {
     return i !== -1 ? argv[i + 1] : undefined;
   };
   const has = (name: string): boolean => argv.includes(name);
+  // Numeric flag with a default; fail loud rather than coerce a bad value to NaN
+  // (NaN timeouts fire instantly and NaN comparisons are always false).
+  const num = (name: string, dflt: number): number => {
+    const v = val(name);
+    if (v === undefined) return dflt;
+    const n = Number(v);
+    if (!Number.isFinite(n)) {
+      console.error(`invalid ${name} '${v}' (expected a number)`);
+      process.exit(1);
+    }
+    return n;
+  };
   const maxRisk = (val("--max-risk") ?? "standard") as Risk;
   if (!(maxRisk in RISK_RANK)) {
     console.error(`invalid --max-risk '${maxRisk}' (use safe | standard | elevated)`);
@@ -72,8 +103,8 @@ function parseOpts(argv: string[]): Opts {
     dryRun: has("--dry-run"),
     notify: !has("--no-notify"),
     defer: !has("--no-defer"),
-    deferIdleMs: Number(val("--defer-idle") ?? 60_000),
-    deferStaleMs: Number(val("--defer-stale") ?? 5 * 60_000),
+    deferIdleMs: num("--defer-idle", 60_000),
+    deferStaleMs: num("--defer-stale", 5 * 60_000),
     commandClassifier: has("--command-classifier"),
     classifierBackend: val("--classifier-backend") === "api" ? "api" : "cli",
     classifierModel: val("--classifier-model"),
@@ -81,8 +112,8 @@ function parseOpts(argv: string[]): Opts {
     emitJson: has("--emit-json"),
     tag: val("--tag"),
     pipe: val("--pipe"),
-    pollMs: Number(val("--poll") ?? 3000),
-    timeoutMs: Number(val("--timeout") ?? 300_000),
+    pollMs: num("--poll", 3000),
+    timeoutMs: num("--timeout", 300_000),
     assignee: val("--assignee") ?? "bob",
     maxRisk,
   };
@@ -148,6 +179,8 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   // The api backend can't run without a key; the cli backend reuses Claude's login.
   const classifierBlocked = opts.classifierBackend === "api" && !apiKey;
+  // False once this dispatch settles, so a late verdict can't press the next task's prompt.
+  let dispatchActive = true;
   const commandGate = createCommandGate({
     enabled: classifierOn,
     blocked: classifierBlocked,
@@ -160,9 +193,14 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     client: { approve: () => client.approve(), reject: () => client.reject() },
     addNote: repo.addNote,
     log: (m) => console.log(m),
+    isActive: () => dispatchActive,
   });
 
   let lastSay = "";
+  // Last blocking ask Bob surfaced. The gate answers command asks; other types
+  // (followup, mistake_limit_reached, …) we deliberately don't auto-press — we just
+  // record the last one so a wedge is diagnosable instead of a silent timeout.
+  let lastAsk = "";
   const res = await client.dispatch({
     text: buildPrompt(task),
     mode,
@@ -176,9 +214,11 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
         console.log(`  · ${name}/${say}${t ? `: ${t}` : ""}`);
       }
 
+      if (ask && !partial) lastAsk = ask;
       void commandGate({ ask, text, partial });
     },
   });
+  dispatchActive = false;
 
   // Mark done only on a GENUINE completion: Bob fired taskCompleted, or it
   // emitted a real attempt_completion (completion_result). In some multi-step
@@ -208,7 +248,9 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     repo.updateStatus(task.id, "blocked");
     const lastText = res.lastText.trim().replace(/\s+/g, " ").slice(0, 140);
     const lastNote = lastText ? ` Last activity: ${lastText}` : "";
-    repo.addNote(task.id, `Dispatch ended as '${res.status}' with no completion_result.${lastNote}`, "worker");
+    // The unanswered ask is the usual cause of a no-progress timeout.
+    const askNote = lastAsk ? ` Last pending ask: '${lastAsk}'.` : "";
+    repo.addNote(task.id, `Dispatch ended as '${res.status}' with no completion_result.${askNote}${lastNote}`, "worker");
     console.log(`  ✗ ${res.status} — task marked blocked`);
     emit(opts, "taskFail", { id: task.id, title: task.title, status: res.status });
     if (opts.notify) notify(`Bob task #${task.id} ${res.status}`, task.title);
@@ -267,6 +309,24 @@ async function main(): Promise<void> {
           ? "ANTHROPIC_API_KEY set"
           : "NO API KEY — gray-zone commands wait for a human";
     console.log(`bob-worker: command classifier = on, backend=${be} (${opts.classifierModel ?? dflt}; ${auth}).`);
+    // Warn when the toggle looks on but can't actually fire (no reachable mode / no patch).
+    if (!classifierReachable(opts.maxRisk)) {
+      const names =
+        Object.entries(MODE_PROFILES)
+          .filter(([, p]) => p.commandPolicy === "classifier")
+          .map(([slug]) => slug)
+          .join(", ") || "(none)";
+      console.log(
+        `bob-worker: ⚠ classifier will NOT engage at --max-risk ${opts.maxRisk}: ` +
+          `its only mode(s) [${names}] exceed the risk gate. Raise --max-risk to 'elevated' ` +
+          `(extension setting bobTasks.maxRisk) for the classifier to take effect.`,
+      );
+    } else if (buttonPatchPresent() === false) {
+      console.log(
+        "bob-worker: ⚠ Bob button patch NOT detected — approve/reject presses will be IGNORED " +
+          "and classified commands will stall. Run `node tools/patch-bob-buttons.mjs` and restart Bob.",
+      );
+    }
   }
   let idled = false;
   let deferring = false;

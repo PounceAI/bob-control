@@ -12,19 +12,23 @@
 import { DatabaseSync } from "node:sqlite";
 import { execSync } from "node:child_process";
 import { copyFileSync, existsSync } from "node:fs";
+// Same allowlist the worker sends per-dispatch, so global state can't drift from it.
+import { SAFE_COMMANDS } from "./dist/modes.js";
 
 const DB =
   "C:/Users/joshu/AppData/Roaming/IBM Bob/User/globalStorage/state.vscdb";
 
 // Roo/Bob globalState keys. Values are stored exactly as VS Code stores them:
-// JSON.stringify(value). Booleans -> "true", arrays -> '["*"]'.
+// JSON.stringify(value). Booleans -> "true", arrays -> '["npm ", ...]'.
 const SETTINGS = {
   autoApprovalEnabled: true,        // master switch for auto-approve
   alwaysAllowMcp: true,             // auto-approve MCP tool calls (bob-tasks)
   alwaysAllowReadOnly: true,        // auto-approve file reads
   alwaysAllowWrite: true,           // auto-approve in-workspace file writes
   alwaysAllowExecute: true,         // auto-approve terminal command execution
-  allowedCommands: ["*"],           // ...for ALL commands (needed for the verify step)
+  // The curated allowlist, NOT ["*"] — a wildcard would auto-run anything (rm -rf,
+  // shutdown) and bypass the gray-zone classifier.
+  allowedCommands: SAFE_COMMANDS,
   alwaysApproveResubmit: true,      // auto-retry on transient API errors
 };
 

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK } from "./modes.js";
+import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, classifierReachable } from "./modes.js";
 
 // The dispatcher's routing is the source of truth for "what mode Bob runs a task
 // in". These tests pin that behavior; the plugin command docs must match it
@@ -142,6 +142,29 @@ test("execute-capable profiles ship a curated allowlist that auto-runs safe comm
   const ask = dispatchAutoApprove(profileFor("ask"));
   assert.equal(ask.alwaysAllowExecute, false);
   assert.deepEqual(ask.allowedCommands, []);
+});
+
+test("classifierReachable: the classifier engages only when its mode is within the risk gate", () => {
+  // Only 'advanced' (risk:elevated) has commandPolicy 'classifier', so the classifier
+  // is inert until --max-risk reaches elevated. This pins the silent-no-op trap: the
+  // extension can enable the classifier while leaving maxRisk at its 'standard' default.
+  assert.equal(classifierReachable("safe"), false);
+  assert.equal(classifierReachable("standard"), false);
+  assert.equal(classifierReachable("elevated"), true);
+});
+
+test("bare SAFE_COMMANDS entries auto-run their forms, and no destructive command shares a bare prefix", () => {
+  const list = dispatchAutoApprove(profileFor("code")).allowedCommands;
+  // The intentionally-bare entries auto-run both bare and with args.
+  for (const ok of ["pwd", "ls", "ls -la", "dir", "dir /b", "tsc", "tsc -p ."]) {
+    assert.ok(isAllowed(ok, list), `${ok} should auto-run`);
+  }
+  // The accepted over-match: bare prefixes also match longer read-only utilities.
+  // That's tolerated ONLY because no destructive command starts with these prefixes —
+  // this assertion fails loudly if a future edit adds one (e.g. a 'rm'-like 'ls*').
+  for (const danger of ["rmdir /s /q .", "rm -rf ~", "del /f .", "deltree x", "diskpart", "format c:", "shutdown /r"]) {
+    assert.ok(!isAllowed(danger, list), `${danger} must NOT auto-run via a bare prefix`);
+  }
 });
 
 test("commandPolicy drives the derived allowedCommands", () => {

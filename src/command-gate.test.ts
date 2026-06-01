@@ -115,6 +115,40 @@ test("ignores whitespace-only command (tabs and newlines)", async () => {
   assert.deepEqual(h.calls, { approve: 0, reject: 0 });
 });
 
+test("a verdict that lands after the dispatch ends does not press a button", async () => {
+  // Simulate the dispatch settling between the ask and the classifier verdict.
+  let active = true;
+  const h = harness({ isActive: () => active }, { decision: "approve", reason: "safe" });
+  const pending = h.gate(cmd("npm test"));
+  active = false; // dispatch timed out / completed while classifying
+  await pending;
+  assert.deepEqual(h.calls, { approve: 0, reject: 0 }, "must not press after dispatch ended");
+  assert.equal(h.notes.length, 1);
+  assert.match(h.notes[0].note, /stale, not pressed/);
+});
+
+test("a verdict that lands while the dispatch is still active presses normally", async () => {
+  const h = harness({ isActive: () => true }, { decision: "approve", reason: "safe" });
+  await h.gate(cmd("npm test"));
+  assert.deepEqual(h.calls, { approve: 1, reject: 0 });
+});
+
+test("cli transport failure (e.g. not logged in) warns once that everything is being rejected", async () => {
+  // classify returns ask with a cli-failure reason for each command.
+  const h = harness({ backend: "cli" }, { decision: "ask", reason: "cli exit 1: not logged in" });
+  await h.gate(cmd("some-tool --x"));
+  await h.gate(cmd("other-tool --y"));
+  assert.deepEqual(h.calls, { approve: 0, reject: 2 }, "both rejected");
+  const warns = h.logs.filter((l) => /cli backend is failing/.test(l));
+  assert.equal(warns.length, 1, "warned exactly once across many failures");
+});
+
+test("a genuine model 'ask' verdict does not trigger the cli-failure warning", async () => {
+  const h = harness({ backend: "cli" }, { decision: "ask", reason: "unsure, looks risky" });
+  await h.gate(cmd("weird-cmd"));
+  assert.equal(h.logs.filter((l) => /cli backend is failing/.test(l)).length, 0);
+});
+
 test("blocked (api, no key) warns exactly once and never classifies", async () => {
   const h = harness({ blocked: true, backend: "api" });
   await h.gate(cmd("npm test"));
