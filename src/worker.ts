@@ -3,6 +3,7 @@ import "./suppress-warnings.js";
 import * as repo from "./db.js";
 import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, MODE_PROFILES, classifierReachable, type Risk } from "./modes.js";
 import { createCommandGate } from "./command-gate.js";
+import { createFollowupGate } from "./followup-gate.js";
 import { BobClient, resolvePipe } from "./bob-ipc.js";
 import { ExternalActivity } from "./defer.js";
 import { notify } from "./notify.js";
@@ -41,6 +42,7 @@ function buttonPatchPresent(): boolean | null {
  *   node dist/worker.js --no-notify     silence the per-task desktop toast/sound/bell
  *   node dist/worker.js --no-defer      don't pause while you're chatting with Bob
  *   node dist/worker.js --dry-run       show routing/claims without dispatching to Bob
+ *   node dist/worker.js --answer-followups  let Claude answer Bob's questions (else they wait for you)
  *   node dist/worker.js --emit-json     also print @@WORKER {json} event lines (for the extension)
  * Flags: --pipe <path>  --poll <ms>  --timeout <ms>  --assignee <name>  --defer-idle <ms>
  *
@@ -59,6 +61,7 @@ interface Opts {
   deferIdleMs: number;
   deferStaleMs: number;
   commandClassifier: boolean;
+  answerFollowups: boolean;
   classifierBackend: "api" | "cli";
   classifierModel?: string;
   classifierCli?: string;
@@ -106,6 +109,7 @@ function parseOpts(argv: string[]): Opts {
     deferIdleMs: num("--defer-idle", 60_000),
     deferStaleMs: num("--defer-stale", 5 * 60_000),
     commandClassifier: has("--command-classifier"),
+    answerFollowups: has("--answer-followups"),
     classifierBackend: val("--classifier-backend") === "api" ? "api" : "cli",
     classifierModel: val("--classifier-model"),
     classifierCli: val("--classifier-cli"),
@@ -196,6 +200,29 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     isActive: () => dispatchActive,
   });
 
+  // Question handling: when Bob asks a followup mid-task, answer it with Claude
+  // (sending the reply over IPC) or escalate to a human. Reuses the classifier's
+  // backend/key. Applies in any mode — any task can hit a question.
+  const followupGate = createFollowupGate({
+    enabled: opts.answerFollowups,
+    blocked: classifierBlocked,
+    backend: opts.classifierBackend,
+    model: opts.classifierModel,
+    apiKey,
+    cliPath: opts.classifierCli,
+    task: { id: task.id, title: task.title },
+    cwd: process.cwd(),
+    client: { sendMessage: (t) => client.sendMessage(t) },
+    addNote: repo.addNote,
+    log: (m) => console.log(m),
+    isActive: () => dispatchActive,
+    escalate: (question) => {
+      console.log(`  ⤴ followup needs a human on #${task.id}: ${question.replace(/\s+/g, " ").slice(0, 80)}`);
+      emit(opts, "question", { id: task.id, title: task.title, question });
+      if (opts.notify) notify(`Bob needs an answer on #${task.id}`, question);
+    },
+  });
+
   let lastSay = "";
   // Last blocking ask Bob surfaced. The gate answers command asks; other types
   // (followup, mistake_limit_reached, …) we deliberately don't auto-press — we just
@@ -216,6 +243,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
 
       if (ask && !partial) lastAsk = ask;
       void commandGate({ ask, text, partial });
+      void followupGate({ ask, text, partial });
     },
   });
   dispatchActive = false;
@@ -327,6 +355,11 @@ async function main(): Promise<void> {
           "and classified commands will stall. Run `node tools/patch-bob-buttons.mjs` and restart Bob.",
       );
     }
+  }
+  if (opts.answerFollowups) {
+    const noKey = opts.classifierBackend === "api" && !process.env.ANTHROPIC_API_KEY;
+    const auth = noKey ? " — NO API KEY, questions escalate to you" : "";
+    console.log(`bob-worker: followup answering = on, backend=${opts.classifierBackend} (Claude answers Bob's questions, escalates when unsure${auth}).`);
   }
   let idled = false;
   let deferring = false;

@@ -182,6 +182,18 @@ Fail-safe: only an explicit "approve" runs a command; any error or timeout leave
 for a human. Extra flags: `--classifier-backend <cli|api>` `--classifier-model`
 `--classifier-cli`.
 
+The other thing that stalls an unattended task is Bob **asking a question** mid-task
+(e.g. "which approach should I take?"). With `--answer-followups`, the worker asks
+Claude to answer — preferring one of Bob's offered options — and sends the reply back
+over IPC (a native `SendMessage`, so no button patch). It applies in any mode and uses
+the same backend as the classifier. Fail-safe: when the answerer is unsure or the
+question is consequential (deletes, scope changes), it **escalates to you** (a desktop
+toast + a note on the task) instead of guessing.
+
+```powershell
+node dist/worker.js --answer-followups                  # Claude answers Bob's questions; escalates when unsure
+```
+
 ### Templates
 
 `create --template <name>` applies a preset mode, priority, tags, and
@@ -225,9 +237,12 @@ src/
   db.ts           SQLite store and repository
   modes.ts        mode slugs, router, per-mode risk + auto-approve profiles
   templates.ts    task templates
-  bob-ipc.ts      async IPC client (BobClient; approve/reject presses)
-  classify.ts     Claude command-safety classifier (cli/api backends)
+  bob-ipc.ts      async IPC client (BobClient; approve/reject/sendMessage)
+  llm.ts          shared Claude transport (api / cli backends)
+  classify.ts     command-safety classifier (gray-zone command asks)
   command-gate.ts gray-zone approve/reject gate (worker -> IPC)
+  answer.ts       answerer for Bob's followup questions
+  followup-gate.ts answer-or-escalate gate for followup asks (worker -> IPC)
   defer.ts        pause dispatch while you're chatting with Bob
   report.ts       board -> markdown standup/audit (CLI + board_report tool)
   notify.ts       desktop toast and terminal bell

@@ -295,6 +295,21 @@ export class BobClient {
     });
   }
 
+  /**
+   * Send a chat message to the running task. When Bob is waiting on a followup
+   * question (ask_followup_question), the message resolves it as the answer. This
+   * is a native IPC command — no button patch needed (unlike approve/reject).
+   */
+  sendMessage(text: string): void {
+    if (!this.active) return; // no dispatch in flight — nothing to answer
+    this.send({
+      type: "TaskCommand",
+      origin: "client",
+      clientId: this.clientId,
+      data: { commandName: "SendMessage", data: { text, images: [] } },
+    });
+  }
+
   close(): void {
     try {
       this.sock?.end();

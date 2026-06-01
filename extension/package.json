@@ -71,6 +71,11 @@
           "default": false,
           "description": "Let Claude approve/deny commands that fall outside the safe allowlist (instead of Bob's manual prompt) for classifier-policy modes. Requires the Bob button patch (tools/patch-bob-buttons.mjs). Turn off to revert to manual approval."
         },
+        "bobTasks.answerFollowups": {
+          "type": "boolean",
+          "default": false,
+          "description": "Let Claude answer Bob's followup questions during a task (sending the reply over IPC), escalating to you when it's unsure. Off = questions wait for you. Uses the same backend as the command classifier; no button patch needed."
+        },
         "bobTasks.classifierBackend": {
           "type": "string",
           "enum": ["cli", "api"],

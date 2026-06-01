@@ -91,11 +91,15 @@ function startWorker(): void {
   if (!c.get<boolean>("deferWhileChatting")) args.push("--no-defer");
   const tag = c.get<string>("tag");
   if (tag && tag.trim()) args.push("--tag", tag.trim());
-  // Reversible toggle: when off, the worker never gets --command-classifier, so
-  // gray-zone commands fall back to Bob's manual approval prompt. Needs the Bob
-  // button patch (tools/patch-bob-buttons.mjs) and ANTHROPIC_API_KEY in the env.
-  if (c.get<boolean>("commandClassifier")) {
-    args.push("--command-classifier");
+  // Reversible toggles. The command classifier (approve/deny gray-zone commands,
+  // needs the Bob button patch) and the followup answerer (answer Bob's questions)
+  // are independent but share one Claude backend, so push the backend config when
+  // either is on. Off by default = manual approval / questions wait for you.
+  const wantClassifier = c.get<boolean>("commandClassifier");
+  const wantFollowups = c.get<boolean>("answerFollowups");
+  if (wantClassifier) args.push("--command-classifier");
+  if (wantFollowups) args.push("--answer-followups");
+  if (wantClassifier || wantFollowups) {
     args.push("--classifier-backend", c.get<string>("classifierBackend") ?? "cli");
     const model = c.get<string>("classifierModel");
     if (model && model.trim()) args.push("--classifier-model", model.trim());
