@@ -22,6 +22,8 @@ export interface FollowupGateDeps {
   blocked: boolean;
   /** --escalate-all is set: escalate every question instead of auto-answering. */
   escalateAll: boolean;
+  /** --review-plans is set: escalate plan/design-approval questions, auto-answer mechanical ones. */
+  reviewPlans: boolean;
   backend: "api" | "cli";
   model?: string;
   apiKey?: string;
@@ -37,6 +39,15 @@ export interface FollowupGateDeps {
   isActive?: () => boolean;
   /** Injectable for tests; defaults to the real answerer. */
   answer?: typeof answerFollowup;
+  /** Callback to handle human answers for escalated questions. */
+  onHumanAnswer?: (answer: string) => void;
+}
+
+/** Tracks a pending escalated question awaiting human answer. */
+export interface PendingEscalation {
+  question: string;
+  options: string[];
+  taskId: number;
 }
 
 export interface ParsedFollowup {
@@ -63,12 +74,103 @@ export function parseFollowup(text: string): ParsedFollowup | null {
   return question ? { question, options } : null;
 }
 
-export function createFollowupGate(deps: FollowupGateDeps): (ev: FollowupEvent) => Promise<void> {
+/**
+ * Classify a followup question as either a plan/design-approval question or a
+ * mechanical clarification. Conservative: when unsure, treat as plan (safer to escalate).
+ *
+ * Plan/design questions ask for approval of an approach, architecture decision, or
+ * significant scope/behavior choice. Mechanical questions ask for simple facts like
+ * file paths, flag names, or which of several equivalent options to use.
+ */
+export function classifyQuestion(question: string): "plan" | "mechanical" {
+  const q = question.toLowerCase();
+
+  // Mechanical indicators FIRST: asking for simple facts, paths, names, or choosing between equivalent options
+  // Check these first because they're more specific and should take precedence
+  const mechanicalPatterns = [
+    /\bwhich (file|path|directory|folder|flag|option|name|extension)\b/,
+    /\bwhat (is|are) the (file|path|directory|folder|flag|option|name)\b/,
+    /\bwhere (is|are|should i put)\b/,
+    /\bfile (path|name|location)\b/,
+    /\bflag (name|value)\b/,
+    /\b-[a-z] or -[a-z]\b/,  // e.g., "-x or -y"
+    /\boption [a-z] or option [a-z]\b/,
+    /\b(should|shall) i use (single|double)( or (single|double))? quotes/,
+    /\bwhat (format|extension) (should i use|to use|should)\b/,
+    /\bdirectory name\b/,
+  ];
+
+  for (const pattern of mechanicalPatterns) {
+    if (pattern.test(q)) {
+      return "mechanical";
+    }
+  }
+
+  // Strong plan/design indicators: asking for approval, approach selection, or design decisions
+  // More specific patterns to avoid false positives with mechanical questions
+  const planPatterns = [
+    /\b(should i|shall i) (proceed|continue|refactor|delete|remove|drop|change|modify)\b/,
+    /\bdo you want me to\b/,
+    /\bwould you like me to\b/,
+    /\bmay i (proceed|continue|delete|remove)\b/,
+    /\bcan i proceed\b/,
+    /\b(approve|confirm|permission)\b/,
+    /\bokay to|ok to\b/,
+    /\bwhich (approach|strategy|method|design|architecture|pattern)\b/,
+    /\bhow (should|shall) (i|we) (implement|structure|organize|design)\b/,
+    /\bwhat (approach|strategy|method|design)\b/,
+    /\bis (this|that) (okay|ok|acceptable|correct|right|good)\b/,
+    /\b(better to|prefer to|recommended to)\b/,
+    /\b(refactor|restructure|redesign|rearchitect)\b/,
+    /\b(delete|remove|drop) (the )?(table|database)\b/,
+    /\bchange the (behavior|logic|flow|structure)\b/,
+    /\bmodify the (api|interface|contract|schema)\b/,
+    /\bbreak(ing)? (change|compatibility)\b/,
+  ];
+
+  for (const pattern of planPatterns) {
+    if (pattern.test(q)) {
+      return "plan";
+    }
+  }
+
+  // Default: when unsure, treat as plan (safer to escalate)
+  return "plan";
+}
+
+export function createFollowupGate(deps: FollowupGateDeps): {
+  gate: (ev: FollowupEvent) => Promise<void>;
+  answerHuman: (answer: string) => void;
+  getPending: () => PendingEscalation | null;
+} {
   const answer = deps.answer ?? answerFollowup;
   const handled = new Set<string>();
   let warnedNoKey = false;
+  let pendingEscalation: PendingEscalation | null = null;
 
-  return function onFollowupAsk(ev: FollowupEvent): Promise<void> {
+  function answerHuman(answer: string): void {
+    if (!pendingEscalation) {
+      deps.log("  ~ received human answer but no pending escalation — ignoring");
+      return;
+    }
+    // Check if dispatch is still active
+    if (deps.isActive && !deps.isActive()) {
+      deps.log("  ~ received human answer after dispatch ended — ignoring (stale)");
+      pendingEscalation = null;
+      return;
+    }
+    const short = pendingEscalation.question.replace(/\s+/g, " ").slice(0, 70);
+    deps.client.sendMessage(answer);
+    deps.log(`  ✓ human answered escalated followup → ${oneLine(answer)}`);
+    deps.addNote(deps.task.id, `Human answered \`${short}\` → "${oneLine(answer, 120)}"`, "human");
+    pendingEscalation = null;
+  }
+
+  function getPending(): PendingEscalation | null {
+    return pendingEscalation;
+  }
+
+  function onFollowupAsk(ev: FollowupEvent): Promise<void> {
     if (!deps.enabled || ev.partial) return Promise.resolve();
     if (ev.ask !== "followup") return Promise.resolve();
     const parsed = parseFollowup((ev.text ?? "").trim());
@@ -78,24 +180,42 @@ export function createFollowupGate(deps: FollowupGateDeps): (ev: FollowupEvent) 
 
     const short = parsed.question.replace(/\s+/g, " ").slice(0, 70);
 
+    // Helper to escalate and track the pending question
+    const doEscalate = (reason: string) => {
+      pendingEscalation = { question: parsed.question, options: parsed.options, taskId: deps.task.id };
+      deps.escalate(parsed.question, parsed.options);
+      deps.addNote(deps.task.id, `Followup escalated (${reason}): ${short}`, "answerer");
+    };
+
     if (deps.blocked) {
       if (!warnedNoKey) {
         deps.log("  ⚠ answerer=api but ANTHROPIC_API_KEY unset — escalating questions to a human.");
         warnedNoKey = true;
       }
-      deps.escalate(parsed.question, parsed.options);
-      deps.addNote(deps.task.id, `Followup escalated (no API key): ${short}`, "answerer");
+      doEscalate("no API key");
       return Promise.resolve();
     }
 
-    if (deps.escalateAll) {
-      deps.escalate(parsed.question, parsed.options);
+    // reviewPlans takes precedence over escalateAll when both are on
+    if (deps.reviewPlans) {
+      const classification = classifyQuestion(parsed.question);
+      if (classification === "plan") {
+        deps.log(`  ⤴ escalated followup to a human (plan/design question, --review-plans)`);
+        doEscalate("plan/design, --review-plans");
+        return Promise.resolve();
+      }
+      // mechanical questions fall through to auto-answer below
+      deps.log(`  ⟲ answering mechanical followup (--review-plans): ${short}`);
+    } else if (deps.escalateAll) {
       deps.log(`  ⤴ escalated followup to a human (--escalate-all)`);
-      deps.addNote(deps.task.id, `Followup escalated (--escalate-all): ${short}`, "answerer");
+      doEscalate("--escalate-all");
       return Promise.resolve();
     }
 
-    deps.log(`  ⟲ answering followup (${deps.backend}): ${short}`);
+    // Only log if we didn't already log for reviewPlans mechanical case
+    if (!deps.reviewPlans) {
+      deps.log(`  ⟲ answering followup (${deps.backend}): ${short}`);
+    }
     return answer(
       parsed.question,
       parsed.options,
@@ -112,12 +232,13 @@ export function createFollowupGate(deps: FollowupGateDeps): (ev: FollowupEvent) 
         deps.log(`  ✓ answered followup → ${oneLine(text)} (${reason})`);
         deps.addNote(deps.task.id, `Answered \`${short}\` → "${oneLine(text, 120)}" (${reason})`, "answerer");
       } else {
-        deps.escalate(parsed.question, parsed.options);
         deps.log(`  ⤴ escalated followup to a human (${reason})`);
-        deps.addNote(deps.task.id, `Followup escalated (${reason}): ${short}`, "answerer");
+        doEscalate(reason);
       }
     });
-  };
+  }
+
+  return { gate: onFollowupAsk, answerHuman, getPending };
 }
 
 function oneLine(text: string, max = 60): string {

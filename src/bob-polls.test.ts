@@ -241,3 +241,186 @@ test("timeout initial result: skips verification", async () => {
   assert.equal(h.verifyArgs.length, 0);
   assert.equal(result.status, "timeout");
 });
+
+// Plan-stop detection tests
+
+test("plan-stop detection off: does not check for work", async () => {
+  const workCheckArgs: any[] = [];
+  const h = harness({
+    detectPlanStop: false,
+    checkDidWork: async (cwd) => {
+      workCheckArgs.push({ cwd });
+      return { didWork: false, reason: "clean" };
+    },
+  });
+  await h.loop(initialResult());
+  assert.equal(workCheckArgs.length, 0, "should not check work when feature is off");
+});
+
+test("plan-stop detection on + work detected: proceeds to verification", async () => {
+  const workCheckArgs: any[] = [];
+  const h = harness({
+    detectPlanStop: true,
+    checkDidWork: async (cwd) => {
+      workCheckArgs.push({ cwd });
+      return { didWork: true, reason: "3 files changed" };
+    },
+  });
+  const result = await h.loop(initialResult());
+  assert.equal(workCheckArgs.length, 1, "should check work once");
+  assert.equal(h.verifyArgs.length, 1, "should proceed to verification");
+  assert.equal(result.result, "initial result");
+  assert.match(h.logs.join("\n"), /work detected.*3 files changed/);
+});
+
+test("plan-stop detection on + no work: continues with plan-stop message", async () => {
+  let checkCount = 0;
+  const h = harness(
+    {
+      detectPlanStop: true,
+      checkDidWork: async () => {
+        checkCount++;
+        // First check: no work. After continue: work detected.
+        return checkCount === 1
+          ? { didWork: false, reason: "git working tree is clean" }
+          : { didWork: true, reason: "files changed" };
+      },
+    },
+    [{ passed: true, reason: "ok" }],
+  );
+  const result = await h.loop(initialResult());
+  assert.equal(h.dispatchArgs.length, 1, "should dispatch a continue");
+  assert.match(h.dispatchArgs[0], /presented a plan but did NOT implement it/);
+  assert.match(h.dispatchArgs[0], /working tree has no changes/);
+  assert.match(h.dispatchArgs[0], /Implement the code/);
+  assert.equal(h.notes.length, 2);
+  assert.match(h.notes[0].note, /Continue #1: plan-stop/);
+  assert.match(h.notes[1].note, /Verified after 1 continue/);
+  assert.equal(result.result, "result from continue #1");
+});
+
+test("plan-stop detection: no work then work then verify pass", async () => {
+  let checkCount = 0;
+  const h = harness(
+    {
+      detectPlanStop: true,
+      checkDidWork: async () => {
+        checkCount++;
+        if (checkCount === 1) return { didWork: false, reason: "clean" };
+        return { didWork: true, reason: "files changed" };
+      },
+    },
+    [{ passed: true, reason: "ok" }],
+  );
+  const result = await h.loop(initialResult());
+  assert.equal(checkCount, 2, "should check work twice (initial + continue)");
+  assert.equal(h.dispatchArgs.length, 1, "one continue for plan-stop");
+  assert.equal(h.verifyArgs.length, 1, "verify once after work detected");
+  assert.equal(result.result, "result from continue #1");
+});
+
+test("plan-stop detection: hits max continues with no work", async () => {
+  const h = harness(
+    {
+      detectPlanStop: true,
+      maxContinues: 2,
+      checkDidWork: async () => ({ didWork: false, reason: "still clean" }),
+    },
+    [],
+  );
+  const result = await h.loop(initialResult());
+  assert.equal(h.dispatchArgs.length, 2, "two continues before giving up");
+  assert.equal(result.status, "aborted", "should mark as failed");
+  assert.match(h.notes[2].note, /Plan-stop.*after 2 continue/);
+  assert.match(h.notes[2].note, /still clean/);
+});
+
+test("plan-stop detection: no work, then work, then verify fail, then verify pass", async () => {
+  let checkCount = 0;
+  const h = harness(
+    {
+      detectPlanStop: true,
+      checkDidWork: async () => {
+        checkCount++;
+        if (checkCount === 1) return { didWork: false, reason: "clean" };
+        return { didWork: true, reason: "changed" };
+      },
+    },
+    [
+      { passed: false, reason: "tests failed" },
+      { passed: true, reason: "fixed" },
+    ],
+  );
+  const result = await h.loop(initialResult());
+  assert.equal(checkCount, 3, "check work 3 times: initial, after plan-stop continue, after verify continue");
+  assert.equal(h.dispatchArgs.length, 2, "two continues: plan-stop + verify fail");
+  assert.match(h.dispatchArgs[0], /presented a plan but did NOT implement/);
+  assert.match(h.dispatchArgs[1], /did NOT pass verification: tests failed/);
+  assert.equal(h.verifyArgs.length, 2, "verify twice: after first work, after second work");
+  assert.equal(result.result, "result from continue #2");
+});
+
+test("plan-stop detection: continue produces no result, stops looping", async () => {
+  const dispatched: string[] = [];
+  const loop = createPollLoop({
+    enabled: true,
+    detectPlanStop: true,
+    maxContinues: 5,
+    cwd: "/repo",
+    taskPrompt: "task",
+    task: { id: 42, title: "test task" },
+    addNote: () => {},
+    log: () => {},
+    checkDidWork: async () => ({ didWork: false, reason: "clean" }),
+    verify: async () => ({ passed: true, reason: "ok" }),
+    dispatch: async (t) => {
+      dispatched.push(t);
+      return { taskId: "t", result: "", lastText: "", status: "timeout" };
+    },
+  });
+  const result = await loop(initialResult());
+  assert.equal(dispatched.length, 1, "one continue attempted for plan-stop, then stops");
+  assert.equal(result.status, "timeout");
+});
+
+test("plan-stop detection: forwards cwd to checkDidWork", async () => {
+  const workCheckArgs: any[] = [];
+  const h = harness({
+    detectPlanStop: true,
+    cwd: "/my/custom/path",
+    checkDidWork: async (cwd) => {
+      workCheckArgs.push({ cwd });
+      return { didWork: true, reason: "ok" };
+    },
+  });
+  await h.loop(initialResult());
+  assert.equal(workCheckArgs[0].cwd, "/my/custom/path");
+});
+
+test("plan-stop detection: combines with verify-and-continue correctly", async () => {
+  let checkCount = 0;
+  const h = harness(
+    {
+      detectPlanStop: true,
+      verifyCommand: "npm test",
+      checkDidWork: async () => {
+        checkCount++;
+        // First check: no work. After continue: work detected.
+        return checkCount === 1
+          ? { didWork: false, reason: "clean" }
+          : { didWork: true, reason: "changed" };
+      },
+    },
+    [
+      { passed: false, reason: "build failed" },
+      { passed: true, reason: "ok" },
+    ],
+  );
+  const result = await h.loop(initialResult());
+  // Flow: initial (no work) -> plan-stop continue -> work detected -> verify fail -> verify continue -> verify pass
+  assert.equal(checkCount, 3, "check work 3 times");
+  assert.equal(h.dispatchArgs.length, 2, "two continues: plan-stop + verify");
+  assert.equal(h.verifyArgs.length, 2, "verify twice after work detected");
+  assert.match(h.dispatchArgs[0], /presented a plan/);
+  assert.match(h.dispatchArgs[1], /did NOT pass verification/);
+});

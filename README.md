@@ -146,9 +146,9 @@ node dist/worker.js --dry-run
 ```
 
 Flags: `--pipe` `--poll` `--timeout` `--assignee` `--new-tab`
-`--max-risk <safe|standard|elevated>` `--no-notify` `--no-defer`. Needs Bob
-running with IPC enabled (see below). Aborted or timed-out tasks are parked as
-`blocked`.
+`--max-risk <safe|standard|elevated>` `--no-notify` `--no-defer` `--answer-followups`
+`--escalate-all` `--review-plans`. Needs Bob running with IPC enabled (see below).
+Aborted or timed-out tasks are parked as `blocked`.
 
 Each mode has a risk level, and the worker only dispatches tasks at or below
 `--max-risk` (default `standard`); higher-risk ones stay pending for manual
@@ -193,11 +193,18 @@ toast + a note on the task) instead of guessing.
 ```powershell
 node dist/worker.js --answer-followups                  # Claude answers Bob's questions; escalates when unsure
 node dist/worker.js --answer-followups --escalate-all   # escalate ALL questions to you (including plan approvals)
+node dist/worker.js --answer-followups --review-plans   # escalate plan/design questions, auto-answer mechanical ones
 ```
 
 With `--escalate-all`, every followup question is escalated to you for review instead of
 being auto-answered — ensuring you see and approve plans/designs before Bob proceeds. Off
 by default (Claude answers confident questions); only applies when `--answer-followups` is on.
+
+With `--review-plans`, plan/design-approval questions ("should I proceed with this refactor?",
+"which approach should I take?") are escalated to you for review, while mechanical clarifications
+("which file?", "flag name -x or -y?") are auto-answered. This is a middle ground between
+`--escalate-all` (blocks on every question) and the default (auto-answers everything confident).
+When both `--review-plans` and `--escalate-all` are set, `--review-plans` takes precedence.
 
 ### Templates
 

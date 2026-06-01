@@ -100,6 +100,7 @@ function startWorker(): void {
   if (wantClassifier) args.push("--command-classifier");
   if (wantFollowups) args.push("--answer-followups");
   if (c.get<boolean>("escalateAll")) args.push("--escalate-all");
+  if (c.get<boolean>("reviewPlans")) args.push("--review-plans");
   if (wantClassifier || wantFollowups) {
     args.push("--classifier-backend", c.get<string>("classifierBackend") ?? "cli");
     const model = c.get<string>("classifierModel");
@@ -268,6 +269,9 @@ function handleEvent(json: string): void {
         vscode.window.showWarningMessage(`Bob task #${ev.id} ${ev.status}.`);
       }
       break;
+    case "question":
+      handleEscalatedQuestion(ev);
+      break;
     case "deferred":
       setStatus("deferred", "(chat active)");
       break;
@@ -287,4 +291,51 @@ function handleEvent(json: string): void {
       }
       break;
   }
+}
+
+/**
+ * Handle an escalated followup question from the worker. Show an input box
+ * for the human to answer, then write the answer to the worker's stdin.
+ */
+function handleEscalatedQuestion(ev: { id: number; title: string; question: string; options?: string[] }): void {
+  const { id, title, question, options } = ev;
+  const short = question.replace(/\s+/g, " ").slice(0, 100);
+  out.appendLine(`[question] task #${id}: ${short}`);
+
+  // Show a toast notification
+  if (cfg().get<boolean>("notify.enabled")) {
+    vscode.window.showInformationMessage(`Bob needs an answer on #${id}: ${title}`);
+  }
+
+  // Show an input box with the question and optional suggestions
+  const prompt = `Task #${id}: ${question}`;
+  const placeHolder = options && options.length > 0
+    ? `Suggestions: ${options.join(", ")}`
+    : "Type your answer";
+
+  vscode.window.showInputBox({
+    prompt,
+    placeHolder,
+    ignoreFocusOut: true, // Don't dismiss if user switches windows
+  }).then((answer) => {
+    if (answer === undefined) {
+      // User cancelled (ESC or closed the input box)
+      out.appendLine(`[question] task #${id}: user cancelled answer`);
+      return;
+    }
+
+    if (!answer.trim()) {
+      vscode.window.showWarningMessage("Answer cannot be empty.");
+      return;
+    }
+
+    // Send the answer to the worker via stdin
+    if (worker) {
+      const answerLine = `@@ANSWER ${JSON.stringify({ taskId: id, answer: answer.trim() })}\n`;
+      worker.stdin.write(answerLine);
+      out.appendLine(`[question] task #${id}: sent answer → ${answer.trim().slice(0, 60)}`);
+    } else {
+      out.appendLine(`[question] task #${id}: worker not running, cannot send answer`);
+    }
+  });
 }

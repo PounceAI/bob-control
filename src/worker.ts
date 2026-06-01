@@ -4,6 +4,7 @@ import * as repo from "./db.js";
 import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, MODE_PROFILES, classifierReachable, type Risk } from "./modes.js";
 import { createCommandGate } from "./command-gate.js";
 import { createFollowupGate } from "./followup-gate.js";
+import { handleStdinAnswer } from "./worker-answer.js";
 import { BobClient, resolvePipe, type DispatchResult } from "./bob-ipc.js";
 import { createPollLoop } from "./bob-polls.js";
 import { ExternalActivity } from "./defer.js";
@@ -47,6 +48,7 @@ function buttonPatchPresent(): boolean | null {
  *   node dist/worker.js --answer-followups  let Claude answer Bob's questions (else they wait for you)
  *   node dist/worker.js --escalate-all      escalate all followup questions to human review (with --answer-followups)
  *   node dist/worker.js --verify-and-continue  verify result and loop with Bob until it passes
+ *   node dist/worker.js --detect-plan-stop     catch plan-only completions (no code written) and auto-continue
  *   node dist/worker.js --emit-json     also print @@WORKER {json} event lines (for the extension)
  *   node dist/worker.js --retry 3       auto-retry transient failures (timeout/abort) up to 3 total attempts
  * Flags: --pipe <path>  --poll <ms>  --timeout <ms>  --assignee <name>  --defer-idle <ms>
@@ -61,6 +63,10 @@ function buttonPatchPresent(): boolean | null {
  * acceptance check (--verify-command or built-in heuristics) and, if it fails,
  * sends the problem back to Bob to fix — looping until it passes or --max-continues
  * is reached. This catches broken builds/tests without human intervention.
+ *
+ * With --detect-plan-stop, the worker checks if Bob did real work (git working-tree
+ * changed) after completion. If the tree is clean (plan-only, no code written), it
+ * treats this as a failure and auto-continues, asking Bob to implement the plan.
  */
 
 interface Opts {
@@ -74,6 +80,7 @@ interface Opts {
   commandClassifier: boolean;
   answerFollowups: boolean;
   escalateAll: boolean;
+  reviewPlans: boolean;
   classifierBackend: "api" | "cli";
   classifierModel?: string;
   classifierCli?: string;
@@ -87,6 +94,7 @@ interface Opts {
   verifyAndContinue: boolean;
   verifyCommand?: string;
   maxContinues: number;
+  detectPlanStop: boolean;
   retry: boolean;
   maxRetryAttempts: number;
 }
@@ -129,6 +137,7 @@ function parseOpts(argv: string[]): Opts {
     commandClassifier: has("--command-classifier"),
     answerFollowups: has("--answer-followups"),
     escalateAll: has("--escalate-all"),
+    reviewPlans: has("--review-plans"),
     classifierBackend: val("--classifier-backend") === "api" ? "api" : "cli",
     classifierModel: val("--classifier-model"),
     classifierCli: val("--classifier-cli"),
@@ -142,6 +151,7 @@ function parseOpts(argv: string[]): Opts {
     verifyAndContinue: has("--verify-and-continue"),
     verifyCommand: val("--verify-command"),
     maxContinues: num("--max-continues", 3),
+    detectPlanStop: has("--detect-plan-stop"),
     retry: maxRetryAttempts > 0,
     maxRetryAttempts,
   };
@@ -213,6 +223,9 @@ function emit(opts: Opts, type: string, data: Record<string, unknown> = {}): voi
   if (opts.emitJson) console.log(`@@WORKER ${JSON.stringify({ type, ...data })}`);
 }
 
+/** Global registry of active followup gates, keyed by task ID. */
+const activeFollowupGates = new Map<number, ReturnType<typeof createFollowupGate>>();
+
 async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> {
   const { mode, source } = resolveMode(task);
   const profile = profileFor(mode);
@@ -260,10 +273,11 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   // Question handling: when Bob asks a followup mid-task, answer it with Claude
   // (sending the reply over IPC) or escalate to a human. Reuses the classifier's
   // backend/key. Applies in any mode — any task can hit a question.
-  const followupGate = createFollowupGate({
+  const followupGateObj = createFollowupGate({
     enabled: opts.answerFollowups,
     blocked: classifierBlocked,
     escalateAll: opts.escalateAll,
+    reviewPlans: opts.reviewPlans,
     backend: opts.classifierBackend,
     model: opts.classifierModel,
     apiKey,
@@ -274,12 +288,16 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     addNote: repo.addNote,
     log: (m) => console.log(m),
     isActive: () => dispatchActive,
-    escalate: (question) => {
+    escalate: (question, options) => {
       console.log(`  ⤴ followup needs a human on #${task.id}: ${question.replace(/\s+/g, " ").slice(0, 80)}`);
-      emit(opts, "question", { id: task.id, title: task.title, question });
+      emit(opts, "question", { id: task.id, title: task.title, question, options });
       if (opts.notify) notify(`Bob needs an answer on #${task.id}`, question);
     },
   });
+  const followupGate = followupGateObj.gate;
+
+  // Register this gate so stdin answers can reach it
+  activeFollowupGates.set(task.id, followupGateObj);
 
   let lastSay = "";
   // Last blocking ask Bob surfaced. The gate answers command asks; other types
@@ -308,7 +326,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
 
           if (ask && !partial) lastAsk = ask;
           void commandGate({ ask, text, partial });
-          void followupGate({ ask, text, partial });
+          void followupGateObj.gate({ ask, text, partial });
         },
       });
     } finally {
@@ -328,6 +346,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     addNote: repo.addNote,
     log: (m) => console.log(m),
     dispatch: doDispatch,
+    detectPlanStop: opts.detectPlanStop,
   });
 
   // Initial dispatch.
@@ -414,6 +433,9 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
       if (opts.notify) notify(`Bob task #${task.id} ${res.status}`, task.title);
     }
   }
+
+  // Unregister the gate when the task completes
+  activeFollowupGates.delete(task.id);
 }
 
 async function main(): Promise<void> {
@@ -446,10 +468,22 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", stop);
 
-  // When hosted by the extension (--emit-json), exit if the parent dies: the
-  // spawned stdin pipe emits 'end' on parent death, so we don't orphan-poll
-  // forever. Gated so interactive CLI use with a TTY stdin is unaffected.
+  // When hosted by the extension (--emit-json), listen for human answers on stdin
+  // and route them to the active task's followup gate. Also exit if parent dies.
   if (opts.emitJson) {
+    process.stdin.setEncoding("utf8");
+    let stdinBuf = "";
+    process.stdin.on("data", (chunk: string) => {
+      stdinBuf += chunk;
+      let nl: number;
+      while ((nl = stdinBuf.indexOf("\n")) !== -1) {
+        const line = stdinBuf.slice(0, nl).trim();
+        stdinBuf = stdinBuf.slice(nl + 1);
+        if (line.startsWith("@@ANSWER ")) {
+          handleStdinAnswer(line.slice(9), activeFollowupGates, (m) => console.log(m));
+        }
+      }
+    });
     process.stdin.on("end", () => {
       console.log("bob-worker: parent closed stdin — exiting.");
       process.exit(0);
@@ -490,12 +524,19 @@ async function main(): Promise<void> {
   if (opts.answerFollowups) {
     const noKey = opts.classifierBackend === "api" && !process.env.ANTHROPIC_API_KEY;
     const auth = noKey ? " — NO API KEY, questions escalate to you" : "";
-    const escalateMode = opts.escalateAll ? " — ESCALATE-ALL: all questions go to you for review" : "";
+    const escalateMode = opts.reviewPlans
+      ? " — REVIEW-PLANS: plan/design questions escalate, mechanical ones auto-answer"
+      : opts.escalateAll
+        ? " — ESCALATE-ALL: all questions go to you for review"
+        : "";
     console.log(`bob-worker: followup answering = on, backend=${opts.classifierBackend} (Claude answers Bob's questions, escalates when unsure${auth}${escalateMode}).`);
   }
   if (opts.verifyAndContinue) {
     const cmd = opts.verifyCommand ? `command="${opts.verifyCommand}"` : "built-in heuristics";
     console.log(`bob-worker: verify-and-continue = on (${cmd}, max ${opts.maxContinues} continue${opts.maxContinues === 1 ? "" : "s"}).`);
+  }
+  if (opts.detectPlanStop) {
+    console.log(`bob-worker: plan-stop detection = on (checks git working-tree for changes, auto-continues if clean).`);
   }
   if (opts.retry) {
     console.log(`bob-worker: auto-retry = on (transient failures retry up to ${opts.maxRetryAttempts} total attempt${opts.maxRetryAttempts === 1 ? "" : "s"} with exponential backoff).`);

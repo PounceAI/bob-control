@@ -21,6 +21,11 @@ export interface VerifyResult {
   reason: string;
 }
 
+export interface WorkCheckResult {
+  didWork: boolean;
+  reason: string;
+}
+
 export interface PollDeps {
   /** Feature toggle: when false, the loop is a no-op. */
   enabled: boolean;
@@ -40,6 +45,10 @@ export interface PollDeps {
   verify?: (result: string, command: string | undefined, cwd: string) => Promise<VerifyResult>;
   /** Injectable for tests; defaults to the real dispatcher. */
   dispatch?: (text: string) => Promise<PollResult>;
+  /** Feature toggle for plan-stop detection: when true, check if Bob did real work. */
+  detectPlanStop?: boolean;
+  /** Injectable for tests; checks if real work happened (git working-tree changed). */
+  checkDidWork?: (cwd: string) => Promise<WorkCheckResult>;
 }
 
 /**
@@ -76,12 +85,49 @@ async function defaultVerify(
 }
 
 /**
+ * Check if real work happened by examining git working-tree status.
+ * Returns didWork=false if the working tree is clean (no changes), meaning Bob
+ * likely just presented a plan without implementing it.
+ */
+async function defaultCheckDidWork(cwd: string): Promise<WorkCheckResult> {
+  // Use `git status --porcelain` which outputs nothing when clean, or file statuses when dirty.
+  return new Promise<WorkCheckResult>((resolve) => {
+    const proc = spawn("git", ["status", "--porcelain"], { cwd, stdio: "pipe" });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout?.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+    proc.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    proc.on("close", (code: number | null) => {
+      if (code !== 0) {
+        // Git command failed (not a git repo, or other error) — conservatively assume work happened.
+        resolve({ didWork: true, reason: `git status failed (exit ${code}), assuming work done` });
+      } else {
+        const output = stdout.trim();
+        if (output === "") {
+          // Clean working tree: no changes detected.
+          resolve({ didWork: false, reason: "git working tree is clean (no files changed)" });
+        } else {
+          // Dirty working tree: changes detected.
+          const lines = output.split("\n").length;
+          resolve({ didWork: true, reason: `git working tree has ${lines} change${lines === 1 ? "" : "s"}` });
+        }
+      }
+    });
+    proc.on("error", (err: Error) => {
+      // Spawn failed (git not installed?) — conservatively assume work happened.
+      resolve({ didWork: true, reason: `git check failed: ${err.message}` });
+    });
+  });
+}
+
+/**
  * Build the verify-and-continue loop handler. Returns a function that takes the
  * initial dispatch result and either returns it (if verification passes) or loops
  * with Bob to fix issues until it passes or the max-continues cap is hit.
  */
 export function createPollLoop(deps: PollDeps): (initial: PollResult) => Promise<PollResult> {
   const verify = deps.verify ?? defaultVerify;
+  const checkDidWork = deps.checkDidWork ?? defaultCheckDidWork;
 
   return async function pollLoop(initial: PollResult): Promise<PollResult> {
     // Feature off: return the initial result unchanged.
@@ -98,6 +144,50 @@ export function createPollLoop(deps: PollDeps): (initial: PollResult) => Promise
     let continueCount = 0;
 
     while (continueCount <= deps.maxContinues) {
+      // Plan-stop detection: check if Bob did real work (git working-tree changed).
+      // This catches "I presented a plan" completions with no code written.
+      if (deps.detectPlanStop) {
+        const { didWork, reason: workReason } = await checkDidWork(deps.cwd);
+        if (!didWork) {
+          // No work detected: treat as a verification failure and continue.
+          if (continueCount >= deps.maxContinues) {
+            deps.log(
+              `  [bob-polls] ✗ plan-stop detected after ${deps.maxContinues} continue(s) — giving up`,
+            );
+            deps.addNote(
+              deps.task.id,
+              `Plan-stop: Bob completed with no code changes after ${deps.maxContinues} continue(s). ${workReason}`,
+              "bob-polls",
+            );
+            return { ...current, status: "aborted" };
+          }
+
+          continueCount++;
+          deps.log(`  [bob-polls] ✗ plan-stop detected (${workReason}) — continue #${continueCount}`);
+          deps.addNote(deps.task.id, `Continue #${continueCount}: plan-stop (${workReason})`, "bob-polls");
+
+          if (!deps.dispatch) {
+            throw new Error("bob-polls: dispatch function not provided (required for continues)");
+          }
+          const continuePrompt = `${deps.taskPrompt}\n\n---\nYou presented a plan but did NOT implement it. The working tree has no changes.\nImplement the code and complete the task.`;
+          current = await deps.dispatch(continuePrompt);
+
+          if (!current.result.trim()) {
+            deps.log(`  [bob-polls] continue #${continueCount} produced no result — stopping`);
+            deps.addNote(
+              deps.task.id,
+              `Continue #${continueCount} produced no result (${current.status})`,
+              "bob-polls",
+            );
+            return current;
+          }
+          // Loop back to check work again (and then verify if work was done).
+          continue;
+        }
+        // Work detected: proceed to verification.
+        deps.log(`  [bob-polls] work detected (${workReason})`);
+      }
+
       const { passed, reason } = await verify(current.result, deps.verifyCommand, deps.cwd);
 
       if (passed) {

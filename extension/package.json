@@ -81,6 +81,11 @@
           "default": false,
           "description": "Escalate ALL followup questions to you for review (including plan approvals), instead of auto-answering. Only applies when bobTasks.answerFollowups is on. Off = Claude answers confident questions."
         },
+        "bobTasks.reviewPlans": {
+          "type": "boolean",
+          "default": false,
+          "description": "Escalate plan/design-approval questions to you for review, while auto-answering mechanical clarifications (file paths, flag names, etc.). Only applies when bobTasks.answerFollowups is on. Off = Claude answers all confident questions. Takes precedence over escalateAll when both are on."
+        },
         "bobTasks.classifierBackend": {
           "type": "string",
           "enum": ["cli", "api"],
