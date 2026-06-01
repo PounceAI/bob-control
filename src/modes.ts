@@ -66,8 +66,11 @@ export interface ModeProfile {
 // `ls`/`dir`/`pwd`/`tsc` are bare because they're valid with no args; they over-match
 // (ls→lsof) but only read-only tools, and no destructive command shares their prefix
 // (pinned by the SAFE_COMMANDS test).
+// `cd ` is included because agents routinely prefix a safe command with it
+// (`cd <workspace> && npm test`); since a chained command auto-runs only if EVERY part
+// matches, allowing `cd ` doesn't enable a dangerous tail (`cd x && rm -rf` still asks).
 export const SAFE_COMMANDS = [
-  "npm ", "npx ", "pnpm ", "yarn ", "node ", "tsc",
+  "npm ", "npx ", "pnpm ", "yarn ", "node ", "tsc", "cd ",
   "git ", "ls", "dir", "pwd", "cat ", "type ", "echo ",
   "grep ", "rg ", "findstr ", "python ", "python3 ", "pip ",
 ];
