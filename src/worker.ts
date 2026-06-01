@@ -324,7 +324,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
         config: dispatchAutoApprove(profile, opts.allowCommands),
         newTab: opts.newTab,
         timeoutMs: opts.timeoutMs,
-        onEvent: (name, { say, ask, text, partial }) => {
+        onEvent: (name, { say, ask, text, partial, ts }) => {
           if (say && say !== lastSay) {
             lastSay = say;
             const t = (text ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
@@ -332,8 +332,8 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
           }
 
           if (ask && !partial) lastAsk = ask;
-          void commandGate({ ask, text, partial });
-          void followupGateObj.gate({ ask, text, partial });
+          void commandGate({ ask, text, partial, ts });
+          void followupGateObj.gate({ ask, text, partial, ts });
         },
       });
     } finally {

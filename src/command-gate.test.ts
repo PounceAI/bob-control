@@ -63,12 +63,63 @@ test("forwards the task title and cwd as classifier context", async () => {
   assert.equal(h.classifyArgs[0].deps.backend, "cli");
 });
 
-test("a repeated command is classified only once (dedup)", async () => {
+test("a repeated command (no ts) falls back to text dedup, classified once", async () => {
   const h = harness();
   await h.gate(cmd("npm test"));
   await h.gate(cmd("npm test"));
   assert.equal(h.classifyArgs.length, 1);
   assert.equal(h.calls.approve, 1);
+});
+
+test("a re-emitted ask (same ts) is handled once", async () => {
+  const h = harness();
+  await h.gate({ ask: "command", text: "npm test", ts: 100 });
+  await h.gate({ ask: "command", text: "npm test", ts: 100 }); // same pending ask, restreamed
+  assert.equal(h.classifyArgs.length, 1);
+  assert.equal(h.calls.approve, 1, "one press for one ask");
+});
+
+test("a genuine re-run of the same command (new ts) is pressed again", async () => {
+  // The bug this fixes: text-dedup left a re-run's prompt unpressed. With ts-dedup the
+  // second occurrence (new ts) is handled — via the verdict cache, so no second classify.
+  const h = harness();
+  await h.gate({ ask: "command", text: "npm test", ts: 100 });
+  await h.gate({ ask: "command", text: "npm test", ts: 200 }); // a real second run
+  assert.equal(h.classifyArgs.length, 1, "second run reuses the cached verdict");
+  assert.equal(h.calls.approve, 2, "BOTH runs get a press");
+});
+
+test("a command + its command_security_warning (same ts) dedup to one press", async () => {
+  const h = harness();
+  await h.gate({ ask: "command", text: "rm x", ts: 100 });
+  await h.gate({ ask: "command_security_warning", text: "rm x", ts: 100 });
+  assert.equal(h.classifyArgs.length, 1);
+});
+
+test("serializes classify→press so a slow verdict can't press before an earlier one", async () => {
+  // First command's classify is slow, second instant. Without serialization the second
+  // (fast) press would land first; the queue keeps them in dispatch order.
+  const order: string[] = [];
+  const gate = createCommandGate({
+    enabled: true,
+    blocked: false,
+    backend: "cli",
+    task: { id: 7, title: "t" },
+    cwd: "/repo",
+    client: { approve: () => order.push("press"), reject: () => order.push("press") },
+    addNote: () => {},
+    log: () => {},
+    classify: (async (command: string) => {
+      if (command === "slow") await new Promise((r) => setTimeout(r, 30));
+      order.push(`classified:${command}`);
+      return { decision: "approve", reason: "ok" };
+    }) as GateDeps["classify"],
+    cache: new VerdictCache(),
+  });
+  const p1 = gate({ ask: "command", text: "slow", ts: 1 });
+  const p2 = gate({ ask: "command", text: "fast", ts: 2 });
+  await Promise.all([p1, p2]);
+  assert.deepEqual(order, ["classified:slow", "press", "classified:fast", "press"]);
 });
 
 test("distinct commands are each classified", async () => {
@@ -164,19 +215,19 @@ test("blocked (api, no key) warns exactly once and never classifies", async () =
 
 test("cache hit: repeated command uses cached verdict without re-classifying", async () => {
   const cache = new VerdictCache();
-  
+
   // First gate/dispatch: cache miss, should classify
   const h1 = harness({ cache }, { decision: "approve", reason: "safe build" });
   await h1.gate(cmd("npm run build"));
   assert.equal(h1.classifyArgs.length, 1, "first call should classify");
   assert.equal(h1.calls.approve, 1);
-  
+
   // Second gate/dispatch with same command: cache hit, should NOT classify again
   const h2 = harness({ cache }, { decision: "deny", reason: "should not be called" });
   await h2.gate(cmd("npm run build"));
   assert.equal(h2.classifyArgs.length, 0, "second call should use cache, not classify again");
   assert.equal(h2.calls.approve, 1, "should still press approve from cache");
-  
+
   // Verify cache hit was logged
   const cacheHitLog = h2.logs.find((l) => /cached classifier/.test(l));
   assert.ok(cacheHitLog, "should log cache hit");
@@ -185,12 +236,12 @@ test("cache hit: repeated command uses cached verdict without re-classifying", a
 
 test("cache differentiates commands by cwd", async () => {
   const cache = new VerdictCache();
-  
+
   // First gate with cwd=/repo
   const h1 = harness({ cache, cwd: "/repo" }, { decision: "approve", reason: "safe in repo" });
   await h1.gate(cmd("rm -rf build"));
   assert.equal(h1.classifyArgs.length, 1);
-  
+
   // Second gate with different cwd=/other — should classify again
   const h2 = harness({ cache, cwd: "/other" }, { decision: "deny", reason: "dangerous elsewhere" });
   await h2.gate(cmd("rm -rf build"));
@@ -231,12 +282,12 @@ test("approve/deny verdicts ARE cached and reused", async () => {
 
 test("cache hit still records a note", async () => {
   const cache = new VerdictCache();
-  
+
   // First gate: classify and cache
   const h1 = harness({ cache }, { decision: "approve", reason: "test" });
   await h1.gate(cmd("npm test"));
   assert.equal(h1.notes.length, 1);
-  
+
   // Second gate: cache hit
   const h2 = harness({ cache }, { decision: "deny", reason: "should not be called" });
   await h2.gate(cmd("npm test"));
@@ -246,12 +297,12 @@ test("cache hit still records a note", async () => {
 
 test("separate gates with shared cache reuse verdicts", async () => {
   const cache = new VerdictCache();
-  
+
   // First gate classifies
   const h1 = harness({ cache }, { decision: "approve", reason: "safe" });
   await h1.gate(cmd("npm test"));
   assert.equal(h1.classifyArgs.length, 1);
-  
+
   // Second gate (different dispatch) hits cache
   const h2 = harness({ cache }, { decision: "deny", reason: "should not be called" });
   await h2.gate(cmd("npm test"));

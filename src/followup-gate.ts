@@ -13,6 +13,8 @@ export interface FollowupEvent {
   ask?: string;
   text?: string;
   partial?: boolean;
+  /** Message timestamp — dedup a re-emitted ask on it (a genuine re-ask has a new ts). */
+  ts?: number;
 }
 
 export interface FollowupGateDeps {
@@ -174,9 +176,12 @@ export function createFollowupGate(deps: FollowupGateDeps): {
     if (!deps.enabled || ev.partial) return Promise.resolve();
     if (ev.ask !== "followup") return Promise.resolve();
     const parsed = parseFollowup((ev.text ?? "").trim());
-    // Bob re-emits the ask as it streams; answer each distinct question once.
-    if (!parsed || handled.has(parsed.question)) return Promise.resolve();
-    handled.add(parsed.question);
+    if (!parsed) return Promise.resolve();
+    // Dedup by ASK IDENTITY (ts): Bob re-emits one pending ask as it streams (same ts),
+    // while a genuine re-ask arrives as a new ts. Fall back to question text when no ts.
+    const key = ev.ts !== undefined ? `ts:${ev.ts}` : `q:${parsed.question}`;
+    if (handled.has(key)) return Promise.resolve();
+    handled.add(key);
 
     const short = parsed.question.replace(/\s+/g, " ").slice(0, 70);
 

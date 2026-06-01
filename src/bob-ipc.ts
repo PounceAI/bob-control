@@ -36,7 +36,7 @@ export interface DispatchOptions {
    * when Bob is *blocking for approval* rather than just narrating (`say`); the
    * classifier keys off `ask === "command"` to approve/deny a pending command.
    */
-  onEvent?: (name: string, detail: { say?: string; ask?: string; text?: string; partial?: boolean }) => void;
+  onEvent?: (name: string, detail: { say?: string; ask?: string; text?: string; partial?: boolean; ts?: number }) => void;
 }
 
 export interface DispatchResult {
@@ -180,7 +180,10 @@ export class BobClient {
           const text: string = String(cline.text ?? "");
           if (say === "completion_result" && text.trim()) this.active.lastCompletion = text;
           else if (text.trim()) this.active.lastText = text;
-          this.active.onEvent?.(name, { say, ask, text, partial: !!cline.partial });
+          // `ts` is the message's unique timestamp — the gates dedup on it so a
+          // re-emitted ask is handled once while a genuine re-run (new ts) is handled again.
+          const ts: number | undefined = typeof cline.ts === "number" ? cline.ts : undefined;
+          this.active.onEvent?.(name, { say, ask, text, partial: !!cline.partial, ts });
         } else {
           this.active.onEvent?.(name, {});
         }

@@ -17,6 +17,9 @@ export interface GateEvent {
   ask?: string;
   text?: string;
   partial?: boolean;
+  /** The message's unique timestamp — used to dedup a re-emitted ask while still
+   *  handling a genuine re-run of the same command (which arrives as a new ts). */
+  ts?: number;
 }
 
 export interface GateDeps {
@@ -62,75 +65,86 @@ export function createCommandGate(deps: GateDeps): (ev: GateEvent) => Promise<vo
   const handled = new Set<string>();
   let warnedNoKey = false;
   let warnedCliFail = false;
+  // Serialize: each command's classify→press runs to completion before the next
+  // starts, so a slow (cli) verdict can't resolve mid-stream and press the wrong
+  // prompt. Bob shows one command prompt at a time, so ordered presses stay aligned.
+  let queue: Promise<void> = Promise.resolve();
 
-  return function onCommandAsk(ev: GateEvent): Promise<void> {
-    if (!deps.enabled || ev.partial) return Promise.resolve();
-    if (ev.ask !== "command" && ev.ask !== "command_security_warning") return Promise.resolve();
-    const command = (ev.text ?? "").trim();
-    // Bob re-emits the same ask as the prompt streams; classify each command once.
-    if (!command || handled.has(command)) return Promise.resolve();
-    handled.add(command);
+  /** Classify (or reuse a cached verdict for) one command and press its button. */
+  async function handleCommand(command: string): Promise<void> {
+    const short = command.replace(/\s+/g, " ").slice(0, 60);
 
     if (deps.blocked) {
       if (!warnedNoKey) {
         deps.log("  ⚠ classifier=api but ANTHROPIC_API_KEY unset — leaving command for a human.");
         warnedNoKey = true;
       }
-      return Promise.resolve();
+      return;
     }
 
-    const short = command.replace(/\s+/g, " ").slice(0, 60);
-
-    // A prior identical command (same cwd) skips a fresh Claude call.
+    // A prior identical command (same cwd) reuses its verdict; else ask Claude.
+    let decision: "approve" | "deny" | "ask";
+    let reason: string;
+    let fromCache = false;
     const cached = cache.get(command, deps.cwd);
     if (cached) {
-      deps.log(`  ⚡ cached classifier ${cached.decision} (${cached.reason})`);
-      // Check if dispatch is still active (same as fresh classification)
-      if (deps.isActive && !deps.isActive()) {
-        deps.log(`  ~ stale cached ${cached.decision} arrived after dispatch ended — not pressing (${cached.reason})`);
-        deps.addNote(deps.task.id, `Classifier ${cached.decision} for \`${short}\` (cached, stale, not pressed): ${cached.reason}`, "classifier");
-        return Promise.resolve();
-      }
-      // Press the button immediately with cached verdict
-      if (cached.decision === "approve") {
-        deps.client.approve();
-      } else {
-        deps.client.reject();
-      }
-      deps.addNote(deps.task.id, `Classifier ${cached.decision} for \`${short}\` (cached): ${cached.reason}`, "classifier");
-      return Promise.resolve();
-    }
-
-    deps.log(`  ⟲ classifying command (${deps.backend}): ${short}`);
-    return classify(
-      command,
-      { task: deps.task.title, cwd: deps.cwd },
-      { backend: deps.backend, model: deps.model, apiKey: deps.apiKey, cliPath: deps.cliPath },
-    ).then(({ decision, reason }) => {
+      ({ decision, reason } = cached);
+      fromCache = true;
+      deps.log(`  ⚡ cached classifier ${decision} (${reason})`);
+    } else {
+      deps.log(`  ⟲ classifying command (${deps.backend}): ${short}`);
+      ({ decision, reason } = await classify(
+        command,
+        { task: deps.task.title, cwd: deps.cwd },
+        { backend: deps.backend, model: deps.model, apiKey: deps.apiKey, cliPath: deps.cliPath },
+      ));
       // Cache only confident decisions. An "ask" is the fail-safe for a transport
       // failure (cli not logged in, timeout, HTTP error) as well as a genuine model
       // verdict — caching it would let a transient blip permanently reject the command
       // for the worker's lifetime, so re-evaluate "ask" next time instead.
       if (decision === "approve" || decision === "deny") cache.set(command, deps.cwd, { decision, reason });
-      // Dispatch ended mid-classify: drop the press (still record the verdict).
-      if (deps.isActive && !deps.isActive()) {
-        deps.log(`  ~ stale classifier ${decision} arrived after dispatch ended — not pressing (${reason})`);
-        deps.addNote(deps.task.id, `Classifier ${decision} for \`${short}\` (stale, not pressed): ${reason}`, "classifier");
-        return;
+    }
+
+    // Dispatch may have ended while we waited (or while queued); drop the press so it
+    // can't land on the next task's prompt. Still record the verdict.
+    if (deps.isActive && !deps.isActive()) {
+      const tag = fromCache ? "cached, stale, not pressed" : "stale, not pressed";
+      deps.log(`  ~ stale ${fromCache ? "cached " : ""}classifier ${decision} arrived after dispatch ended — not pressing (${reason})`);
+      deps.addNote(deps.task.id, `Classifier ${decision} for \`${short}\` (${tag}): ${reason}`, "classifier");
+      return;
+    }
+
+    if (decision === "approve") {
+      deps.client.approve();
+      deps.log(`  ✓ classifier approved (${reason})${fromCache ? " [cached]" : ""}`);
+    } else {
+      deps.client.reject();
+      deps.log(`  ⛔ classifier ${decision === "deny" ? "denied" : "deferred→rejected"} (${reason})${fromCache ? " [cached]" : ""}`);
+      // Surface a failing cli backend once, so reject-everything isn't read as caution.
+      if (!fromCache && deps.backend === "cli" && !warnedCliFail && CLI_TRANSPORT_FAILURE.test(reason)) {
+        deps.log(`  ⚠ classifier cli backend is failing ("${reason}") — ALL gray-zone commands will be rejected. Check \`claude\` is installed and logged in.`);
+        warnedCliFail = true;
       }
-      if (decision === "approve") {
-        deps.client.approve();
-        deps.log(`  ✓ classifier approved (${reason})`);
-      } else {
-        deps.client.reject();
-        deps.log(`  ⛔ classifier ${decision === "deny" ? "denied" : "deferred→rejected"} (${reason})`);
-        // Surface a failing cli backend once, so reject-everything isn't read as caution.
-        if (deps.backend === "cli" && !warnedCliFail && CLI_TRANSPORT_FAILURE.test(reason)) {
-          deps.log(`  ⚠ classifier cli backend is failing ("${reason}") — ALL gray-zone commands will be rejected. Check \`claude\` is installed and logged in.`);
-          warnedCliFail = true;
-        }
-      }
-      deps.addNote(deps.task.id, `Classifier ${decision} for \`${short}\`: ${reason}`, "classifier");
-    });
+    }
+    deps.addNote(deps.task.id, `Classifier ${decision} for \`${short}\`${fromCache ? " (cached)" : ""}: ${reason}`, "classifier");
+  }
+
+  return function onCommandAsk(ev: GateEvent): Promise<void> {
+    if (!deps.enabled || ev.partial) return Promise.resolve();
+    if (ev.ask !== "command" && ev.ask !== "command_security_warning") return Promise.resolve();
+    const command = (ev.text ?? "").trim();
+    if (!command) return Promise.resolve();
+    // Dedup by ASK IDENTITY (ts): Bob re-emits the same pending ask as it streams —
+    // those share a ts and are handled once. A genuine RE-RUN of the same command is a
+    // NEW ask with a new ts, so it's handled (and pressed) again. (The command +
+    // command_security_warning for one command share a ts too, so they dedup to one.)
+    // Fall back to command text only when no ts is available.
+    const key = ev.ts !== undefined ? `ts:${ev.ts}` : `cmd:${command}`;
+    if (handled.has(key)) return Promise.resolve();
+    handled.add(key);
+    // Chain onto the serial queue; a failure in one must not break the chain.
+    const work = queue.then(() => handleCommand(command));
+    queue = work.catch(() => {});
+    return work;
   };
 }
