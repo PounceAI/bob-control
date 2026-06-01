@@ -12,6 +12,7 @@ function harness(over: Partial<FollowupGateDeps> = {}, result: FollowupAnswer = 
   const gate = createFollowupGate({
     enabled: true,
     blocked: false,
+    escalateAll: false,
     backend: "cli",
     task: { id: 7, title: "build the report" },
     cwd: "/repo",
@@ -108,4 +109,32 @@ test("a verdict that lands after the dispatch ends is not sent", async () => {
   active = false;
   await pending;
   assert.deepEqual(h.sent, [], "must not answer a settled dispatch");
+});
+
+test("escalate-all mode escalates every question instead of answering", async () => {
+  const h = harness({ escalateAll: true }, { answer: "Create both", reason: "ok" });
+  await h.gate(followup("Wait or create?", ["Wait", "Create both"]));
+  assert.deepEqual(h.sent, [], "must not send an answer");
+  assert.equal(h.escalations.length, 1, "must escalate");
+  assert.match(h.escalations[0].question, /Wait or create/);
+  assert.equal(h.answerArgs.length, 0, "must not call the answerer");
+  assert.match(h.logs.join("\n"), /escalated.*--escalate-all/);
+  assert.match(h.notes.at(-1)!.note, /escalated.*--escalate-all/);
+});
+
+test("escalate-all off = unchanged behavior (answers confident questions)", async () => {
+  const h = harness({ escalateAll: false }, { answer: "Create both", reason: "ok" });
+  await h.gate(followup("Wait or create?", ["Wait", "Create both"]));
+  assert.deepEqual(h.sent, ["Create both"], "must answer");
+  assert.equal(h.escalations.length, 0, "must not escalate");
+  assert.equal(h.answerArgs.length, 1, "must call the answerer");
+});
+
+test("escalate-all takes precedence over answerer confidence", async () => {
+  // Even when the answerer would be confident, escalate-all forces escalation.
+  const h = harness({ escalateAll: true }, { answer: "Yes", reason: "clear" });
+  await h.gate(followup("Should I proceed?"));
+  assert.deepEqual(h.sent, []);
+  assert.equal(h.escalations.length, 1);
+  assert.equal(h.answerArgs.length, 0, "answerer never consulted");
 });

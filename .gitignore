@@ -39,3 +39,4 @@ scratch/*
 # OS / editor cruft
 .DS_Store
 Thumbs.db
+test-deps.db

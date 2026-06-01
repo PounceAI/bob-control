@@ -45,6 +45,7 @@ function buttonPatchPresent(): boolean | null {
  *   node dist/worker.js --no-defer      don't pause while you're chatting with Bob
  *   node dist/worker.js --dry-run       show routing/claims without dispatching to Bob
  *   node dist/worker.js --answer-followups  let Claude answer Bob's questions (else they wait for you)
+ *   node dist/worker.js --escalate-all      escalate all followup questions to human review (with --answer-followups)
  *   node dist/worker.js --verify-and-continue  verify result and loop with Bob until it passes
  *   node dist/worker.js --emit-json     also print @@WORKER {json} event lines (for the extension)
  *   node dist/worker.js --retry 3       auto-retry transient failures (timeout/abort) up to 3 total attempts
@@ -72,6 +73,7 @@ interface Opts {
   deferStaleMs: number;
   commandClassifier: boolean;
   answerFollowups: boolean;
+  escalateAll: boolean;
   classifierBackend: "api" | "cli";
   classifierModel?: string;
   classifierCli?: string;
@@ -126,6 +128,7 @@ function parseOpts(argv: string[]): Opts {
     deferStaleMs: num("--defer-stale", 5 * 60_000),
     commandClassifier: has("--command-classifier"),
     answerFollowups: has("--answer-followups"),
+    escalateAll: has("--escalate-all"),
     classifierBackend: val("--classifier-backend") === "api" ? "api" : "cli",
     classifierModel: val("--classifier-model"),
     classifierCli: val("--classifier-cli"),
@@ -260,6 +263,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   const followupGate = createFollowupGate({
     enabled: opts.answerFollowups,
     blocked: classifierBlocked,
+    escalateAll: opts.escalateAll,
     backend: opts.classifierBackend,
     model: opts.classifierModel,
     apiKey,
@@ -486,7 +490,8 @@ async function main(): Promise<void> {
   if (opts.answerFollowups) {
     const noKey = opts.classifierBackend === "api" && !process.env.ANTHROPIC_API_KEY;
     const auth = noKey ? " — NO API KEY, questions escalate to you" : "";
-    console.log(`bob-worker: followup answering = on, backend=${opts.classifierBackend} (Claude answers Bob's questions, escalates when unsure${auth}).`);
+    const escalateMode = opts.escalateAll ? " — ESCALATE-ALL: all questions go to you for review" : "";
+    console.log(`bob-worker: followup answering = on, backend=${opts.classifierBackend} (Claude answers Bob's questions, escalates when unsure${auth}${escalateMode}).`);
   }
   if (opts.verifyAndContinue) {
     const cmd = opts.verifyCommand ? `command="${opts.verifyCommand}"` : "built-in heuristics";

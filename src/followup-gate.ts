@@ -20,6 +20,8 @@ export interface FollowupGateDeps {
   enabled: boolean;
   /** api backend chosen but no ANTHROPIC_API_KEY — can't auto-answer, must escalate. */
   blocked: boolean;
+  /** --escalate-all is set: escalate every question instead of auto-answering. */
+  escalateAll: boolean;
   backend: "api" | "cli";
   model?: string;
   apiKey?: string;
@@ -83,6 +85,13 @@ export function createFollowupGate(deps: FollowupGateDeps): (ev: FollowupEvent) 
       }
       deps.escalate(parsed.question, parsed.options);
       deps.addNote(deps.task.id, `Followup escalated (no API key): ${short}`, "answerer");
+      return Promise.resolve();
+    }
+
+    if (deps.escalateAll) {
+      deps.escalate(parsed.question, parsed.options);
+      deps.log(`  ⤴ escalated followup to a human (--escalate-all)`);
+      deps.addNote(deps.task.id, `Followup escalated (--escalate-all): ${short}`, "answerer");
       return Promise.resolve();
     }
 

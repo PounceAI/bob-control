@@ -76,6 +76,11 @@
           "default": false,
           "description": "Let Claude answer Bob's followup questions during a task (sending the reply over IPC), escalating to you when it's unsure. Off = questions wait for you. Uses the same backend as the command classifier; no button patch needed."
         },
+        "bobTasks.escalateAll": {
+          "type": "boolean",
+          "default": false,
+          "description": "Escalate ALL followup questions to you for review (including plan approvals), instead of auto-answering. Only applies when bobTasks.answerFollowups is on. Off = Claude answers confident questions."
+        },
         "bobTasks.classifierBackend": {
           "type": "string",
           "enum": ["cli", "api"],

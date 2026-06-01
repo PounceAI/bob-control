@@ -192,7 +192,12 @@ toast + a note on the task) instead of guessing.
 
 ```powershell
 node dist/worker.js --answer-followups                  # Claude answers Bob's questions; escalates when unsure
+node dist/worker.js --answer-followups --escalate-all   # escalate ALL questions to you (including plan approvals)
 ```
+
+With `--escalate-all`, every followup question is escalated to you for review instead of
+being auto-answered — ensuring you see and approve plans/designs before Bob proceeds. Off
+by default (Claude answers confident questions); only applies when `--answer-followups` is on.
 
 ### Templates
 

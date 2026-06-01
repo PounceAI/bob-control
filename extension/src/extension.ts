@@ -99,6 +99,7 @@ function startWorker(): void {
   const wantFollowups = c.get<boolean>("answerFollowups");
   if (wantClassifier) args.push("--command-classifier");
   if (wantFollowups) args.push("--answer-followups");
+  if (c.get<boolean>("escalateAll")) args.push("--escalate-all");
   if (wantClassifier || wantFollowups) {
     args.push("--classifier-backend", c.get<string>("classifierBackend") ?? "cli");
     const model = c.get<string>("classifierModel");
