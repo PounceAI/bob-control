@@ -104,6 +104,18 @@ test("autoApprove profiles: ask is read-only, advanced enables browser", () => {
   assert.equal(profileFor("advanced").autoApprove.alwaysAllowBrowser, true);
 });
 
+test("every dispatched profile sends the autoApprovalEnabled master switch", () => {
+  // Roo/Bob ignores the alwaysAllow* flags entirely unless the master switch is on,
+  // so a missing autoApprovalEnabled makes Bob prompt even for reads (the bug this
+  // pins). alwaysApproveResubmit is forced on so transient API errors don't strand
+  // the unattended task at a retry prompt.
+  for (const slug of ["ask", "code", "orchestrator", "advanced"]) {
+    const aa = dispatchAutoApprove(profileFor(slug));
+    assert.equal(aa.autoApprovalEnabled, true, `${slug} must enable the master switch`);
+    assert.equal(aa.alwaysApproveResubmit, true, `${slug} must auto-approve resubmit`);
+  }
+});
+
 // Mirror Bob's QMo: a command auto-runs only if some allowlist entry is a
 // case-insensitive prefix of it. Unmatched -> manual approval prompt.
 const isAllowed = (cmd: string, list: string[] = []) =>

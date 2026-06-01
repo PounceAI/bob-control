@@ -44,6 +44,10 @@ export interface ModeProfile {
   risk: Risk;
   commandPolicy: CommandPolicy;
   autoApprove: {
+    // Master switch. Roo/Bob treats every alwaysAllow* flag below as INERT unless
+    // this is true (it gates the whole auto-approve row), so an unattended dispatch
+    // MUST send it — otherwise Bob prompts for everything, even a file read.
+    autoApprovalEnabled: boolean;
     alwaysAllowReadOnly: boolean;
     alwaysAllowWrite: boolean;
     alwaysAllowExecute: boolean;
@@ -70,6 +74,7 @@ const STANDARD: ModeProfile = {
   risk: "standard",
   commandPolicy: "allowlist",
   autoApprove: {
+    autoApprovalEnabled: true,
     alwaysAllowReadOnly: true,
     alwaysAllowWrite: true,
     alwaysAllowExecute: true,
@@ -84,6 +89,9 @@ export const MODE_PROFILES: Record<string, ModeProfile> = {
     risk: "safe",
     commandPolicy: "none",
     autoApprove: {
+      // Master on so reads/MCP auto-run; write+execute stay false, so any attempted
+      // mutation still hits a prompt the unattended worker never approves => no writes.
+      autoApprovalEnabled: true,
       alwaysAllowReadOnly: true,
       alwaysAllowWrite: false,
       alwaysAllowExecute: false,
@@ -99,6 +107,7 @@ export const MODE_PROFILES: Record<string, ModeProfile> = {
     risk: "elevated",
     commandPolicy: "classifier",
     autoApprove: {
+      autoApprovalEnabled: true,
       alwaysAllowReadOnly: true,
       alwaysAllowWrite: true,
       alwaysAllowExecute: true,
@@ -114,18 +123,21 @@ export function profileFor(mode: string): ModeProfile {
 }
 
 /**
- * The autoApprove block sent to Bob on dispatch: the mode's bool toggles plus the
- * allowedCommands list derived from its commandPolicy. allowlist and classifier
- * share the SAFE_COMMANDS fast-path — the difference is what handles the gray zone
- * (a human prompt vs the extension's Claude classifier), which happens Bob-side,
- * not in this config.
+ * The autoApprove block sent to Bob on dispatch: the mode's bool toggles (incl. the
+ * autoApprovalEnabled master switch) plus the allowedCommands list derived from its
+ * commandPolicy. allowlist and classifier share the SAFE_COMMANDS fast-path — the
+ * difference is what handles the gray zone (a human prompt vs the extension's Claude
+ * classifier), which happens Bob-side, not in this config. alwaysApproveResubmit is
+ * forced on so a transient API error auto-retries instead of stranding the unattended
+ * task at a "retry?" prompt no one is there to answer.
  */
 export function dispatchAutoApprove(profile: ModeProfile): ModeProfile["autoApprove"] & {
   allowedCommands: string[];
+  alwaysApproveResubmit: boolean;
 } {
   const allowedCommands =
     profile.commandPolicy === "auto" ? ["*"] : profile.commandPolicy === "none" ? [] : SAFE_COMMANDS;
-  return { ...profile.autoApprove, allowedCommands };
+  return { ...profile.autoApprove, allowedCommands, alwaysApproveResubmit: true };
 }
 
 export function resolveMode(task: Pick<Task, "mode" | "title" | "description" | "tags">): {
