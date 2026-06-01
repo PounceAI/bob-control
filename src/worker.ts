@@ -349,11 +349,61 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     detectPlanStop: opts.detectPlanStop,
   });
 
+  // Capture baseline snapshot BEFORE initial dispatch for plan-stop detection.
+  // This allows detecting changes even when the tree is already dirty from prior tasks.
+  let baseline: string | undefined;
+  if (opts.detectPlanStop) {
+    const { spawn } = await import("node:child_process");
+    baseline = await new Promise<string>((resolve) => {
+      const statusProc = spawn("git", ["status", "--porcelain"], { cwd: process.cwd(), stdio: "pipe" });
+      const diffProc = spawn("git", ["diff", "HEAD"], { cwd: process.cwd(), stdio: "pipe" });
+      let statusOut = "";
+      let diffOut = "";
+      let completed = 0;
+      let failed = false;
+      const checkComplete = () => {
+        if (++completed === 2 && !failed) {
+          resolve(`STATUS:\n${statusOut}\nDIFF:\n${diffOut}`);
+        }
+      };
+      statusProc.stdout?.on("data", (chunk: Buffer) => (statusOut += chunk.toString()));
+      statusProc.on("close", (code: number | null) => {
+        if (code !== 0 && !failed) {
+          failed = true;
+          resolve("GIT_ERROR");
+        } else {
+          checkComplete();
+        }
+      });
+      statusProc.on("error", () => {
+        if (!failed) {
+          failed = true;
+          resolve("GIT_ERROR");
+        }
+      });
+      diffProc.stdout?.on("data", (chunk: Buffer) => (diffOut += chunk.toString()));
+      diffProc.on("close", (code: number | null) => {
+        if (code !== 0 && !failed) {
+          failed = true;
+          resolve("GIT_ERROR");
+        } else {
+          checkComplete();
+        }
+      });
+      diffProc.on("error", () => {
+        if (!failed) {
+          failed = true;
+          resolve("GIT_ERROR");
+        }
+      });
+    });
+  }
+
   // Initial dispatch.
   const initialRes = await doDispatch(buildPrompt(task));
 
   // Run the poll loop (no-op if feature is off).
-  const res = await pollLoop(initialRes);
+  const res = await pollLoop(initialRes, baseline);
 
   // Mark done only on a GENUINE completion: Bob fired taskCompleted, or it
   // emitted a real attempt_completion (completion_result). In some multi-step

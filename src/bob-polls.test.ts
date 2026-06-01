@@ -246,14 +246,20 @@ test("timeout initial result: skips verification", async () => {
 
 test("plan-stop detection off: does not check for work", async () => {
   const workCheckArgs: any[] = [];
+  const snapshotArgs: any[] = [];
   const h = harness({
     detectPlanStop: false,
-    checkDidWork: async (cwd) => {
-      workCheckArgs.push({ cwd });
+    captureSnapshot: async (cwd) => {
+      snapshotArgs.push({ cwd });
+      return "snapshot";
+    },
+    checkDidWork: async (cwd, baseline) => {
+      workCheckArgs.push({ cwd, baseline });
       return { didWork: false, reason: "clean" };
     },
   });
   await h.loop(initialResult());
+  assert.equal(snapshotArgs.length, 0, "should not capture snapshot when feature is off");
   assert.equal(workCheckArgs.length, 0, "should not check work when feature is off");
 });
 
@@ -261,13 +267,15 @@ test("plan-stop detection on + work detected: proceeds to verification", async (
   const workCheckArgs: any[] = [];
   const h = harness({
     detectPlanStop: true,
-    checkDidWork: async (cwd) => {
-      workCheckArgs.push({ cwd });
+    captureSnapshot: async () => "baseline-snapshot",
+    checkDidWork: async (cwd, baseline) => {
+      workCheckArgs.push({ cwd, baseline });
       return { didWork: true, reason: "3 files changed" };
     },
   });
   const result = await h.loop(initialResult());
   assert.equal(workCheckArgs.length, 1, "should check work once");
+  assert.equal(workCheckArgs[0].baseline, "baseline-snapshot");
   assert.equal(h.verifyArgs.length, 1, "should proceed to verification");
   assert.equal(result.result, "initial result");
   assert.match(h.logs.join("\n"), /work detected.*3 files changed/);
@@ -275,14 +283,16 @@ test("plan-stop detection on + work detected: proceeds to verification", async (
 
 test("plan-stop detection on + no work: continues with plan-stop message", async () => {
   let checkCount = 0;
+  let snapshotCount = 0;
   const h = harness(
     {
       detectPlanStop: true,
-      checkDidWork: async () => {
+      captureSnapshot: async () => `snapshot-${++snapshotCount}`,
+      checkDidWork: async (cwd, baseline) => {
         checkCount++;
         // First check: no work. After continue: work detected.
         return checkCount === 1
-          ? { didWork: false, reason: "git working tree is clean" }
+          ? { didWork: false, reason: "working tree unchanged from baseline" }
           : { didWork: true, reason: "files changed" };
       },
     },
@@ -297,16 +307,19 @@ test("plan-stop detection on + no work: continues with plan-stop message", async
   assert.match(h.notes[0].note, /Continue #1: plan-stop/);
   assert.match(h.notes[1].note, /Verified after 1 continue/);
   assert.equal(result.result, "result from continue #1");
+  assert.equal(snapshotCount, 2, "should re-capture snapshot after continue");
 });
 
 test("plan-stop detection: no work then work then verify pass", async () => {
   let checkCount = 0;
+  let snapshotCount = 0;
   const h = harness(
     {
       detectPlanStop: true,
-      checkDidWork: async () => {
+      captureSnapshot: async () => `snapshot-${++snapshotCount}`,
+      checkDidWork: async (cwd, baseline) => {
         checkCount++;
-        if (checkCount === 1) return { didWork: false, reason: "clean" };
+        if (checkCount === 1) return { didWork: false, reason: "unchanged from baseline" };
         return { didWork: true, reason: "files changed" };
       },
     },
@@ -314,6 +327,7 @@ test("plan-stop detection: no work then work then verify pass", async () => {
   );
   const result = await h.loop(initialResult());
   assert.equal(checkCount, 2, "should check work twice (initial + continue)");
+  assert.equal(snapshotCount, 2, "should capture snapshot twice (initial + after continue)");
   assert.equal(h.dispatchArgs.length, 1, "one continue for plan-stop");
   assert.equal(h.verifyArgs.length, 1, "verify once after work detected");
   assert.equal(result.result, "result from continue #1");
@@ -324,7 +338,8 @@ test("plan-stop detection: hits max continues with no work", async () => {
     {
       detectPlanStop: true,
       maxContinues: 2,
-      checkDidWork: async () => ({ didWork: false, reason: "still clean" }),
+      captureSnapshot: async () => "same-snapshot",
+      checkDidWork: async () => ({ didWork: false, reason: "still unchanged" }),
     },
     [],
   );
@@ -332,17 +347,19 @@ test("plan-stop detection: hits max continues with no work", async () => {
   assert.equal(h.dispatchArgs.length, 2, "two continues before giving up");
   assert.equal(result.status, "aborted", "should mark as failed");
   assert.match(h.notes[2].note, /Plan-stop.*after 2 continue/);
-  assert.match(h.notes[2].note, /still clean/);
+  assert.match(h.notes[2].note, /still unchanged/);
 });
 
 test("plan-stop detection: no work, then work, then verify fail, then verify pass", async () => {
   let checkCount = 0;
+  let snapshotCount = 0;
   const h = harness(
     {
       detectPlanStop: true,
-      checkDidWork: async () => {
+      captureSnapshot: async () => `snapshot-${++snapshotCount}`,
+      checkDidWork: async (cwd, baseline) => {
         checkCount++;
-        if (checkCount === 1) return { didWork: false, reason: "clean" };
+        if (checkCount === 1) return { didWork: false, reason: "unchanged" };
         return { didWork: true, reason: "changed" };
       },
     },
@@ -353,6 +370,7 @@ test("plan-stop detection: no work, then work, then verify fail, then verify pas
   );
   const result = await h.loop(initialResult());
   assert.equal(checkCount, 3, "check work 3 times: initial, after plan-stop continue, after verify continue");
+  assert.equal(snapshotCount, 3, "capture snapshot 3 times: initial, after plan-stop continue, after verify continue");
   assert.equal(h.dispatchArgs.length, 2, "two continues: plan-stop + verify fail");
   assert.match(h.dispatchArgs[0], /presented a plan but did NOT implement/);
   assert.match(h.dispatchArgs[1], /did NOT pass verification: tests failed/);
@@ -371,7 +389,8 @@ test("plan-stop detection: continue produces no result, stops looping", async ()
     task: { id: 42, title: "test task" },
     addNote: () => {},
     log: () => {},
-    checkDidWork: async () => ({ didWork: false, reason: "clean" }),
+    captureSnapshot: async () => "snapshot",
+    checkDidWork: async () => ({ didWork: false, reason: "unchanged" }),
     verify: async () => ({ passed: true, reason: "ok" }),
     dispatch: async (t) => {
       dispatched.push(t);
@@ -383,31 +402,106 @@ test("plan-stop detection: continue produces no result, stops looping", async ()
   assert.equal(result.status, "timeout");
 });
 
-test("plan-stop detection: forwards cwd to checkDidWork", async () => {
+test("plan-stop detection: forwards cwd to checkDidWork and baseline", async () => {
   const workCheckArgs: any[] = [];
   const h = harness({
     detectPlanStop: true,
     cwd: "/my/custom/path",
-    checkDidWork: async (cwd) => {
-      workCheckArgs.push({ cwd });
+    captureSnapshot: async () => "test-baseline",
+    checkDidWork: async (cwd, baseline) => {
+      workCheckArgs.push({ cwd, baseline });
       return { didWork: true, reason: "ok" };
     },
   });
   await h.loop(initialResult());
   assert.equal(workCheckArgs[0].cwd, "/my/custom/path");
+  assert.equal(workCheckArgs[0].baseline, "test-baseline");
+});
+
+// Snapshot-based detection tests
+
+test("snapshot unchanged: detects plan-stop", async () => {
+  let checkCount = 0;
+  const h = harness({
+    detectPlanStop: true,
+    captureSnapshot: async () => "SAME_SNAPSHOT",
+    checkDidWork: async (cwd, baseline) => {
+      checkCount++;
+      // First check: no work. After continue: work detected.
+      return checkCount === 1
+        ? { didWork: false, reason: "working tree unchanged from baseline" }
+        : { didWork: true, reason: "changed" };
+    },
+  });
+  const result = await h.loop(initialResult());
+  assert.equal(h.dispatchArgs.length, 1, "should continue for plan-stop");
+  assert.match(h.dispatchArgs[0], /presented a plan but did NOT implement/);
+});
+
+test("snapshot changed: detects work done", async () => {
+  let snapshotCount = 0;
+  const h = harness({
+    detectPlanStop: true,
+    captureSnapshot: async () => `snapshot-${++snapshotCount}`,
+    checkDidWork: async (cwd, baseline) => {
+      // Different snapshots = work detected
+      return { didWork: true, reason: "2 new file changes detected" };
+    },
+  });
+  const result = await h.loop(initialResult());
+  assert.equal(h.dispatchArgs.length, 0, "should not continue when work detected");
+  assert.equal(h.verifyArgs.length, 1, "should proceed to verification");
+  assert.match(h.logs.join("\n"), /work detected.*2 new file changes/);
+});
+
+test("baseline provided externally: uses it instead of capturing", async () => {
+  const snapshotArgs: any[] = [];
+  const workCheckArgs: any[] = [];
+  const h = harness({
+    detectPlanStop: true,
+    captureSnapshot: async (cwd) => {
+      snapshotArgs.push({ cwd });
+      return "internal-snapshot";
+    },
+    checkDidWork: async (cwd, baseline) => {
+      workCheckArgs.push({ cwd, baseline });
+      return { didWork: true, reason: "ok" };
+    },
+  });
+  await h.loop(initialResult(), "external-baseline");
+  assert.equal(snapshotArgs.length, 0, "should not capture when baseline provided");
+  assert.equal(workCheckArgs[0].baseline, "external-baseline", "should use provided baseline");
+});
+
+test("git error in snapshot: conservatively assumes work done", async () => {
+  const h = harness({
+    detectPlanStop: true,
+    captureSnapshot: async () => "GIT_ERROR",
+    checkDidWork: async (cwd, baseline) => {
+      if (baseline === "GIT_ERROR") {
+        return { didWork: true, reason: "git check failed, assuming work done" };
+      }
+      return { didWork: false, reason: "unchanged" };
+    },
+  });
+  const result = await h.loop(initialResult());
+  assert.equal(h.dispatchArgs.length, 0, "should not continue on git error");
+  assert.match(h.logs.join("\n"), /work detected.*git check failed/);
 });
 
 test("plan-stop detection: combines with verify-and-continue correctly", async () => {
   let checkCount = 0;
+  let snapshotCount = 0;
   const h = harness(
     {
       detectPlanStop: true,
       verifyCommand: "npm test",
-      checkDidWork: async () => {
+      captureSnapshot: async () => `snapshot-${++snapshotCount}`,
+      checkDidWork: async (cwd, baseline) => {
         checkCount++;
         // First check: no work. After continue: work detected.
         return checkCount === 1
-          ? { didWork: false, reason: "clean" }
+          ? { didWork: false, reason: "unchanged" }
           : { didWork: true, reason: "changed" };
       },
     },
@@ -419,6 +513,7 @@ test("plan-stop detection: combines with verify-and-continue correctly", async (
   const result = await h.loop(initialResult());
   // Flow: initial (no work) -> plan-stop continue -> work detected -> verify fail -> verify continue -> verify pass
   assert.equal(checkCount, 3, "check work 3 times");
+  assert.equal(snapshotCount, 3, "capture snapshot 3 times");
   assert.equal(h.dispatchArgs.length, 2, "two continues: plan-stop + verify");
   assert.equal(h.verifyArgs.length, 2, "verify twice after work detected");
   assert.match(h.dispatchArgs[0], /presented a plan/);

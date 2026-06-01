@@ -47,8 +47,10 @@ export interface PollDeps {
   dispatch?: (text: string) => Promise<PollResult>;
   /** Feature toggle for plan-stop detection: when true, check if Bob did real work. */
   detectPlanStop?: boolean;
-  /** Injectable for tests; checks if real work happened (git working-tree changed). */
-  checkDidWork?: (cwd: string) => Promise<WorkCheckResult>;
+  /** Injectable for tests; captures a snapshot of the working tree state. */
+  captureSnapshot?: (cwd: string) => Promise<string>;
+  /** Injectable for tests; checks if real work happened (snapshot changed from baseline). */
+  checkDidWork?: (cwd: string, baseline: string) => Promise<WorkCheckResult>;
 }
 
 /**
@@ -85,39 +87,99 @@ async function defaultVerify(
 }
 
 /**
- * Check if real work happened by examining git working-tree status.
- * Returns didWork=false if the working tree is clean (no changes), meaning Bob
- * likely just presented a plan without implementing it.
+ * Capture a content-aware snapshot of the working tree state.
+ * Combines `git status --porcelain` (new/deleted/modified files) with `git diff HEAD`
+ * (actual content changes in tracked files). This allows detecting changes even when
+ * the tree is already dirty from prior tasks.
+ *
+ * Known limitation: editing an UNTRACKED file that a prior task created is NOT detected
+ * (porcelain shows ?? for both snapshots, diff omits untracked content). This is acceptable
+ * because untracked files are typically intermediate artifacts, not the primary deliverable.
  */
-async function defaultCheckDidWork(cwd: string): Promise<WorkCheckResult> {
-  // Use `git status --porcelain` which outputs nothing when clean, or file statuses when dirty.
-  return new Promise<WorkCheckResult>((resolve) => {
-    const proc = spawn("git", ["status", "--porcelain"], { cwd, stdio: "pipe" });
-    let stdout = "";
-    let stderr = "";
-    proc.stdout?.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
-    proc.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
-    proc.on("close", (code: number | null) => {
-      if (code !== 0) {
-        // Git command failed (not a git repo, or other error) — conservatively assume work happened.
-        resolve({ didWork: true, reason: `git status failed (exit ${code}), assuming work done` });
+async function defaultCaptureSnapshot(cwd: string): Promise<string> {
+  return new Promise<string>((resolve) => {
+    // Run both commands in parallel for efficiency
+    const statusProc = spawn("git", ["status", "--porcelain"], { cwd, stdio: "pipe" });
+    const diffProc = spawn("git", ["diff", "HEAD"], { cwd, stdio: "pipe" });
+
+    let statusOut = "";
+    let diffOut = "";
+    let completed = 0;
+    let failed = false;
+
+    const checkComplete = () => {
+      if (++completed === 2 && !failed) {
+        // Combine both outputs into a single snapshot string
+        resolve(`STATUS:\n${statusOut}\nDIFF:\n${diffOut}`);
+      }
+    };
+
+    statusProc.stdout?.on("data", (chunk: Buffer) => (statusOut += chunk.toString()));
+    statusProc.on("close", (code: number | null) => {
+      if (code !== 0 && !failed) {
+        failed = true;
+        resolve("GIT_ERROR"); // Sentinel value for git failures
       } else {
-        const output = stdout.trim();
-        if (output === "") {
-          // Clean working tree: no changes detected.
-          resolve({ didWork: false, reason: "git working tree is clean (no files changed)" });
-        } else {
-          // Dirty working tree: changes detected.
-          const lines = output.split("\n").length;
-          resolve({ didWork: true, reason: `git working tree has ${lines} change${lines === 1 ? "" : "s"}` });
-        }
+        checkComplete();
       }
     });
-    proc.on("error", (err: Error) => {
-      // Spawn failed (git not installed?) — conservatively assume work happened.
-      resolve({ didWork: true, reason: `git check failed: ${err.message}` });
+    statusProc.on("error", () => {
+      if (!failed) {
+        failed = true;
+        resolve("GIT_ERROR");
+      }
+    });
+
+    diffProc.stdout?.on("data", (chunk: Buffer) => (diffOut += chunk.toString()));
+    diffProc.on("close", (code: number | null) => {
+      if (code !== 0 && !failed) {
+        failed = true;
+        resolve("GIT_ERROR");
+      } else {
+        checkComplete();
+      }
+    });
+    diffProc.on("error", () => {
+      if (!failed) {
+        failed = true;
+        resolve("GIT_ERROR");
+      }
     });
   });
+}
+
+/**
+ * Check if real work happened by comparing the current snapshot to a baseline.
+ * Returns didWork=false if the snapshot is unchanged (no new changes since baseline),
+ * meaning Bob likely just presented a plan without implementing it.
+ */
+async function defaultCheckDidWork(cwd: string, baseline: string): Promise<WorkCheckResult> {
+  const current = await defaultCaptureSnapshot(cwd);
+
+  // Git command failed: conservatively assume work happened.
+  if (current === "GIT_ERROR" || baseline === "GIT_ERROR") {
+    return { didWork: true, reason: "git check failed, assuming work done" };
+  }
+
+  // Compare snapshots
+  if (current === baseline) {
+    return { didWork: false, reason: "working tree unchanged from baseline (no new changes)" };
+  }
+
+  // Snapshot changed: work detected
+  const statusBefore = baseline.match(/STATUS:\n(.*?)\nDIFF:/s)?.[1] || "";
+  const statusAfter = current.match(/STATUS:\n(.*?)\nDIFF:/s)?.[1] || "";
+  const beforeLines = statusBefore.trim() ? statusBefore.trim().split("\n").length : 0;
+  const afterLines = statusAfter.trim() ? statusAfter.trim().split("\n").length : 0;
+  const delta = afterLines - beforeLines;
+
+  if (delta > 0) {
+    return { didWork: true, reason: `${delta} new file change${delta === 1 ? "" : "s"} detected` };
+  } else if (delta < 0) {
+    return { didWork: true, reason: `${-delta} file change${delta === -1 ? "" : "s"} resolved` };
+  } else {
+    return { didWork: true, reason: "file content changed" };
+  }
 }
 
 /**
@@ -125,11 +187,12 @@ async function defaultCheckDidWork(cwd: string): Promise<WorkCheckResult> {
  * initial dispatch result and either returns it (if verification passes) or loops
  * with Bob to fix issues until it passes or the max-continues cap is hit.
  */
-export function createPollLoop(deps: PollDeps): (initial: PollResult) => Promise<PollResult> {
+export function createPollLoop(deps: PollDeps): (initial: PollResult, baseline?: string) => Promise<PollResult> {
   const verify = deps.verify ?? defaultVerify;
+  const captureSnapshot = deps.captureSnapshot ?? defaultCaptureSnapshot;
   const checkDidWork = deps.checkDidWork ?? defaultCheckDidWork;
 
-  return async function pollLoop(initial: PollResult): Promise<PollResult> {
+  return async function pollLoop(initial: PollResult, baseline?: string): Promise<PollResult> {
     // Feature off: return the initial result unchanged.
     if (!deps.enabled) return initial;
 
@@ -143,11 +206,17 @@ export function createPollLoop(deps: PollDeps): (initial: PollResult) => Promise
     let current = initial;
     let continueCount = 0;
 
+    // Capture baseline snapshot if plan-stop detection is on and no baseline provided
+    let currentBaseline = baseline;
+    if (deps.detectPlanStop && !currentBaseline) {
+      currentBaseline = await captureSnapshot(deps.cwd);
+    }
+
     while (continueCount <= deps.maxContinues) {
-      // Plan-stop detection: check if Bob did real work (git working-tree changed).
+      // Plan-stop detection: check if Bob did real work (snapshot changed from baseline).
       // This catches "I presented a plan" completions with no code written.
-      if (deps.detectPlanStop) {
-        const { didWork, reason: workReason } = await checkDidWork(deps.cwd);
+      if (deps.detectPlanStop && currentBaseline) {
+        const { didWork, reason: workReason } = await checkDidWork(deps.cwd, currentBaseline);
         if (!didWork) {
           // No work detected: treat as a verification failure and continue.
           if (continueCount >= deps.maxContinues) {
@@ -181,6 +250,8 @@ export function createPollLoop(deps: PollDeps): (initial: PollResult) => Promise
             );
             return current;
           }
+          // Re-capture baseline after continue so we can detect if THIS continue did work
+          currentBaseline = await captureSnapshot(deps.cwd);
           // Loop back to check work again (and then verify if work was done).
           continue;
         }
@@ -242,6 +313,11 @@ export function createPollLoop(deps: PollDeps): (initial: PollResult) => Promise
           "bob-polls",
         );
         return current;
+      }
+
+      // Re-capture baseline after continue so we can detect if THIS continue did work
+      if (deps.detectPlanStop) {
+        currentBaseline = await captureSnapshot(deps.cwd);
       }
     }
 
