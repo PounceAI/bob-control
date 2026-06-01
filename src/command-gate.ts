@@ -4,6 +4,7 @@
 // human, we ask Claude and press approve/reject over IPC (needs the Bob button
 // patch). Fail-safe by construction: only an explicit "approve" runs the command.
 import { classifyCommand } from "./classify.js";
+import { getSharedCache, type VerdictCache } from "./verdict-cache.js";
 
 /** The subset of BobClient the gate presses. */
 export interface GateClient {
@@ -40,6 +41,8 @@ export interface GateDeps {
   isActive?: () => boolean;
   /** Injectable for tests; defaults to the real classifier. */
   classify?: typeof classifyCommand;
+  /** Injectable verdict cache; defaults to the shared singleton. */
+  cache?: VerdictCache;
 }
 
 /**
@@ -55,6 +58,7 @@ const CLI_TRANSPORT_FAILURE = /^(cli |classifier timeout|invalid )/;
 
 export function createCommandGate(deps: GateDeps): (ev: GateEvent) => Promise<void> {
   const classify = deps.classify ?? classifyCommand;
+  const cache = deps.cache ?? getSharedCache();
   const handled = new Set<string>();
   let warnedNoKey = false;
   let warnedCliFail = false;
@@ -76,12 +80,38 @@ export function createCommandGate(deps: GateDeps): (ev: GateEvent) => Promise<vo
     }
 
     const short = command.replace(/\s+/g, " ").slice(0, 60);
+
+    // A prior identical command (same cwd) skips a fresh Claude call.
+    const cached = cache.get(command, deps.cwd);
+    if (cached) {
+      deps.log(`  ⚡ cached classifier ${cached.decision} (${cached.reason})`);
+      // Check if dispatch is still active (same as fresh classification)
+      if (deps.isActive && !deps.isActive()) {
+        deps.log(`  ~ stale cached ${cached.decision} arrived after dispatch ended — not pressing (${cached.reason})`);
+        deps.addNote(deps.task.id, `Classifier ${cached.decision} for \`${short}\` (cached, stale, not pressed): ${cached.reason}`, "classifier");
+        return Promise.resolve();
+      }
+      // Press the button immediately with cached verdict
+      if (cached.decision === "approve") {
+        deps.client.approve();
+      } else {
+        deps.client.reject();
+      }
+      deps.addNote(deps.task.id, `Classifier ${cached.decision} for \`${short}\` (cached): ${cached.reason}`, "classifier");
+      return Promise.resolve();
+    }
+
     deps.log(`  ⟲ classifying command (${deps.backend}): ${short}`);
     return classify(
       command,
       { task: deps.task.title, cwd: deps.cwd },
       { backend: deps.backend, model: deps.model, apiKey: deps.apiKey, cliPath: deps.cliPath },
     ).then(({ decision, reason }) => {
+      // Cache only confident decisions. An "ask" is the fail-safe for a transport
+      // failure (cli not logged in, timeout, HTTP error) as well as a genuine model
+      // verdict — caching it would let a transient blip permanently reject the command
+      // for the worker's lifetime, so re-evaluate "ask" next time instead.
+      if (decision === "approve" || decision === "deny") cache.set(command, deps.cwd, { decision, reason });
       // Dispatch ended mid-classify: drop the press (still record the verdict).
       if (deps.isActive && !deps.isActive()) {
         deps.log(`  ~ stale classifier ${decision} arrived after dispatch ended — not pressing (${reason})`);

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createCommandGate, type GateDeps, type GateEvent } from "./command-gate.js";
 import type { Classification } from "./classify.js";
+import { VerdictCache } from "./verdict-cache.js";
 
 // A recording harness: a gate wired to fakes that capture every button press,
 // log line, and note, plus a stub classifier whose verdict the test controls.
@@ -23,6 +24,7 @@ function harness(over: Partial<GateDeps> = {}, verdict: Classification = { decis
       classifyArgs.push({ command, ctx, deps });
       return verdict;
     }) as GateDeps["classify"],
+    cache: new VerdictCache(), // Each test gets a fresh cache
     ...over,
   });
   return { gate, calls, logs, notes, classifyArgs };
@@ -157,4 +159,102 @@ test("blocked (api, no key) warns exactly once and never classifies", async () =
   assert.deepEqual(h.calls, { approve: 0, reject: 0 });
   const warnings = h.logs.filter((l) => /ANTHROPIC_API_KEY unset/.test(l));
   assert.equal(warnings.length, 1);
+});
+
+
+test("cache hit: repeated command uses cached verdict without re-classifying", async () => {
+  const cache = new VerdictCache();
+  
+  // First gate/dispatch: cache miss, should classify
+  const h1 = harness({ cache }, { decision: "approve", reason: "safe build" });
+  await h1.gate(cmd("npm run build"));
+  assert.equal(h1.classifyArgs.length, 1, "first call should classify");
+  assert.equal(h1.calls.approve, 1);
+  
+  // Second gate/dispatch with same command: cache hit, should NOT classify again
+  const h2 = harness({ cache }, { decision: "deny", reason: "should not be called" });
+  await h2.gate(cmd("npm run build"));
+  assert.equal(h2.classifyArgs.length, 0, "second call should use cache, not classify again");
+  assert.equal(h2.calls.approve, 1, "should still press approve from cache");
+  
+  // Verify cache hit was logged
+  const cacheHitLog = h2.logs.find((l) => /cached classifier/.test(l));
+  assert.ok(cacheHitLog, "should log cache hit");
+  assert.match(cacheHitLog, /approve/);
+});
+
+test("cache differentiates commands by cwd", async () => {
+  const cache = new VerdictCache();
+  
+  // First gate with cwd=/repo
+  const h1 = harness({ cache, cwd: "/repo" }, { decision: "approve", reason: "safe in repo" });
+  await h1.gate(cmd("rm -rf build"));
+  assert.equal(h1.classifyArgs.length, 1);
+  
+  // Second gate with different cwd=/other — should classify again
+  const h2 = harness({ cache, cwd: "/other" }, { decision: "deny", reason: "dangerous elsewhere" });
+  await h2.gate(cmd("rm -rf build"));
+  assert.equal(h2.classifyArgs.length, 1, "different cwd should not hit cache");
+  assert.equal(h2.calls.reject, 1);
+});
+
+test("an 'ask' verdict is NOT cached, so it re-classifies next time", () => {
+  // "ask" is also the fail-safe for a transient transport failure (cli timeout, not
+  // logged in), so caching it would let a one-off blip permanently reject the command.
+  // It must be re-evaluated on the next occurrence.
+  const cache = new VerdictCache();
+  return (async () => {
+    const h1 = harness({ cache }, { decision: "ask", reason: "cli timeout" });
+    await h1.gate(cmd("weird-command"));
+    assert.equal(h1.calls.reject, 1, "ask rejects");
+    assert.equal(cache.size(), 0, "ask must not be cached");
+
+    // A second occurrence re-classifies rather than reusing a poisoned 'ask'.
+    const h2 = harness({ cache }, { decision: "approve", reason: "fine now" });
+    await h2.gate(cmd("weird-command"));
+    assert.equal(h2.classifyArgs.length, 1, "must re-classify, not reuse the failure");
+    assert.equal(h2.calls.approve, 1);
+  })();
+});
+
+test("approve/deny verdicts ARE cached and reused", async () => {
+  const cache = new VerdictCache();
+  const h1 = harness({ cache }, { decision: "approve", reason: "safe" });
+  await h1.gate(cmd("npm run build"));
+  assert.equal(cache.size(), 1, "a confident verdict is cached");
+
+  const h2 = harness({ cache }, { decision: "deny", reason: "should not be called" });
+  await h2.gate(cmd("npm run build"));
+  assert.equal(h2.classifyArgs.length, 0, "reuses the cached approve");
+  assert.equal(h2.calls.approve, 1);
+});
+
+test("cache hit still records a note", async () => {
+  const cache = new VerdictCache();
+  
+  // First gate: classify and cache
+  const h1 = harness({ cache }, { decision: "approve", reason: "test" });
+  await h1.gate(cmd("npm test"));
+  assert.equal(h1.notes.length, 1);
+  
+  // Second gate: cache hit
+  const h2 = harness({ cache }, { decision: "deny", reason: "should not be called" });
+  await h2.gate(cmd("npm test"));
+  assert.equal(h2.notes.length, 1, "cache hit should also record a note");
+  assert.match(h2.notes[0].note, /cached/);
+});
+
+test("separate gates with shared cache reuse verdicts", async () => {
+  const cache = new VerdictCache();
+  
+  // First gate classifies
+  const h1 = harness({ cache }, { decision: "approve", reason: "safe" });
+  await h1.gate(cmd("npm test"));
+  assert.equal(h1.classifyArgs.length, 1);
+  
+  // Second gate (different dispatch) hits cache
+  const h2 = harness({ cache }, { decision: "deny", reason: "should not be called" });
+  await h2.gate(cmd("npm test"));
+  assert.equal(h2.classifyArgs.length, 0, "second gate should hit cache");
+  assert.equal(h2.calls.approve, 1, "should use cached approve");
 });
