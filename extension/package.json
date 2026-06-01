@@ -65,6 +65,31 @@
           "type": "number",
           "default": 60000,
           "description": "How long Bob's chat must be idle (ms) before the worker resumes."
+        },
+        "bobTasks.commandClassifier": {
+          "type": "boolean",
+          "default": false,
+          "description": "Let Claude approve/deny commands that fall outside the safe allowlist (instead of Bob's manual prompt) for classifier-policy modes. Requires the Bob button patch (tools/patch-bob-buttons.mjs). Turn off to revert to manual approval."
+        },
+        "bobTasks.classifierBackend": {
+          "type": "string",
+          "enum": ["cli", "api"],
+          "default": "cli",
+          "enumDescriptions": [
+            "Run the installed `claude` CLI headless — reuses your Claude login (no API key), Sonnet-grade judgment, but each call is heavier (~full-agent cost).",
+            "One raw Anthropic API call — cheap and fast (Haiku), but needs ANTHROPIC_API_KEY in the environment."
+          ],
+          "description": "How the command classifier reaches Claude. Only used when bobTasks.commandClassifier is on."
+        },
+        "bobTasks.classifierModel": {
+          "type": "string",
+          "default": "",
+          "description": "Model the command classifier uses. Empty = per-backend default (cli→claude-sonnet-4-6, api→claude-haiku-4-5)."
+        },
+        "bobTasks.classifierCliPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the `claude` executable for the cli backend. Empty = resolve `claude` on PATH."
         }
       }
     },

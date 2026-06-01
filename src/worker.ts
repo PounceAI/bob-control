@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import "./suppress-warnings.js";
 import * as repo from "./db.js";
-import { resolveMode, profileFor, RISK_RANK, type Risk } from "./modes.js";
+import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, type Risk } from "./modes.js";
+import { classifyCommand } from "./classify.js";
 import { BobClient, resolvePipe } from "./bob-ipc.js";
 import { ExternalActivity } from "./defer.js";
 import { notify } from "./notify.js";
@@ -37,6 +38,11 @@ interface Opts {
   notify: boolean;
   defer: boolean;
   deferIdleMs: number;
+  deferStaleMs: number;
+  commandClassifier: boolean;
+  classifierBackend: "api" | "cli";
+  classifierModel?: string;
+  classifierCli?: string;
   emitJson: boolean;
   tag?: string;
   pipe?: string;
@@ -67,6 +73,11 @@ function parseOpts(argv: string[]): Opts {
     notify: !has("--no-notify"),
     defer: !has("--no-defer"),
     deferIdleMs: Number(val("--defer-idle") ?? 60_000),
+    deferStaleMs: Number(val("--defer-stale") ?? 5 * 60_000),
+    commandClassifier: has("--command-classifier"),
+    classifierBackend: val("--classifier-backend") === "api" ? "api" : "cli",
+    classifierModel: val("--classifier-model"),
+    classifierCli: val("--classifier-cli"),
     emitJson: has("--emit-json"),
     tag: val("--tag"),
     pipe: val("--pipe"),
@@ -129,19 +140,66 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   }
   repo.addNote(task.id, `Auto-dispatched in mode {${mode}} (${source}, risk:${profile.risk}).`, "worker");
 
+  // Gray-zone command approval: under the classifier policy, commands that miss
+  // Bob's static allowlist surface as an `ask` instead of auto-running. Rather than
+  // wait for a human, ask Claude and press approve/reject over IPC (needs the Bob
+  // button patch). Fail-safe: only an explicit "approve" runs the command.
+  const classifierOn = opts.commandClassifier && profile.commandPolicy === "classifier";
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  // The api backend can't run without a key; the cli backend reuses Claude's login.
+  const classifierBlocked = opts.classifierBackend === "api" && !apiKey;
+  const handledAsks = new Set<string>();
+  let warnedNoKey = false;
+
   let lastSay = "";
   const res = await client.dispatch({
     text: buildPrompt(task),
     mode,
-    config: profile.autoApprove, // per-mode auto-approve
+    config: dispatchAutoApprove(profile), // per-mode auto-approve + policy-derived allowedCommands
     newTab: opts.newTab,
     timeoutMs: opts.timeoutMs,
-    onEvent: (name, { say, text }) => {
+    onEvent: (name, { say, ask, text, partial }) => {
       if (say && say !== lastSay) {
         lastSay = say;
         const t = (text ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
         console.log(`  · ${name}/${say}${t ? `: ${t}` : ""}`);
       }
+
+      if (!classifierOn || partial) return;
+      if (ask !== "command" && ask !== "command_security_warning") return;
+      const command = (text ?? "").trim();
+      if (!command || handledAsks.has(command)) return;
+      handledAsks.add(command);
+
+      if (classifierBlocked) {
+        if (!warnedNoKey) {
+          console.log("  ⚠ classifier=api but ANTHROPIC_API_KEY unset — leaving command for a human.");
+          warnedNoKey = true;
+        }
+        return;
+      }
+      const short = command.replace(/\s+/g, " ").slice(0, 60);
+      console.log(`  ⟲ classifying command (${opts.classifierBackend}): ${short}`);
+      void classifyCommand(
+        command,
+        { task: task.title, cwd: process.cwd() },
+        {
+          backend: opts.classifierBackend,
+          model: opts.classifierModel,
+          apiKey,
+          cliPath: opts.classifierCli,
+        },
+      )
+        .then(({ decision, reason }) => {
+          if (decision === "approve") {
+            client.approve();
+            console.log(`  ✓ classifier approved (${reason})`);
+          } else {
+            client.reject();
+            console.log(`  ⛔ classifier ${decision === "deny" ? "denied" : "deferred→rejected"} (${reason})`);
+          }
+          repo.addNote(task.id, `Classifier ${decision} for \`${short}\`: ${reason}`, "classifier");
+        });
     },
   });
 
@@ -185,7 +243,7 @@ async function main(): Promise<void> {
   repo.getDb(); // surface schema errors up front
 
   const client = new BobClient(opts.pipe);
-  const external = new ExternalActivity();
+  const external = new ExternalActivity(Date.now, opts.deferStaleMs);
   client.onTaskEvent((ev) => external.handle(ev));
 
   console.log(`bob-worker: connecting to ${resolvePipe(opts.pipe)} …`);
@@ -222,6 +280,17 @@ async function main(): Promise<void> {
   }
 
   console.log(`bob-worker: risk gate = --max-risk ${opts.maxRisk}; defer=${opts.defer ? `on(${opts.deferIdleMs}ms)` : "off"}.`);
+  if (opts.commandClassifier) {
+    const be = opts.classifierBackend;
+    const dflt = be === "cli" ? "claude-sonnet-4-6" : "claude-haiku-4-5";
+    const auth =
+      be === "cli"
+        ? `${opts.classifierCli ?? "claude"} CLI (reuses Claude login)`
+        : process.env.ANTHROPIC_API_KEY
+          ? "ANTHROPIC_API_KEY set"
+          : "NO API KEY — gray-zone commands wait for a human";
+    console.log(`bob-worker: command classifier = on, backend=${be} (${opts.classifierModel ?? dflt}; ${auth}).`);
+  }
   let idled = false;
   let deferring = false;
   while (!stopping) {

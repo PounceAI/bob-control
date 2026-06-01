@@ -31,8 +31,12 @@ export interface DispatchOptions {
   newTab?: boolean;
   /** Per-task timeout. Default 300000ms (5 min). */
   timeoutMs?: number;
-  /** Optional live event callback for logging/progress. */
-  onEvent?: (name: string, detail: { say?: string; text?: string }) => void;
+  /**
+   * Optional live event callback for logging/progress. `ask` is set (e.g. "command")
+   * when Bob is *blocking for approval* rather than just narrating (`say`); the
+   * classifier keys off `ask === "command"` to approve/deny a pending command.
+   */
+  onEvent?: (name: string, detail: { say?: string; ask?: string; text?: string; partial?: boolean }) => void;
 }
 
 export interface DispatchResult {
@@ -171,11 +175,12 @@ export class BobClient {
         const arr = Array.isArray(payload) ? payload : [payload];
         const cline = arr.map((p: any) => p?.message ?? p).find((m: any) => m && (m.text || m.say || m.ask));
         if (cline) {
+          const ask: string | undefined = cline.ask;
           const say: string | undefined = cline.say ?? cline.ask;
           const text: string = String(cline.text ?? "");
           if (say === "completion_result" && text.trim()) this.active.lastCompletion = text;
           else if (text.trim()) this.active.lastText = text;
-          this.active.onEvent?.(name, { say, text });
+          this.active.onEvent?.(name, { say, ask, text, partial: !!cline.partial });
         } else {
           this.active.onEvent?.(name, {});
         }
@@ -262,6 +267,29 @@ export class BobClient {
       origin: "client",
       clientId: this.clientId,
       data: { commandName: "CancelTask", data: taskId },
+    });
+  }
+
+  /**
+   * Answer a pending approval (e.g. a command ask): primary = approve/run,
+   * secondary = reject. Requires the Bob IPC button patch (tools/patch-bob-buttons.mjs)
+   * — without it Bob's IPC switch ignores these commandNames.
+   */
+  approve(): void {
+    this.send({
+      type: "TaskCommand",
+      origin: "client",
+      clientId: this.clientId,
+      data: { commandName: "PressPrimaryButton", data: null },
+    });
+  }
+
+  reject(): void {
+    this.send({
+      type: "TaskCommand",
+      origin: "client",
+      clientId: this.clientId,
+      data: { commandName: "PressSecondaryButton", data: null },
     });
   }
 

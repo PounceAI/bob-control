@@ -30,8 +30,19 @@ const RULES: { mode: BuiltInMode; re: RegExp }[] = [
 export type Risk = "safe" | "standard" | "elevated";
 export const RISK_RANK: Record<Risk, number> = { safe: 0, standard: 1, elevated: 2 };
 
+// How a mode gates Bob's command execution. The worker turns this into the
+// allowedCommands Bob sees on dispatch; the bobide extension reads it to decide
+// whether to arm the Claude classifier on gray-zone (unmatched) commands.
+//  - none:       no command execution at all (execute toggle stays off)
+//  - allowlist:  SAFE_COMMANDS auto-run; anything else -> Bob's manual prompt
+//  - classifier: same allowlist fast-path, but the extension asks Claude to
+//                approve/deny commands that fall through instead of a human
+//  - auto:       "*" — auto-run anything (trust/sandbox only)
+export type CommandPolicy = "none" | "allowlist" | "auto" | "classifier";
+
 export interface ModeProfile {
   risk: Risk;
+  commandPolicy: CommandPolicy;
   autoApprove: {
     alwaysAllowReadOnly: boolean;
     alwaysAllowWrite: boolean;
@@ -41,8 +52,23 @@ export interface ModeProfile {
   };
 }
 
+// Safe command prefixes the worker lets Bob auto-run unattended (Bob's QMo does a
+// case-insensitive startsWith match). Anything NOT matched here — rm, del, format,
+// shutdown, or simply an unrecognized command — gets neither an allow nor a deny
+// match, so Bob's WMo returns "ask_user" and surfaces a manual approval prompt.
+// That is the guardrail: we deliberately avoid "*" (auto-run anything) and avoid
+// deniedCommands (which hard-*rejects* without asking) so risky commands pause for
+// a human (or, under the classifier policy, for Claude). A chained command (a && b)
+// auto-runs only if every part matches.
+export const SAFE_COMMANDS = [
+  "npm ", "npx ", "pnpm ", "yarn ", "node ", "tsc",
+  "git ", "ls", "dir", "pwd", "cat ", "type ", "echo ",
+  "grep ", "rg ", "findstr ", "python ", "python3 ", "pip ",
+];
+
 const STANDARD: ModeProfile = {
   risk: "standard",
+  commandPolicy: "allowlist",
   autoApprove: {
     alwaysAllowReadOnly: true,
     alwaysAllowWrite: true,
@@ -56,6 +82,7 @@ export const MODE_PROFILES: Record<string, ModeProfile> = {
   // Read-only: safe unattended; no writes/commands even if attempted.
   ask: {
     risk: "safe",
+    commandPolicy: "none",
     autoApprove: {
       alwaysAllowReadOnly: true,
       alwaysAllowWrite: false,
@@ -67,8 +94,10 @@ export const MODE_PROFILES: Record<string, ModeProfile> = {
   code: STANDARD,
   orchestrator: STANDARD,
   // Adds Browser plus command power; gated above the default worker threshold.
+  // Gray-zone commands route to the Claude classifier rather than a human.
   advanced: {
     risk: "elevated",
+    commandPolicy: "classifier",
     autoApprove: {
       alwaysAllowReadOnly: true,
       alwaysAllowWrite: true,
@@ -82,6 +111,21 @@ export const MODE_PROFILES: Record<string, ModeProfile> = {
 /** Safety profile for a mode slug; unknown/custom modes default to standard. */
 export function profileFor(mode: string): ModeProfile {
   return MODE_PROFILES[mode] ?? STANDARD;
+}
+
+/**
+ * The autoApprove block sent to Bob on dispatch: the mode's bool toggles plus the
+ * allowedCommands list derived from its commandPolicy. allowlist and classifier
+ * share the SAFE_COMMANDS fast-path — the difference is what handles the gray zone
+ * (a human prompt vs the extension's Claude classifier), which happens Bob-side,
+ * not in this config.
+ */
+export function dispatchAutoApprove(profile: ModeProfile): ModeProfile["autoApprove"] & {
+  allowedCommands: string[];
+} {
+  const allowedCommands =
+    profile.commandPolicy === "auto" ? ["*"] : profile.commandPolicy === "none" ? [] : SAFE_COMMANDS;
+  return { ...profile.autoApprove, allowedCommands };
 }
 
 export function resolveMode(task: Pick<Task, "mode" | "title" | "description" | "tags">): {

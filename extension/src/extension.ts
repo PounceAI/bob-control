@@ -91,6 +91,17 @@ function startWorker(): void {
   if (!c.get<boolean>("deferWhileChatting")) args.push("--no-defer");
   const tag = c.get<string>("tag");
   if (tag && tag.trim()) args.push("--tag", tag.trim());
+  // Reversible toggle: when off, the worker never gets --command-classifier, so
+  // gray-zone commands fall back to Bob's manual approval prompt. Needs the Bob
+  // button patch (tools/patch-bob-buttons.mjs) and ANTHROPIC_API_KEY in the env.
+  if (c.get<boolean>("commandClassifier")) {
+    args.push("--command-classifier");
+    args.push("--classifier-backend", c.get<string>("classifierBackend") ?? "cli");
+    const model = c.get<string>("classifierModel");
+    if (model && model.trim()) args.push("--classifier-model", model.trim());
+    const cliPath = c.get<string>("classifierCliPath");
+    if (cliPath && cliPath.trim()) args.push("--classifier-cli", cliPath.trim());
+  }
 
   const env = { ...process.env };
   const dbPath = c.get<string>("dbPath");
