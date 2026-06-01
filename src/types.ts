@@ -26,6 +26,8 @@ export interface Task {
   updated_at: string;
   /** Task IDs this task depends on (must all be 'done' before this task is eligible). */
   depends_on: number[];
+  /** Number of retry attempts made for transient failures (timeout/abort). */
+  retry_attempts: number;
 }
 
 export interface TaskNote {

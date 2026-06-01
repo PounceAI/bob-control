@@ -19,6 +19,7 @@ function task(over: Partial<Task> & Pick<Task, "id" | "status">): Task {
     created_at: ago(60 * MIN),
     updated_at: ago(60 * MIN),
     depends_on: [],
+    retry_attempts: 0,
     ...over,
   };
 }

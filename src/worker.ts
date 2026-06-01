@@ -8,6 +8,7 @@ import { BobClient, resolvePipe, type DispatchResult } from "./bob-ipc.js";
 import { createPollLoop } from "./bob-polls.js";
 import { ExternalActivity } from "./defer.js";
 import { notify } from "./notify.js";
+import { shouldRetry, executeRetry } from "./retry-policy.js";
 import type { Task } from "./types.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -46,8 +47,9 @@ function buttonPatchPresent(): boolean | null {
  *   node dist/worker.js --answer-followups  let Claude answer Bob's questions (else they wait for you)
  *   node dist/worker.js --verify-and-continue  verify result and loop with Bob until it passes
  *   node dist/worker.js --emit-json     also print @@WORKER {json} event lines (for the extension)
+ *   node dist/worker.js --retry 3       auto-retry transient failures (timeout/abort) up to 3 total attempts
  * Flags: --pipe <path>  --poll <ms>  --timeout <ms>  --assignee <name>  --defer-idle <ms>
- *        --verify-command <cmd>  --max-continues <n>
+ *        --verify-command <cmd>  --max-continues <n>  --retry <max-attempts>
  *
  * Each mode has a risk level (safe < standard < elevated); only tasks at or
  * below --max-risk are dispatched. While the user is chatting with Bob, dispatch
@@ -83,6 +85,8 @@ interface Opts {
   verifyAndContinue: boolean;
   verifyCommand?: string;
   maxContinues: number;
+  retry: boolean;
+  maxRetryAttempts: number;
 }
 
 function parseOpts(argv: string[]): Opts {
@@ -111,6 +115,7 @@ function parseOpts(argv: string[]): Opts {
   // --new-tab is an alias for --surface newTab.
   const surface = val("--surface");
   const newTab = has("--new-tab") || surface === "newTab";
+  const maxRetryAttempts = num("--retry", 0);
   return {
     once: has("--once"),
     newTab,
@@ -134,6 +139,8 @@ function parseOpts(argv: string[]): Opts {
     verifyAndContinue: has("--verify-and-continue"),
     verifyCommand: val("--verify-command"),
     maxContinues: num("--max-continues", 3),
+    retry: maxRetryAttempts > 0,
+    maxRetryAttempts,
   };
 }
 
@@ -275,7 +282,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   // (followup, mistake_limit_reached, …) we deliberately don't auto-press — we just
   // record the last one so a wedge is diagnosable instead of a silent timeout.
   let lastAsk = "";
-  
+
   // Dispatch helper used by the initial run and each verify-and-continue. Marks the
   // dispatch active for its duration so the command/followup gates only press while a
   // dispatch is genuinely in flight (and a stale verdict from a prior one can't press).
@@ -339,6 +346,10 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   if (!verifyGaveUp && (res.status === "completed" || captured)) {
     const result = captured || "(completed; no completion_result text captured)";
     repo.setResult(task.id, result, true);
+    // Reset retry attempts on success so a future failure starts fresh.
+    if (task.retry_attempts > 0) {
+      repo.resetRetryAttempts(task.id);
+    }
     if (res.status !== "completed") {
       repo.addNote(task.id, `Captured completion_result despite terminal '${res.status}' event.`, "worker");
     }
@@ -353,22 +364,51 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     emit(opts, "taskFail", { id: task.id, title: task.title, status: "verify-failed" });
     if (opts.notify) notify(`Bob task #${task.id} failed verification`, task.title);
   } else {
-    // No result captured: a genuine failure. On timeout Bob may still be
-    // churning, so tell it to stop instead of burning tokens until next dispatch.
-    if (res.status === "timeout" && res.taskId) {
-      client.cancel(res.taskId);
-      console.log(`  ⓧ sent cancel to Bob task ${res.taskId}`);
+    // No result captured: a genuine failure. Check if we should retry.
+    const retryDecision = shouldRetry(res, {
+      enabled: opts.retry,
+      maxAttempts: opts.maxRetryAttempts,
+      currentAttempts: task.retry_attempts,
+      task: { id: task.id, title: task.title },
+      addNote: repo.addNote,
+      log: (m) => console.log(m),
+    });
+
+    if (retryDecision.shouldRetry) {
+      // Increment the retry counter BEFORE re-queueing, so the next pickup sees the updated count.
+      repo.incrementRetryAttempts(task.id);
+
+      // Execute the retry: sleep for backoff, then re-queue as pending.
+      await executeRetry(retryDecision, {
+        enabled: opts.retry,
+        maxAttempts: opts.maxRetryAttempts,
+        currentAttempts: task.retry_attempts,
+        task: { id: task.id, title: task.title },
+        addNote: repo.addNote,
+        log: (m) => console.log(m),
+      });
+
+      // Re-queue the task as pending so it gets picked up again.
+      repo.updateStatus(task.id, "pending");
+      console.log(`  ↻ task re-queued as pending for retry`);
+      emit(opts, "taskRetry", { id: task.id, title: task.title, attempt: task.retry_attempts + 1 });
+    } else {
+      // No retry: park as blocked. On timeout Bob may still be churning, so tell it to stop.
+      if (res.status === "timeout" && res.taskId) {
+        client.cancel(res.taskId);
+        console.log(`  ⓧ sent cancel to Bob task ${res.taskId}`);
+      }
+
+      repo.updateStatus(task.id, "blocked");
+      const lastText = res.lastText.trim().replace(/\s+/g, " ").slice(0, 140);
+      const lastNote = lastText ? ` Last activity: ${lastText}` : "";
+      const askNote = lastAsk ? ` Last pending ask: '${lastAsk}'.` : "";
+      const retryNote = task.retry_attempts > 0 ? ` After ${task.retry_attempts} retry attempt(s).` : "";
+      repo.addNote(task.id, `Dispatch ended as '${res.status}' with no completion_result.${askNote}${lastNote}${retryNote}`, "worker");
+      console.log(`  ✗ ${res.status} — task marked blocked (${retryDecision.reason})`);
+      emit(opts, "taskFail", { id: task.id, title: task.title, status: res.status });
+      if (opts.notify) notify(`Bob task #${task.id} ${res.status}`, task.title);
     }
-    // Park as blocked so the loop doesn't spin on it.
-    repo.updateStatus(task.id, "blocked");
-    const lastText = res.lastText.trim().replace(/\s+/g, " ").slice(0, 140);
-    const lastNote = lastText ? ` Last activity: ${lastText}` : "";
-    // The unanswered ask is the usual cause of a no-progress timeout.
-    const askNote = lastAsk ? ` Last pending ask: '${lastAsk}'.` : "";
-    repo.addNote(task.id, `Dispatch ended as '${res.status}' with no completion_result.${askNote}${lastNote}`, "worker");
-    console.log(`  ✗ ${res.status} — task marked blocked`);
-    emit(opts, "taskFail", { id: task.id, title: task.title, status: res.status });
-    if (opts.notify) notify(`Bob task #${task.id} ${res.status}`, task.title);
   }
 }
 
@@ -451,6 +491,9 @@ async function main(): Promise<void> {
   if (opts.verifyAndContinue) {
     const cmd = opts.verifyCommand ? `command="${opts.verifyCommand}"` : "built-in heuristics";
     console.log(`bob-worker: verify-and-continue = on (${cmd}, max ${opts.maxContinues} continue${opts.maxContinues === 1 ? "" : "s"}).`);
+  }
+  if (opts.retry) {
+    console.log(`bob-worker: auto-retry = on (transient failures retry up to ${opts.maxRetryAttempts} total attempt${opts.maxRetryAttempts === 1 ? "" : "s"} with exponential backoff).`);
   }
   let idled = false;
   let deferring = false;

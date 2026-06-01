@@ -72,6 +72,7 @@ function migrate(d: DatabaseSync): void {
   // node:sqlite has no "ADD COLUMN IF NOT EXISTS", so probe and add what's missing.
   addColumnIfMissing(d, "tasks", "mode", "TEXT");
   addColumnIfMissing(d, "tasks", "depends_on", "TEXT");
+  addColumnIfMissing(d, "tasks", "retry_attempts", "INTEGER DEFAULT 0");
 }
 
 function addColumnIfMissing(
@@ -190,6 +191,7 @@ function rowToTask(r: Record<string, unknown>): Task {
     created_at: String(r.created_at),
     updated_at: String(r.updated_at),
     depends_on: parseDependsOn(r.depends_on),
+    retry_attempts: Number(r.retry_attempts ?? 0),
   };
 }
 
@@ -395,4 +397,24 @@ export function getNotes(taskId: number): TaskNote[] {
 export function deleteTask(id: number): boolean {
   const info = getDb().prepare("DELETE FROM tasks WHERE id = ?").run(id);
   return Number(info.changes) > 0;
+}
+
+/** Increment the retry_attempts counter for a task. Returns the updated task. */
+export function incrementRetryAttempts(id: number): Task | null {
+  const task = getTask(id);
+  if (!task) return null;
+  const newCount = task.retry_attempts + 1;
+  getDb()
+    .prepare("UPDATE tasks SET retry_attempts = ?, updated_at = ? WHERE id = ?")
+    .run(newCount, nowIso(), id);
+  return getTask(id);
+}
+
+/** Reset retry_attempts to 0 for a task. Returns the updated task. */
+export function resetRetryAttempts(id: number): Task | null {
+  if (!getTask(id)) return null;
+  getDb()
+    .prepare("UPDATE tasks SET retry_attempts = 0, updated_at = ? WHERE id = ?")
+    .run(nowIso(), id);
+  return getTask(id);
 }
