@@ -4,7 +4,8 @@ import * as repo from "./db.js";
 import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, MODE_PROFILES, classifierReachable, type Risk } from "./modes.js";
 import { createCommandGate } from "./command-gate.js";
 import { createFollowupGate } from "./followup-gate.js";
-import { BobClient, resolvePipe } from "./bob-ipc.js";
+import { BobClient, resolvePipe, type DispatchResult } from "./bob-ipc.js";
+import { createPollLoop } from "./bob-polls.js";
 import { ExternalActivity } from "./defer.js";
 import { notify } from "./notify.js";
 import type { Task } from "./types.js";
@@ -43,13 +44,20 @@ function buttonPatchPresent(): boolean | null {
  *   node dist/worker.js --no-defer      don't pause while you're chatting with Bob
  *   node dist/worker.js --dry-run       show routing/claims without dispatching to Bob
  *   node dist/worker.js --answer-followups  let Claude answer Bob's questions (else they wait for you)
+ *   node dist/worker.js --verify-and-continue  verify result and loop with Bob until it passes
  *   node dist/worker.js --emit-json     also print @@WORKER {json} event lines (for the extension)
  * Flags: --pipe <path>  --poll <ms>  --timeout <ms>  --assignee <name>  --defer-idle <ms>
+ *        --verify-command <cmd>  --max-continues <n>
  *
  * Each mode has a risk level (safe < standard < elevated); only tasks at or
  * below --max-risk are dispatched. While the user is chatting with Bob, dispatch
  * is held (a same-tab dispatch would abort the live chat) until the chat has
  * been idle for --defer-idle ms.
+ *
+ * With --verify-and-continue, after Bob completes a task, the worker runs an
+ * acceptance check (--verify-command or built-in heuristics) and, if it fails,
+ * sends the problem back to Bob to fix — looping until it passes or --max-continues
+ * is reached. This catches broken builds/tests without human intervention.
  */
 
 interface Opts {
@@ -72,6 +80,9 @@ interface Opts {
   timeoutMs: number;
   assignee: string;
   maxRisk: Risk;
+  verifyAndContinue: boolean;
+  verifyCommand?: string;
+  maxContinues: number;
 }
 
 function parseOpts(argv: string[]): Opts {
@@ -120,6 +131,9 @@ function parseOpts(argv: string[]): Opts {
     timeoutMs: num("--timeout", 300_000),
     assignee: val("--assignee") ?? "bob",
     maxRisk,
+    verifyAndContinue: has("--verify-and-continue"),
+    verifyCommand: val("--verify-command"),
+    maxContinues: num("--max-continues", 3),
   };
 }
 
@@ -261,25 +275,55 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   // (followup, mistake_limit_reached, …) we deliberately don't auto-press — we just
   // record the last one so a wedge is diagnosable instead of a silent timeout.
   let lastAsk = "";
-  const res = await client.dispatch({
-    text: buildPrompt(task),
-    mode,
-    config: dispatchAutoApprove(profile), // per-mode auto-approve + policy-derived allowedCommands
-    newTab: opts.newTab,
-    timeoutMs: opts.timeoutMs,
-    onEvent: (name, { say, ask, text, partial }) => {
-      if (say && say !== lastSay) {
-        lastSay = say;
-        const t = (text ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
-        console.log(`  · ${name}/${say}${t ? `: ${t}` : ""}`);
-      }
+  
+  // Dispatch helper used by the initial run and each verify-and-continue. Marks the
+  // dispatch active for its duration so the command/followup gates only press while a
+  // dispatch is genuinely in flight (and a stale verdict from a prior one can't press).
+  const doDispatch = async (text: string): Promise<DispatchResult> => {
+    dispatchActive = true;
+    try {
+      return await client.dispatch({
+        text,
+        mode,
+        config: dispatchAutoApprove(profile),
+        newTab: opts.newTab,
+        timeoutMs: opts.timeoutMs,
+        onEvent: (name, { say, ask, text, partial }) => {
+          if (say && say !== lastSay) {
+            lastSay = say;
+            const t = (text ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
+            console.log(`  · ${name}/${say}${t ? `: ${t}` : ""}`);
+          }
 
-      if (ask && !partial) lastAsk = ask;
-      void commandGate({ ask, text, partial });
-      void followupGate({ ask, text, partial });
-    },
+          if (ask && !partial) lastAsk = ask;
+          void commandGate({ ask, text, partial });
+          void followupGate({ ask, text, partial });
+        },
+      });
+    } finally {
+      dispatchActive = false;
+    }
+  };
+
+  // Verify-and-continue loop: on a failed verify it re-dispatches the FULL task plus
+  // the failure (via doDispatch) so Bob has the context to fix it.
+  const pollLoop = createPollLoop({
+    enabled: opts.verifyAndContinue,
+    verifyCommand: opts.verifyCommand,
+    maxContinues: opts.maxContinues,
+    cwd: process.cwd(),
+    taskPrompt: buildPrompt(task),
+    task: { id: task.id, title: task.title },
+    addNote: repo.addNote,
+    log: (m) => console.log(m),
+    dispatch: doDispatch,
   });
-  dispatchActive = false;
+
+  // Initial dispatch.
+  const initialRes = await doDispatch(buildPrompt(task));
+
+  // Run the poll loop (no-op if feature is off).
+  const res = await pollLoop(initialRes);
 
   // Mark done only on a GENUINE completion: Bob fired taskCompleted, or it
   // emitted a real attempt_completion (completion_result). In some multi-step
@@ -287,8 +331,12 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   // that real result. A trailing tool payload (e.g. updateTodoList) is NOT a
   // completion: bob-ipc keeps it in res.lastText, never in res.result, so a pure
   // timeout with no completion_result now falls through to 'blocked' below.
+  // The verify loop returns status "aborted" when it gave up after the continue cap:
+  // verification never passed, so block for a human rather than mark a failing result
+  // done — even though there's a (last, unverified) completion_result captured.
+  const verifyGaveUp = opts.verifyAndContinue && res.status === "aborted";
   const captured = res.result.trim();
-  if (res.status === "completed" || captured) {
+  if (!verifyGaveUp && (res.status === "completed" || captured)) {
     const result = captured || "(completed; no completion_result text captured)";
     repo.setResult(task.id, result, true);
     if (res.status !== "completed") {
@@ -298,6 +346,12 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     console.log(`  ✓ done — result captured (${result.length} chars)${tail}`);
     emit(opts, "taskDone", { id: task.id, title: task.title, chars: result.length });
     if (opts.notify) notify(`Bob finished #${task.id}`, `${task.title} — ${result}`);
+  } else if (verifyGaveUp) {
+    repo.updateStatus(task.id, "blocked");
+    repo.addNote(task.id, `Blocked: result never passed verification after ${opts.maxContinues} continue(s).`, "worker");
+    console.log(`  ✗ verification never passed — task marked blocked`);
+    emit(opts, "taskFail", { id: task.id, title: task.title, status: "verify-failed" });
+    if (opts.notify) notify(`Bob task #${task.id} failed verification`, task.title);
   } else {
     // No result captured: a genuine failure. On timeout Bob may still be
     // churning, so tell it to stop instead of burning tokens until next dispatch.
@@ -393,6 +447,10 @@ async function main(): Promise<void> {
     const noKey = opts.classifierBackend === "api" && !process.env.ANTHROPIC_API_KEY;
     const auth = noKey ? " — NO API KEY, questions escalate to you" : "";
     console.log(`bob-worker: followup answering = on, backend=${opts.classifierBackend} (Claude answers Bob's questions, escalates when unsure${auth}).`);
+  }
+  if (opts.verifyAndContinue) {
+    const cmd = opts.verifyCommand ? `command="${opts.verifyCommand}"` : "built-in heuristics";
+    console.log(`bob-worker: verify-and-continue = on (${cmd}, max ${opts.maxContinues} continue${opts.maxContinues === 1 ? "" : "s"}).`);
   }
   let idled = false;
   let deferring = false;
