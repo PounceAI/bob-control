@@ -85,7 +85,7 @@ Commands:
   result <id> <text> [--open]
   delete <id>
   stats
-  report [--status <status>] [--out <file>]   markdown standup/audit of the board
+  report [--status <status>] [--out <file>] [--limit <n>]   markdown standup/audit of the board
   help
 
 Modes: ${BUILT_IN_MODES.join(" | ")} (or any custom mode slug). Omit --mode to auto-route on dispatch.
@@ -276,9 +276,17 @@ function main(): void {
       if (status && !TASK_STATUSES.includes(status as never)) {
         die(`invalid status '${status}' (use ${TASK_STATUSES.join(", ")})`);
       }
+      const limitStr = str(flags.limit);
+      const limit = limitStr ? Number(limitStr) : undefined;
+      if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+        die("--limit must be a positive integer");
+      }
       const tasks = repo.listTasks({});
       const notes = new Map(tasks.map((t) => [t.id, repo.getNotes(t.id)]));
-      const md = buildReport(tasks, notes, Date.now(), { status: status as TaskStatus | undefined });
+      const md = buildReport(tasks, notes, Date.now(), {
+        status: status as TaskStatus | undefined,
+        limit,
+      });
       const out = str(flags.out);
       if (out) {
         writeFileSync(out, md);

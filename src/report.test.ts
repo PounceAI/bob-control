@@ -104,3 +104,51 @@ test("humanizes age and idle into s/m/h/d", () => {
   assert.match(line, /age 2d/);
   assert.match(line, /idle 3h/);
 });
+
+test("limit caps done and cancelled groups with 'more' line, never truncates active groups", () => {
+  const tasks = [
+    task({ id: 1, status: "in_progress" }),
+    task({ id: 2, status: "in_progress" }),
+    task({ id: 3, status: "in_progress" }),
+    task({ id: 4, status: "blocked" }),
+    task({ id: 5, status: "blocked" }),
+    task({ id: 6, status: "pending" }),
+    task({ id: 7, status: "pending" }),
+    task({ id: 8, status: "done" }),
+    task({ id: 9, status: "done" }),
+    task({ id: 10, status: "done" }),
+    task({ id: 11, status: "done" }),
+    task({ id: 12, status: "cancelled" }),
+    task({ id: 13, status: "cancelled" }),
+    task({ id: 14, status: "cancelled" }),
+  ];
+  const md = buildReport(tasks, new Map(), NOW, { limit: 2 });
+  
+  // Active groups (in_progress, blocked, pending) should show all tasks
+  assert.match(md, /#1/);
+  assert.match(md, /#2/);
+  assert.match(md, /#3/);
+  assert.match(md, /#4/);
+  assert.match(md, /#5/);
+  assert.match(md, /#6/);
+  assert.match(md, /#7/);
+  
+  // Done group should show only first 2 tasks
+  assert.match(md, /#8/);
+  assert.match(md, /#9/);
+  assert.doesNotMatch(md, /#10/);
+  assert.doesNotMatch(md, /#11/);
+  
+  // Cancelled group should show only first 2 tasks
+  assert.match(md, /#12/);
+  assert.match(md, /#13/);
+  assert.doesNotMatch(md, /#14/);
+  
+  // Check for 'more' lines
+  const lines = md.split("\n");
+  const doneSection = lines.slice(lines.indexOf("## Done (4)"));
+  const cancelledSection = lines.slice(lines.indexOf("## Cancelled (3)"));
+  
+  assert.ok(doneSection.some((l) => l.includes("… and 2 more")), "Done section should have '… and 2 more'");
+  assert.ok(cancelledSection.some((l) => l.includes("… and 1 more")), "Cancelled section should have '… and 1 more'");
+});

@@ -19,6 +19,8 @@ export interface ReportOptions {
   status?: TaskStatus;
   /** Override the stalled threshold (ms) for in_progress tasks. */
   stalledMs?: number;
+  /** Cap the number of tasks shown per TERMINAL group (done, cancelled). */
+  limit?: number;
 }
 
 /**
@@ -46,7 +48,13 @@ export function buildReport(
       out.push("_none_", "");
       continue;
     }
-    for (const t of inGroup) out.push(taskLine(t, notesByTask.get(t.id) ?? [], now, stalledMs));
+    // Cap only the terminal groups (done, cancelled) so a long history doesn't bury
+    // active work; in_progress/blocked/pending are never truncated.
+    const isTerminal = status === "done" || status === "cancelled";
+    const cap = isTerminal && opts.limit && inGroup.length > opts.limit ? opts.limit : undefined;
+    const shown = cap ? inGroup.slice(0, cap) : inGroup;
+    for (const t of shown) out.push(taskLine(t, notesByTask.get(t.id) ?? [], now, stalledMs));
+    if (cap) out.push(`_… and ${inGroup.length - cap} more_`);
     out.push("");
   }
   out.push(`_${total} task${total === 1 ? "" : "s"} · generated ${new Date(now).toISOString()}_`);
