@@ -134,21 +134,32 @@ export function classifierReachable(maxRisk: Risk): boolean {
   );
 }
 
+// Workflow auto-approve toggles forced on for every dispatch. These gate Bob's own
+// orchestration steps, not file/command actions: without them Bob stops at an Approve
+// button every time it updates its todo list, spawns a subtask, or switches mode —
+// the recurring "stalled after updateTodoList" wedge. They're benign (no file or shell
+// side effects), so they're always on rather than per-mode. Resubmit auto-retries a
+// transient API error instead of stalling at a "retry?" prompt.
+const WORKFLOW_AUTO_APPROVE = {
+  alwaysApproveResubmit: true,
+  alwaysAllowUpdateTodoList: true,
+  alwaysAllowSubtasks: true,
+  alwaysAllowModeSwitch: true,
+} as const;
+
 /**
  * The autoApprove block sent to Bob on dispatch: the mode's bool toggles (incl. the
- * autoApprovalEnabled master switch) plus the allowedCommands list derived from its
- * commandPolicy. allowlist and classifier share the SAFE_COMMANDS fast-path — the
- * difference is what handles the gray zone (a human prompt vs the extension's Claude
- * classifier), which happens Bob-side, not in this config. alwaysApproveResubmit is
- * forced on so a transient API error retries instead of stalling at a "retry?" prompt.
+ * autoApprovalEnabled master switch), the allowedCommands list derived from its
+ * commandPolicy, and the always-on workflow toggles. allowlist and classifier share
+ * the SAFE_COMMANDS fast-path — the difference is what handles the gray zone (a human
+ * prompt vs the Claude classifier), which happens Bob-side, not in this config.
  */
-export function dispatchAutoApprove(profile: ModeProfile): ModeProfile["autoApprove"] & {
-  allowedCommands: string[];
-  alwaysApproveResubmit: boolean;
-} {
+export function dispatchAutoApprove(
+  profile: ModeProfile,
+): ModeProfile["autoApprove"] & { allowedCommands: string[] } & typeof WORKFLOW_AUTO_APPROVE {
   const allowedCommands =
     profile.commandPolicy === "auto" ? ["*"] : profile.commandPolicy === "none" ? [] : SAFE_COMMANDS;
-  return { ...profile.autoApprove, allowedCommands, alwaysApproveResubmit: true };
+  return { ...profile.autoApprove, allowedCommands, ...WORKFLOW_AUTO_APPROVE };
 }
 
 export function resolveMode(task: Pick<Task, "mode" | "title" | "description" | "tags">): {

@@ -113,6 +113,11 @@ test("every dispatched profile sends the autoApprovalEnabled master switch", () 
     const aa = dispatchAutoApprove(profileFor(slug));
     assert.equal(aa.autoApprovalEnabled, true, `${slug} must enable the master switch`);
     assert.equal(aa.alwaysApproveResubmit, true, `${slug} must auto-approve resubmit`);
+    // Workflow toggles: without these Bob stalls at an Approve button on its own
+    // orchestration steps (the recurring "wedge after updateTodoList").
+    assert.equal(aa.alwaysAllowUpdateTodoList, true, `${slug} must auto-approve todo updates`);
+    assert.equal(aa.alwaysAllowSubtasks, true, `${slug} must auto-approve subtasks`);
+    assert.equal(aa.alwaysAllowModeSwitch, true, `${slug} must auto-approve mode switch`);
   }
 });
 
