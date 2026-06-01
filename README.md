@@ -138,15 +138,41 @@ node dist/worker.js --dry-run
 ```
 
 Flags: `--pipe` `--poll` `--timeout` `--assignee` `--new-tab`
-`--max-risk <safe|standard|elevated>` `--no-notify`. Needs Bob running with IPC
-enabled (see below). Aborted or timed-out tasks are parked as `blocked`.
+`--max-risk <safe|standard|elevated>` `--no-notify` `--no-defer`. Needs Bob
+running with IPC enabled (see below). Aborted or timed-out tasks are parked as
+`blocked`.
 
 Each mode has a risk level, and the worker only dispatches tasks at or below
 `--max-risk` (default `standard`); higher-risk ones stay pending for manual
-dispatch. The matching auto-approve profile is sent with each dispatch, so an
-`ask` task runs read-only regardless of global settings. On finish the worker
-pops a tray toast (`--no-notify` to silence; the system sound and terminal bell
-are off by default).
+dispatch. On finish the worker pops a tray toast (`--no-notify` to silence; the
+system sound and terminal bell are off by default).
+
+### Unattended execution
+
+Each dispatch sends the mode's auto-approve profile — the `autoApprovalEnabled`
+master switch, per-category toggles, and a curated `SAFE_COMMANDS` allowlist — so
+Bob runs without stalling on approval prompts. `ask` stays read-only;
+`code`/`orchestrator` add writes and auto-run allowlisted commands (build/test/vcs);
+anything else still prompts. This per-dispatch profile is enough for the worker on
+its own; to apply the same auto-approve to your *interactive* Bob session, fully quit
+Bob and launch via [launch-bob-ipc.cmd](launch-bob-ipc.cmd) (it runs
+[set-bob-autoapprove.mjs](set-bob-autoapprove.mjs), which writes the same allowlist to
+Bob's global state).
+
+For the gray zone (a command not on the allowlist), `advanced` mode can hand the
+decision to Claude instead of a human:
+
+```powershell
+node dist/worker.js --command-classifier --max-risk elevated         # cli backend: reuses your Claude login, no key
+node dist/worker.js --command-classifier --max-risk elevated --classifier-backend api   # one Anthropic call (needs ANTHROPIC_API_KEY)
+```
+
+The classifier presses approve/reject over IPC, which needs a one-time patch that
+exposes Bob's buttons — `node tools/patch-bob-buttons.mjs`, then restart Bob. It only
+engages for `advanced` (risk `elevated`) tasks, so raise `--max-risk` to match.
+Fail-safe: only an explicit "approve" runs a command; any error or timeout leaves it
+for a human. Extra flags: `--classifier-backend <cli|api>` `--classifier-model`
+`--classifier-cli`.
 
 ### Templates
 
@@ -174,7 +200,8 @@ node bob-control.mjs --list-pipes
 ```
 
 To enable it, fully quit Bob, then relaunch from the Start menu or
-[launch-bob-ipc.cmd](launch-bob-ipc.cmd).
+[launch-bob-ipc.cmd](launch-bob-ipc.cmd) (which also enables auto-approve for
+unattended runs — see above).
 
 ## Task model
 
@@ -186,14 +213,19 @@ To enable it, fully quit Bob, then relaunch from the Start menu or
 
 ```
 src/
-  types.ts     task types and enums
-  db.ts        SQLite store and repository
-  modes.ts     mode slugs, router, per-mode risk profiles
-  templates.ts task templates
-  bob-ipc.ts   async IPC client (BobClient)
-  notify.ts    desktop toast and terminal bell
-  server.ts    MCP server (stdio)
-  cli.ts       CLI
-  worker.ts    auto-dispatch loop
-  smoke.ts     self-test
+  types.ts        task types and enums
+  db.ts           SQLite store and repository
+  modes.ts        mode slugs, router, per-mode risk + auto-approve profiles
+  templates.ts    task templates
+  bob-ipc.ts      async IPC client (BobClient; approve/reject presses)
+  classify.ts     Claude command-safety classifier (cli/api backends)
+  command-gate.ts gray-zone approve/reject gate (worker -> IPC)
+  defer.ts        pause dispatch while you're chatting with Bob
+  notify.ts       desktop toast and terminal bell
+  server.ts       MCP server (stdio)
+  cli.ts          CLI
+  worker.ts       auto-dispatch loop
+  smoke.ts        self-test
+tools/
+  patch-bob-buttons.mjs   expose Bob's approve/reject buttons over IPC
 ```
