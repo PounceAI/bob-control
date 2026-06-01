@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import * as repo from "./db.js";
 import { TASK_STATUSES, TASK_PRIORITIES } from "./types.js";
+import { buildReport } from "./report.js";
 
 // IBM Bob Task Connector MCP server. Bob connects and gets tools to pull, claim,
 // log, and complete tasks; work is provisioned via create_task or the CLI and
@@ -226,6 +227,23 @@ server.registerTool(
     inputSchema: { id: z.number().int().describe("Task id") },
   },
   async ({ id }) => json({ id, deleted: repo.deleteTask(id) }),
+);
+
+server.registerTool(
+  "board_report",
+  {
+    title: "Board Report",
+    description:
+      "Render the board as a markdown standup/audit: tasks grouped by status in pull order, each with age, idle time, latest note, and a stalled flag for long-running in_progress work. Optionally filter to one status.",
+    inputSchema: {
+      status: z.enum(TASK_STATUSES).optional().describe("Restrict the report to a single status group"),
+    },
+  },
+  async ({ status }) => {
+    const tasks = repo.listTasks({});
+    const notes = new Map(tasks.map((t) => [t.id, repo.getNotes(t.id)]));
+    return { content: [{ type: "text", text: buildReport(tasks, notes, Date.now(), { status }) }] };
+  },
 );
 
 async function main(): Promise<void> {

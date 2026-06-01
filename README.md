@@ -88,6 +88,7 @@ flag the board stays repo-local at `data/tasks.db`.)
 | `submit_result` | Attach a result and mark done |
 | `set_task_mode` | Set or clear a task's mode slug |
 | `delete_task` | Permanently delete a task and its notes |
+| `board_report` | Markdown standup/audit of the board, grouped by status |
 
 A typical Bob loop: `get_next_task {claim:true}` then `add_task_note` while
 working, then `submit_result`.
@@ -105,7 +106,14 @@ node dist/cli.js note 1 "Waiting on test data"
 node dist/cli.js result 1 "Done; 3 procedures extracted"
 node dist/cli.js next                                 # next pending task + its routed mode
 node dist/cli.js stats
+node dist/cli.js report                               # markdown standup/audit of the board
+node dist/cli.js report --status blocked --out report.md
 ```
+
+`report` groups tasks by status in pull order, each with age, idle time, the
+latest note, and a ⚠ stalled flag for in_progress work idle over 30 min — handy
+for a standup or spotting wedged tasks. Same output is available to agents via the
+`board_report` MCP tool.
 
 ## Modes
 
@@ -221,6 +229,7 @@ src/
   classify.ts     Claude command-safety classifier (cli/api backends)
   command-gate.ts gray-zone approve/reject gate (worker -> IPC)
   defer.ts        pause dispatch while you're chatting with Bob
+  report.ts       board -> markdown standup/audit (CLI + board_report tool)
   notify.ts       desktop toast and terminal bell
   server.ts       MCP server (stdio)
   cli.ts          CLI

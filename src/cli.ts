@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import "./suppress-warnings.js";
+import { writeFileSync } from "node:fs";
 import * as repo from "./db.js";
-import { TASK_PRIORITIES, TASK_STATUSES, type Task } from "./types.js";
+import { TASK_PRIORITIES, TASK_STATUSES, type Task, type TaskStatus } from "./types.js";
 import { BUILT_IN_MODES, isBuiltInMode, resolveMode } from "./modes.js";
 import { TEMPLATES, getTemplate } from "./templates.js";
+import { buildReport } from "./report.js";
 
 /**
  * bob-tasks: CLI for provisioning and inspecting tasks in the same SQLite
@@ -83,6 +85,7 @@ Commands:
   result <id> <text> [--open]
   delete <id>
   stats
+  report [--status <status>] [--out <file>]   markdown standup/audit of the board
   help
 
 Modes: ${BUILT_IN_MODES.join(" | ")} (or any custom mode slug). Omit --mode to auto-route on dispatch.
@@ -265,6 +268,24 @@ function main(): void {
         console.log(`  ${status}: ${counts[status]}`);
       }
       console.log(`  total: ${allTasks.length}`);
+      break;
+    }
+
+    case "report": {
+      const status = str(flags.status);
+      if (status && !TASK_STATUSES.includes(status as never)) {
+        die(`invalid status '${status}' (use ${TASK_STATUSES.join(", ")})`);
+      }
+      const tasks = repo.listTasks({});
+      const notes = new Map(tasks.map((t) => [t.id, repo.getNotes(t.id)]));
+      const md = buildReport(tasks, notes, Date.now(), { status: status as TaskStatus | undefined });
+      const out = str(flags.out);
+      if (out) {
+        writeFileSync(out, md);
+        console.log(`wrote report to ${out} (${tasks.length} tasks)`);
+      } else {
+        console.log(md);
+      }
       break;
     }
 
