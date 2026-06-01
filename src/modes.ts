@@ -127,13 +127,23 @@ export function profileFor(mode: string): ModeProfile {
 }
 
 /**
- * True if any classifier-policy mode is within the risk gate. If none is, the
- * classifier never fires (those tasks aren't dispatched) — the worker warns on this.
+ * True if a command policy has a gray zone (commands outside the allowlist that
+ * could be approved by the classifier). Both 'allowlist' and 'classifier' have
+ * gray zones; 'none' and 'auto' do not.
+ */
+export function policyHasGrayZone(policy: CommandPolicy): boolean {
+  return policy === "allowlist" || policy === "classifier";
+}
+
+/**
+ * True if any mode with a gray zone (allowlist or classifier policy) is within
+ * the risk gate. If none is, the classifier never fires (those tasks aren't
+ * dispatched) — the worker warns on this.
  */
 export function classifierReachable(maxRisk: Risk): boolean {
   const max = RISK_RANK[maxRisk];
   return Object.values(MODE_PROFILES).some(
-    (p) => p.commandPolicy === "classifier" && RISK_RANK[p.risk] <= max,
+    (p) => policyHasGrayZone(p.commandPolicy) && RISK_RANK[p.risk] <= max,
   );
 }
 

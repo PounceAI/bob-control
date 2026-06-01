@@ -167,20 +167,20 @@ Bob and launch via [launch-bob-ipc.cmd](launch-bob-ipc.cmd) (it runs
 [set-bob-autoapprove.mjs](set-bob-autoapprove.mjs), which writes the same allowlist to
 Bob's global state).
 
-For the gray zone (a command not on the allowlist), `advanced` mode can hand the
-decision to Claude instead of a human:
+For the gray zone (a command not on the allowlist), `code`, `orchestrator`, and
+`advanced` modes can hand the decision to Claude instead of a human:
 
 ```powershell
-node dist/worker.js --command-classifier --max-risk elevated         # cli backend: reuses your Claude login, no key
-node dist/worker.js --command-classifier --max-risk elevated --classifier-backend api   # one Anthropic call (needs ANTHROPIC_API_KEY)
+node dist/worker.js --command-classifier                             # cli backend: reuses your Claude login, no key
+node dist/worker.js --command-classifier --classifier-backend api    # one Anthropic call (needs ANTHROPIC_API_KEY)
 ```
 
 The classifier presses approve/reject over IPC, which needs a one-time patch that
-exposes Bob's buttons — `node tools/patch-bob-buttons.mjs`, then restart Bob. It only
-engages for `advanced` (risk `elevated`) tasks, so raise `--max-risk` to match.
-Fail-safe: only an explicit "approve" runs a command; any error or timeout leaves it
-for a human. Extra flags: `--classifier-backend <cli|api>` `--classifier-model`
-`--classifier-cli`.
+exposes Bob's buttons — `node tools/patch-bob-buttons.mjs`, then restart Bob. It
+engages for any mode with gray-zone commands (`code`, `orchestrator`, `advanced`),
+so it works at the default `--max-risk standard`. Fail-safe: only an explicit
+"approve" runs a command; any error or timeout leaves it for a human. Extra flags:
+`--classifier-backend <cli|api>` `--classifier-model` `--classifier-cli`.
 
 The other thing that stalls an unattended task is Bob **asking a question** mid-task
 (e.g. "which approach should I take?"). With `--answer-followups`, the worker asks

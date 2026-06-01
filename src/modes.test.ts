@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, classifierReachable } from "./modes.js";
+import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, classifierReachable, policyHasGrayZone } from "./modes.js";
 
 // The dispatcher's routing is the source of truth for "what mode Bob runs a task
 // in". These tests pin that behavior; the plugin command docs must match it
@@ -149,13 +149,23 @@ test("execute-capable profiles ship a curated allowlist that auto-runs safe comm
   assert.deepEqual(ask.allowedCommands, []);
 });
 
-test("classifierReachable: the classifier engages only when its mode is within the risk gate", () => {
-  // Only 'advanced' (risk:elevated) has commandPolicy 'classifier', so the classifier
-  // is inert until --max-risk reaches elevated. This pins the silent-no-op trap: the
-  // extension can enable the classifier while leaving maxRisk at its 'standard' default.
-  assert.equal(classifierReachable("safe"), false);
-  assert.equal(classifierReachable("standard"), false);
-  assert.equal(classifierReachable("elevated"), true);
+test("policyHasGrayZone: identifies policies with gray-zone commands", () => {
+  // allowlist and classifier both have gray zones (commands outside the allowlist
+  // that could be approved by the classifier).
+  assert.equal(policyHasGrayZone("allowlist"), true);
+  assert.equal(policyHasGrayZone("classifier"), true);
+  // none and auto do not have gray zones.
+  assert.equal(policyHasGrayZone("none"), false);
+  assert.equal(policyHasGrayZone("auto"), false);
+});
+
+test("classifierReachable: the classifier engages when any gray-zone mode is within the risk gate", () => {
+  // code/orchestrator (risk:standard, policy:allowlist) and advanced (risk:elevated,
+  // policy:classifier) all have gray zones. The classifier is reachable at 'standard'
+  // (code/orchestrator) and 'elevated' (all three), but not at 'safe' (ask only).
+  assert.equal(classifierReachable("safe"), false, "safe: no gray-zone modes reachable");
+  assert.equal(classifierReachable("standard"), true, "standard: code/orchestrator reachable");
+  assert.equal(classifierReachable("elevated"), true, "elevated: all gray-zone modes reachable");
 });
 
 test("bare SAFE_COMMANDS entries auto-run their forms, and no destructive command shares a bare prefix", () => {

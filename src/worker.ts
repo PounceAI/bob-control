@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import "./suppress-warnings.js";
 import * as repo from "./db.js";
-import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, MODE_PROFILES, classifierReachable, type Risk } from "./modes.js";
+import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, MODE_PROFILES, classifierReachable, policyHasGrayZone, type Risk } from "./modes.js";
 import { createCommandGate } from "./command-gate.js";
 import { createFollowupGate } from "./followup-gate.js";
 import { handleStdinAnswer } from "./worker-answer.js";
@@ -245,11 +245,11 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   }
   repo.addNote(task.id, `Auto-dispatched in mode {${mode}} (${source}, risk:${profile.risk}).`, "worker");
 
-  // Gray-zone command approval: under the classifier policy, commands that miss
-  // Bob's static allowlist surface as an `ask` instead of auto-running. Rather than
-  // wait for a human, ask Claude and press approve/reject over IPC (needs the Bob
-  // button patch). Fail-safe: only an explicit "approve" runs the command.
-  const classifierOn = opts.commandClassifier && profile.commandPolicy === "classifier";
+  // Gray-zone command approval: under allowlist or classifier policy, commands that
+  // miss Bob's static allowlist surface as an `ask` instead of auto-running. Rather
+  // than wait for a human, ask Claude and press approve/reject over IPC (needs the
+  // Bob button patch). Fail-safe: only an explicit "approve" runs the command.
+  const classifierOn = opts.commandClassifier && policyHasGrayZone(profile.commandPolicy);
   const apiKey = process.env.ANTHROPIC_API_KEY;
   // The api backend can't run without a key; the cli backend reuses Claude's login.
   const classifierBlocked = opts.classifierBackend === "api" && !apiKey;
@@ -506,13 +506,13 @@ async function main(): Promise<void> {
     if (!classifierReachable(opts.maxRisk)) {
       const names =
         Object.entries(MODE_PROFILES)
-          .filter(([, p]) => p.commandPolicy === "classifier")
+          .filter(([, p]) => policyHasGrayZone(p.commandPolicy))
           .map(([slug]) => slug)
           .join(", ") || "(none)";
       console.log(
         `bob-worker: ⚠ classifier will NOT engage at --max-risk ${opts.maxRisk}: ` +
-          `its only mode(s) [${names}] exceed the risk gate. Raise --max-risk to 'elevated' ` +
-          `(extension setting bobTasks.maxRisk) for the classifier to take effect.`,
+          `modes with gray-zone commands [${names}] exceed the risk gate. ` +
+          `Raise --max-risk to at least 'standard' (extension setting bobTasks.maxRisk) for the classifier to take effect.`,
       );
     } else if (buttonPatchPresent() === false) {
       console.log(
