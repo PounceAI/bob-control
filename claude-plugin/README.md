@@ -21,12 +21,26 @@ connector is plain TypeScript on the built-in `node:sqlite`.
   - `/bob-next [tag]` — what Bob pulls next and the mode it routes to (read-only).
   - `/bob-route <id | text>` — predict the dispatch mode for a task or a hypothetical.
   - `/bob-triage [focus]` — review the board, propose fixes, apply the safe ones on confirm.
+  - `/bob-review [focus | git-range]` — queue a read-only (`ask`-mode) Bob code review of the
+    diff you just made (defaults to the uncommitted working-tree changes); Bob returns a
+    prioritized, correctness-first findings list when its worker drains the task.
 - **Worker command**
   - `/bob-work [tag] [--max N] [--one] [--dry-run]` — claim pending tasks Claude can do in
     the current repo, execute them, log progress, and submit results. Claims as `claude`
     so it never collides with Bob (who only pulls `pending`); leaves IBM-i/RPG work for Bob;
     respects each task's mode (an `ask` task stays read-only); parks anything it can't finish
     as `blocked`.
+- **Specialty-mode skills** (model-invoked — Claude triggers them when you ask for IBM Bob by
+  name; they auto-load from `skills/`). Each checks for duplicates, files the task in the right
+  Bob mode, reports the id + routed mode, and surfaces the result via `get_task`:
+  - **bob-review** (`review`) — "have Bob review this diff"; returns a correctness-first findings
+    list (severity / location / `fixed_diff`) on the board. Mirrors `/bob-review`.
+  - **bob-plan** (`plan`) — "ask Bob to plan/design X"; read-only, returns a plan, no code changes.
+  - **bob-refactor** (`refactor`) — "have Bob refactor/restructure Y"; behavior-preserving edits.
+  - **bob-security** (`devsecops`) — "ask Bob for a security review/scan"; vuln-focused findings.
+
+  These cover Bob's **specialty** modes; generic execution (`code`/`advanced`/`ask`/
+  `orchestrator`) stays with `/bob-new` + the auto-router.
 - **Subagent** `bob-foreman` — split a large request into several correctly-routed, ordered tasks.
 - **Status line** (`bin/statusline-bob.mjs`) — a live one-line board summary
   (`⚡ Bob: N running (M queued) · #id title …`) shown next to the model and directory.

@@ -25,6 +25,9 @@ data/
 # Claude Code local (machine-specific) settings
 .claude/settings.local.json
 
+# Editor (machine-specific) settings
+.vscode/
+
 # Live Bob MCP config holds absolute machine paths; ship .example instead
 .bob/mcp.json
 
@@ -40,3 +43,6 @@ scratch/*
 .DS_Store
 Thumbs.db
 test-deps.db
+# SQLite WAL/SHM sidecars (transient; created by test/board runs)
+*.db-shm
+*.db-wal

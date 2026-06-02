@@ -61,8 +61,11 @@ npm install && npm run build      # build also bundles claude-plugin/server/serv
 | `/bob-next [tag]` | What Bob pulls next and the mode it routes to (read-only; never claims) |
 | `/bob-route <id\|text>` | Predict the dispatch mode for a task or a hypothetical |
 | `/bob-triage [focus]` | Review the board, propose fixes, apply the safe ones on confirm |
+| `/bob-review [range]` | Queue a read-only Bob (`review`-mode) code review of the diff you just made; findings land on the board |
 | `/bob-work [tag] [--max N]` | **Worker:** claim pending tasks Claude can do, execute them, submit results |
+| `/bob-statusline` | Install (or `--remove`) a live one-line board summary in your Claude Code status line |
 | `bob-foreman` subagent | Split a large request into several correctly-routed, ordered tasks |
+| **Skills** (model-invoked) | Ask for IBM Bob by name to dispatch its specialty modes: **bob-review** (`review`), **bob-plan** (`plan`), **bob-refactor** (`refactor`), **bob-security** (`devsecops`) |
 
 ### Shared board
 
@@ -112,20 +115,37 @@ node dist/cli.js report --status blocked --out report.md
 
 `report` groups tasks by status in pull order, each with age, idle time, the
 latest note, and a ⚠ stalled flag for in_progress work idle over 30 min — handy
-for a standup or spotting wedged tasks. Same output is available to agents via the
-`board_report` MCP tool.
+for a standup or spotting wedged tasks. It also prints an audit summary tallying
+unattended automation activity from task notes: classifier approvals/denials,
+answerer answers/escalations, and human actions (with an estimated classifier
+cost). Same output is available to agents via the `board_report` MCP tool.
 
 ## Modes
 
-Bob runs in modes: `code`, `advanced` (code plus MCP/browser), `ask`
-(read-only), and `orchestrator`. A task can carry a mode; on dispatch the
-connector passes it to Bob. Leave it blank and the router in
-[src/modes.ts](src/modes.ts) picks one from the title, description, and tags.
+Each task carries a mode (or routes to one); on dispatch the connector sends it to Bob
+along with a matching risk level and auto-approve profile (see [src/modes.ts](src/modes.ts)).
+Eight built-in modes:
+
+| Mode | Risk | What it's for |
+| ---- | ---- | ------------- |
+| `ask` | safe | Read-only — explain / research / document. No writes or commands. |
+| `plan` | safe | Read-only planning/design — produces a plan, no code changes. |
+| `review` | safe | Read-only code review — returns structured findings (see below). |
+| `code` | standard | Normal edit + build + run. The default. |
+| `refactor` | standard | Behavior-preserving restructuring/cleanup. |
+| `devsecops` | standard | Security-focused review/scan. |
+| `orchestrator` | standard | Coordinate a multi-step epic with sub-tasks. |
+| `advanced` | elevated | `code` plus MCP + browser power. |
+
+Leave a task's mode blank and the keyword router picks one from the title, description, and
+tags. The router only auto-routes to `ask`, `advanced`, `orchestrator`, or `code`; the
+specialty modes (`plan` / `review` / `refactor` / `devsecops`) are reached by setting the mode
+explicitly, a tag naming the mode, or the plugin's model-invoked skills.
 
 ```powershell
 node dist/cli.js create "Explain the IPC envelope"   # routes to ask
 node dist/cli.js create "Fix bug in db.ts"           # routes to code
-node dist/cli.js create "Add export" --mode code     # explicit
+node dist/cli.js create "Add export" --mode refactor # explicit
 node dist/cli.js route 1                             # preview the routed mode
 ```
 
@@ -147,7 +167,8 @@ node dist/worker.js --dry-run
 
 Flags: `--pipe` `--poll` `--timeout` `--assignee` `--new-tab`
 `--max-risk <safe|standard|elevated>` `--no-notify` `--no-defer` `--answer-followups`
-`--escalate-all` `--review-plans`. Needs Bob running with IPC enabled (see below).
+`--escalate-all` `--review-plans` `--allow-commands <prefix,prefix>`. Needs Bob running
+with IPC enabled (see below).
 Aborted or timed-out tasks are parked as `blocked`.
 
 Each mode has a risk level, and the worker only dispatches tasks at or below
@@ -182,6 +203,13 @@ so it works at the default `--max-risk standard`. Fail-safe: only an explicit
 "approve" runs a command; any error or timeout leaves it for a human. Extra flags:
 `--classifier-backend <cli|api>` `--classifier-model` `--classifier-cli`.
 
+To skip the classifier for commands you already trust in a given drain, extend the
+auto-run allowlist with `--allow-commands` (comma-separated command prefixes):
+
+```powershell
+node dist/worker.js --allow-commands "npm run lint,git fetch"   # these auto-run, no classifier call
+```
+
 The other thing that stalls an unattended task is Bob **asking a question** mid-task
 (e.g. "which approach should I take?"). With `--answer-followups`, the worker asks
 Claude to answer — preferring one of Bob's offered options — and sends the reply back
@@ -204,7 +232,41 @@ With `--review-plans`, plan/design-approval questions ("should I proceed with th
 "which approach should I take?") are escalated to you for review, while mechanical clarifications
 ("which file?", "flag name -x or -y?") are auto-answered. This is a middle ground between
 `--escalate-all` (blocks on every question) and the default (auto-answers everything confident).
+### Verify-and-continue with LLM judge
+
+When `--verify-and-continue` is on, the worker runs an acceptance check after Bob completes
+a task and loops back to Bob to fix issues until it passes or `--max-continues` is reached.
+This catches broken builds/tests without human intervention.
+
+By default, with no `--verify-command` set, the loop blind-passes (no reliable heuristic).
+Add `--verify-judge` to use an **LLM judge** that reviews Bob's completion against the task
+criteria and actual code changes (git diff). The judge uses the same backend as the command
+classifier (reuses your Claude login or ANTHROPIC_API_KEY). The diff is scoped to **this
+task's** changes — captured against a pre-dispatch baseline so pre-existing edits in a dirty
+tree aren't attributed to the task, and new (untracked) files the task creates are included.
+
+```powershell
+node dist/worker.js --verify-and-continue --verify-judge                    # judge is sole verifier
+node dist/worker.js --verify-and-continue --verify-command "npm test" --verify-judge  # command first, then judge
+node dist/worker.js --verify-and-continue --verify-command "npm test"       # command only, no judge
+```
+
+When both `--verify-command` and `--verify-judge` are set, the command runs **first** and must
+pass; the judge then provides an **additional gate** (both must pass). When only `--verify-judge`
+is set, the judge is the sole acceptance signal. The judge fails safe: any LLM error or timeout
+is treated as a pass (logged as a task note) so infrastructure failures never block tasks.
+
 When both `--review-plans` and `--escalate-all` are set, `--review-plans` takes precedence.
+
+### Review-mode findings
+
+When a `review` task finishes, the worker captures Bob's findings to the board. Bob's
+native review writes structured issues (severity, location, category, often a suggested
+`fixed_diff`); under headless dispatch it's tool-restricted and returns the review as
+completion text instead, so the worker parses that text back into structured findings
+([src/review-findings.ts](src/review-findings.ts)). Either way the findings land as the task
+`result` plus a `bob-review` note — the board, not Bob's webview panel, is the source of
+truth. Queue one with `/bob-review` (or the `bob-review` skill / `--mode review`).
 
 ### Templates
 
@@ -250,11 +312,17 @@ src/
   modes.ts        mode slugs, router, per-mode risk + auto-approve profiles
   templates.ts    task templates
   bob-ipc.ts      async IPC client (BobClient; approve/reject/sendMessage)
+  bob-polls.ts    verify-and-continue poll loop (re-dispatch until it passes)
   llm.ts          shared Claude transport (api / cli backends)
   classify.ts     command-safety classifier (gray-zone command asks)
   command-gate.ts gray-zone approve/reject gate (worker -> IPC)
   answer.ts       answerer for Bob's followup questions
   followup-gate.ts answer-or-escalate gate for followup asks (worker -> IPC)
+  worker-answer.ts handle a human's answer to an escalated followup
+  judge.ts        LLM acceptance judge + scoped git-diff capture (verify-and-continue)
+  verdict-cache.ts LRU cache for classifier verdicts (skip repeat calls for identical commands)
+  review-findings.ts (de)serialize review-mode findings (text <-> structured) for the board
+  retry-policy.ts retry/backoff for failed dispatches
   defer.ts        pause dispatch while you're chatting with Bob
   report.ts       board -> markdown standup/audit (CLI + board_report tool)
   notify.ts       desktop toast and terminal bell
@@ -263,5 +331,5 @@ src/
   worker.ts       auto-dispatch loop
   smoke.ts        self-test
 tools/
-  patch-bob-buttons.mjs   expose Bob's approve/reject buttons over IPC
+  patch-bob-buttons.mjs   expose Bob's approve/reject buttons + GetReviewFindings over IPC
 ```

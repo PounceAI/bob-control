@@ -88,8 +88,12 @@ test("default is code when nothing matches", () => {
 
 test("risk profiles gate the worker correctly", () => {
   assert.equal(profileFor("ask").risk, "safe");
+  assert.equal(profileFor("plan").risk, "safe");
+  assert.equal(profileFor("review").risk, "safe");
   assert.equal(profileFor("code").risk, "standard");
   assert.equal(profileFor("orchestrator").risk, "standard");
+  assert.equal(profileFor("refactor").risk, "standard");
+  assert.equal(profileFor("devsecops").risk, "standard");
   assert.equal(profileFor("advanced").risk, "elevated");
   assert.equal(profileFor("unknown-slug").risk, "standard"); // default
   assert.ok(RISK_RANK.safe < RISK_RANK.standard && RISK_RANK.standard < RISK_RANK.elevated);
@@ -160,11 +164,11 @@ test("policyHasGrayZone: identifies policies with gray-zone commands", () => {
 });
 
 test("classifierReachable: the classifier engages when any gray-zone mode is within the risk gate", () => {
-  // code/orchestrator (risk:standard, policy:allowlist) and advanced (risk:elevated,
-  // policy:classifier) all have gray zones. The classifier is reachable at 'standard'
-  // (code/orchestrator) and 'elevated' (all three), but not at 'safe' (ask only).
-  assert.equal(classifierReachable("safe"), false, "safe: no gray-zone modes reachable");
-  assert.equal(classifierReachable("standard"), true, "standard: code/orchestrator reachable");
+  // plan/review (risk:safe, policy:allowlist), code/orchestrator/refactor/devsecops
+  // (risk:standard, policy:allowlist), and advanced (risk:elevated, policy:classifier)
+  // all have gray zones. The classifier is reachable at all risk levels now.
+  assert.equal(classifierReachable("safe"), true, "safe: plan/review modes reachable");
+  assert.equal(classifierReachable("standard"), true, "standard: code/orchestrator/refactor/devsecops reachable");
   assert.equal(classifierReachable("elevated"), true, "elevated: all gray-zone modes reachable");
 });
 

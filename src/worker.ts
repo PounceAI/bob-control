@@ -6,10 +6,12 @@ import { createCommandGate } from "./command-gate.js";
 import { createFollowupGate } from "./followup-gate.js";
 import { handleStdinAnswer } from "./worker-answer.js";
 import { BobClient, resolvePipe, type DispatchResult } from "./bob-ipc.js";
-import { createPollLoop } from "./bob-polls.js";
+import { formatReviewFindings, parseReviewFindings } from "./review-findings.js";
+import { createPollLoop, defaultVerify, type VerifyResult } from "./bob-polls.js";
 import { ExternalActivity } from "./defer.js";
 import { notify } from "./notify.js";
 import { shouldRetry, executeRetry } from "./retry-policy.js";
+import { judgeCompletion, captureGitDiff, captureGitBaseline, type JudgeContext, type GitBaseline } from "./judge.js";
 import type { Task } from "./types.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -93,6 +95,7 @@ interface Opts {
   maxRisk: Risk;
   verifyAndContinue: boolean;
   verifyCommand?: string;
+  verifyJudge: boolean;
   maxContinues: number;
   detectPlanStop: boolean;
   retry: boolean;
@@ -156,6 +159,7 @@ function parseOpts(argv: string[]): Opts {
     maxRisk,
     verifyAndContinue: has("--verify-and-continue"),
     verifyCommand: val("--verify-command"),
+    verifyJudge: has("--verify-judge"),
     maxContinues: num("--max-continues", 3),
     detectPlanStop: has("--detect-plan-stop"),
     retry: maxRetryAttempts > 0,
@@ -341,6 +345,59 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     }
   };
 
+  // Construct a composite verifier that combines command verification with LLM judge.
+  // When --verify-judge is on:
+  // - If verifyCommand is set, it runs FIRST and must pass, then judge provides additional gate
+  // - If NO command is set, judge is the sole acceptance signal
+  // When --verify-judge is off, the default verifier handles command execution (or blind-pass).
+  // Pre-task working-tree snapshot so the judge diffs only THIS task's changes
+  // (set just before the initial dispatch below; closed over by the verifier).
+  let judgeBaseline: GitBaseline | undefined;
+  const compositeVerifier = opts.verifyJudge
+    ? async (result: string, command: string | undefined, cwd: string): Promise<VerifyResult> => {
+        // Run command verifier first if a command is set (reuse defaultVerify logic)
+        if (command) {
+          const cmdResult = await defaultVerify(result, command, cwd);
+          if (!cmdResult.passed) {
+            // Command failed: short-circuit, don't run judge
+            return cmdResult;
+          }
+          // Command passed: run judge as additional gate
+        }
+
+        // Run the LLM judge (either as sole verifier or additional gate after command),
+        // scoping the diff to this task's changes via the pre-dispatch baseline.
+        const gitDiff = await captureGitDiff(cwd, 4000, judgeBaseline?.ref, judgeBaseline?.untracked);
+        const ctx: JudgeContext = {
+          taskPrompt: buildPrompt(task),
+          completionResult: result,
+          gitDiff,
+        };
+        const verdict = await judgeCompletion(ctx, {
+          backend: opts.classifierBackend,
+          model: opts.classifierModel,
+          apiKey,
+          cliPath: opts.classifierCli,
+          timeoutMs: 30_000,
+        });
+
+        // Fail-open: a judge that couldn't reach the LLM must never block a task.
+        if (verdict.error) {
+          console.log(`  [judge] ${verdict.reason} — failing open (treating as passed)`);
+          repo.addNote(task.id, `Judge infrastructure failure: ${verdict.reason}`, "judge");
+          return { passed: true, reason: verdict.reason };
+        }
+
+        if (command && verdict.pass) {
+          return { passed: true, reason: "command and judge both passed" };
+        } else if (command && !verdict.pass) {
+          return { passed: false, reason: `command passed but judge failed: ${verdict.reason}` };
+        } else {
+          return { passed: verdict.pass, reason: verdict.reason };
+        }
+      }
+    : undefined;
+
   // Verify-and-continue loop: on a failed verify it re-dispatches the FULL task plus
   // the failure (via doDispatch) so Bob has the context to fix it.
   const pollLoop = createPollLoop({
@@ -354,6 +411,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     log: (m) => console.log(m),
     dispatch: doDispatch,
     detectPlanStop: opts.detectPlanStop,
+    verify: compositeVerifier,
   });
 
   // Capture baseline snapshot BEFORE initial dispatch for plan-stop detection.
@@ -406,11 +464,30 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     });
   }
 
+  // Snapshot the pre-task tree so the judge sees only THIS task's changes (not
+  // pre-existing dirt). Captured before dispatch; read by the verifier after.
+  if (opts.verifyJudge) judgeBaseline = await captureGitBaseline(process.cwd());
+
   // Initial dispatch.
   const initialRes = await doDispatch(buildPrompt(task));
 
   // Run the poll loop (no-op if feature is off).
   const res = await pollLoop(initialRes, baseline);
+
+  // Format and persist review findings (review mode). Prefer the structured
+  // submit_review_findings capture; but under headless IPC dispatch Bob is
+  // tool-restricted and never calls that tool — it returns the review as
+  // completion_result *text*. So when the structured capture is empty, parse
+  // the result markdown into findings so the board still gets a structured note.
+  // (The raw text is also stored verbatim as the task result below.)
+  let findings = res.reviewFindings ?? [];
+  if (findings.length === 0 && mode === "review" && res.result.trim()) {
+    findings = parseReviewFindings(res.result);
+  }
+  if (findings.length > 0) {
+    repo.addNote(task.id, formatReviewFindings(findings), "bob-review");
+    console.log(`  📋 captured ${findings.length} review finding${findings.length === 1 ? "" : "s"}`);
+  }
 
   // Mark done only on a GENUINE completion: Bob fired taskCompleted, or it
   // emitted a real attempt_completion (completion_result). In some multi-step
@@ -590,7 +667,22 @@ async function main(): Promise<void> {
   }
   if (opts.verifyAndContinue) {
     const cmd = opts.verifyCommand ? `command="${opts.verifyCommand}"` : "built-in heuristics";
-    console.log(`bob-worker: verify-and-continue = on (${cmd}, max ${opts.maxContinues} continue${opts.maxContinues === 1 ? "" : "s"}).`);
+    const judgeNote = opts.verifyJudge ? " + LLM judge" : "";
+    console.log(`bob-worker: verify-and-continue = on (${cmd}${judgeNote}, max ${opts.maxContinues} continue${opts.maxContinues === 1 ? "" : "s"}).`);
+    // Warn when judge is enabled but API key is missing (fail-open behavior)
+    if (opts.verifyJudge && opts.classifierBackend === "api" && !process.env.ANTHROPIC_API_KEY) {
+      console.log(
+        "bob-worker: ⚠ LLM judge enabled but ANTHROPIC_API_KEY not set — " +
+        "judge will FAIL OPEN (pass all tasks) when it can't reach the LLM. " +
+        "Set ANTHROPIC_API_KEY or use --classifier-backend cli to enable judge verdicts."
+      );
+    }
+  } else if (opts.verifyJudge) {
+    // Warn when --verify-judge is set without --verify-and-continue (silent no-op)
+    console.log(
+      "bob-worker: ⚠ --verify-judge is set but --verify-and-continue is OFF — " +
+      "the judge will NOT run. Enable --verify-and-continue to use the judge."
+    );
   }
   if (opts.detectPlanStop) {
     console.log(`bob-worker: plan-stop detection = on (checks git working-tree for changes, auto-continues if clean).`);

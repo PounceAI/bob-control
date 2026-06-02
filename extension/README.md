@@ -54,6 +54,7 @@ All settings are under the `bobTasks.*` namespace:
 
 - **`bobTasks.verifyAndContinue`** — After Bob completes a task, run an acceptance check and loop back to Bob to fix issues until it passes or `maxContinues` is reached. Catches broken builds/tests without human intervention. Default: `false`.
 - **`bobTasks.verifyCommand`** — Command to run for acceptance checks when `verifyAndContinue` is on. Empty = use built-in heuristics (git working-tree check). Exit code 0 = pass, non-zero = fail.
+- **`bobTasks.verifyJudge`** — Use an LLM judge to verify task completion when no `verifyCommand` is set. The judge reviews Bob's work against the task criteria and actual code changes (git diff). Uses the same backend as the command classifier. When both `verifyCommand` and `verifyJudge` are on, the command runs first and the judge provides an additional gate. Default: `false`.
 - **`bobTasks.maxContinues`** — Maximum number of fix loops when `verifyAndContinue` is on. After this many attempts, the task is marked as failed. Default: `3`.
 - **`bobTasks.detectPlanStop`** — Check if Bob did real work (git working-tree changed) after completion. If the tree is clean (plan-only, no code written), auto-continue asking Bob to implement the plan. Default: `false`.
 

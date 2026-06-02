@@ -39,6 +39,17 @@ export interface DispatchOptions {
   onEvent?: (name: string, detail: { say?: string; ask?: string; text?: string; partial?: boolean; ts?: number }) => void;
 }
 
+export interface ReviewIssue {
+  title: string;
+  description: string;
+  file?: string;
+  filePath?: string;
+  line?: number;
+  severity: string;
+  category: string;
+  fixed_diff?: string;
+}
+
 export interface DispatchResult {
   taskId: string | null;
   /** Genuine attempt_completion text Bob emitted, or "" if it never did. */
@@ -46,6 +57,8 @@ export interface DispatchResult {
   /** Last non-empty streamed say text (e.g. a tool call) — diagnostics only, NOT a completion. */
   lastText: string;
   status: "completed" | "aborted" | "timeout";
+  /** Review findings from submit_review_findings tool (review mode only). */
+  reviewFindings?: ReviewIssue[];
 }
 
 export interface TaskLifecycleEvent {
@@ -60,6 +73,7 @@ interface ActiveDispatch {
   ourTaskId: string | null;
   lastCompletion: string;
   lastText: string;
+  reviewFindings?: ReviewIssue[];
   settle: (r: DispatchResult) => void;
   timer: ReturnType<typeof setTimeout>;
   onEvent?: DispatchOptions["onEvent"];
@@ -180,6 +194,19 @@ export class BobClient {
           const text: string = String(cline.text ?? "");
           if (say === "completion_result" && text.trim()) this.active.lastCompletion = text;
           else if (text.trim()) this.active.lastText = text;
+          
+          // Capture submit_review_findings tool calls (review mode)
+          if (say === "tool" && text && !cline.partial) {
+            try {
+              const parsed = JSON.parse(text);
+              if (parsed.tool === "submit_review_findings" && Array.isArray(parsed.issues)) {
+                this.active.reviewFindings = parsed.issues;
+              }
+            } catch {
+              // Ignore parse errors; text may be incomplete or not JSON
+            }
+          }
+          
           // `ts` is the message's unique timestamp — the gates dedup on it so a
           // re-emitted ask is handled once while a genuine re-run (new ts) is handled again.
           const ts: number | undefined = typeof cline.ts === "number" ? cline.ts : undefined;
@@ -219,6 +246,7 @@ export class BobClient {
       result: a.lastCompletion,
       lastText: a.lastText,
       status,
+      reviewFindings: a.reviewFindings,
     });
   }
 

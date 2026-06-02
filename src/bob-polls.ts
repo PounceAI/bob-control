@@ -14,6 +14,16 @@ export interface PollResult {
   result: string;
   lastText: string;
   status: "completed" | "aborted" | "timeout";
+  reviewFindings?: Array<{
+    title: string;
+    description: string;
+    file?: string;
+    filePath?: string;
+    line?: number;
+    severity: string;
+    category: string;
+    fixed_diff?: string;
+  }>;
 }
 
 export interface VerifyResult {
@@ -55,11 +65,12 @@ export interface PollDeps {
 
 /**
  * Run the verification check by executing the verify command (exit 0 = pass).
- * With no command there's nothing reliable to check — scanning the result text for
- * words like "error" false-positives on benign mentions ("added error handling"),
- * so we conservatively PASS rather than trigger a spurious continue.
+ * With no command AND no judge verifier, there's nothing reliable to check — scanning
+ * the result text for words like "error" false-positives on benign mentions ("added
+ * error handling"), so we conservatively PASS rather than trigger a spurious continue.
+ * Exported so the composite verifier in worker.ts can reuse this logic.
  */
-async function defaultVerify(
+export async function defaultVerify(
   _result: string,
   command: string | undefined,
   cwd: string,
@@ -188,6 +199,8 @@ async function defaultCheckDidWork(cwd: string, baseline: string): Promise<WorkC
  * with Bob to fix issues until it passes or the max-continues cap is hit.
  */
 export function createPollLoop(deps: PollDeps): (initial: PollResult, baseline?: string) => Promise<PollResult> {
+  // The injected verify function (if provided) is the judge verifier.
+  // When not provided, we use defaultVerify which handles command execution.
   const verify = deps.verify ?? defaultVerify;
   const captureSnapshot = deps.captureSnapshot ?? defaultCaptureSnapshot;
   const checkDidWork = deps.checkDidWork ?? defaultCheckDidWork;
