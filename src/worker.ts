@@ -5,7 +5,8 @@ import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, MODE_PROFILES,
 import { createCommandGate } from "./command-gate.js";
 import { createFollowupGate } from "./followup-gate.js";
 import { handleStdinAnswer } from "./worker-answer.js";
-import { BobClient, resolvePipe, type DispatchResult, type ReviewIssue } from "./bob-ipc.js";
+import { BobClient, resolvePipe, type DispatchResult } from "./bob-ipc.js";
+import { formatReviewFindings, parseReviewFindings } from "./review-findings.js";
 import { createPollLoop, defaultVerify, type VerifyResult } from "./bob-polls.js";
 import { ExternalActivity } from "./defer.js";
 import { notify } from "./notify.js";
@@ -235,35 +236,6 @@ function emit(opts: Opts, type: string, data: Record<string, unknown> = {}): voi
 
 /** Global registry of active followup gates, keyed by task ID. */
 const activeFollowupGates = new Map<number, ReturnType<typeof createFollowupGate>>();
-
-/**
- * Format review findings as markdown for display in the task board.
- * Each issue gets a section with severity, file:line, title, description,
- * and an optional fenced fixed_diff.
- */
-function formatReviewFindings(issues: ReviewIssue[]): string {
-  const lines: string[] = ["## Review Findings", ""];
-  for (const issue of issues) {
-    lines.push(`### ${issue.severity.toUpperCase()}: ${issue.title}`);
-    const file = issue.file || issue.filePath;
-    if (file) {
-      const location = issue.line ? `${file}:${issue.line}` : file;
-      lines.push(`**Location:** ${location}`);
-    }
-    lines.push(`**Category:** ${issue.category}`);
-    lines.push("");
-    lines.push(issue.description);
-    if (issue.fixed_diff) {
-      lines.push("");
-      lines.push("**Suggested Fix:**");
-      lines.push("```diff");
-      lines.push(issue.fixed_diff);
-      lines.push("```");
-    }
-    lines.push("");
-  }
-  return lines.join("\n");
-}
 
 async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> {
   const { mode, source } = resolveMode(task);
@@ -502,11 +474,19 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   // Run the poll loop (no-op if feature is off).
   const res = await pollLoop(initialRes, baseline);
 
-  // Format and persist review findings if present (review mode)
-  if (res.reviewFindings && res.reviewFindings.length > 0) {
-    const markdown = formatReviewFindings(res.reviewFindings);
-    repo.addNote(task.id, markdown, "bob-review");
-    console.log(`  📋 captured ${res.reviewFindings.length} review finding${res.reviewFindings.length === 1 ? "" : "s"}`);
+  // Format and persist review findings (review mode). Prefer the structured
+  // submit_review_findings capture; but under headless IPC dispatch Bob is
+  // tool-restricted and never calls that tool — it returns the review as
+  // completion_result *text*. So when the structured capture is empty, parse
+  // the result markdown into findings so the board still gets a structured note.
+  // (The raw text is also stored verbatim as the task result below.)
+  let findings = res.reviewFindings ?? [];
+  if (findings.length === 0 && mode === "review" && res.result.trim()) {
+    findings = parseReviewFindings(res.result);
+  }
+  if (findings.length > 0) {
+    repo.addNote(task.id, formatReviewFindings(findings), "bob-review");
+    console.log(`  📋 captured ${findings.length} review finding${findings.length === 1 ? "" : "s"}`);
   }
 
   // Mark done only on a GENUINE completion: Bob fired taskCompleted, or it

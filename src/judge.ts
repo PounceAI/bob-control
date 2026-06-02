@@ -96,8 +96,9 @@ export function parseVerdict(text: string): JudgeVerdict {
   // false matches in negations ('will not pass', 'no failures', 'bypass').
   // Check for negations first: "not pass", "no fail", etc.
   // FAIL takes precedence over PASS.
-  const hasNegatedPass = /\b(?:not|no|won't|will\s+not)\s+pass\b/i.test(text);
-  const hasNegatedFail = /\b(?:not|no|won't|will\s+not)\s+fail\b/i.test(text);
+  const NEG = String.raw`(?:not|no|won't|will\s+not|does\s*n['’]?t|can\s*not|can['’]?t)`;
+  const hasNegatedPass = new RegExp(String.raw`\b${NEG}\s+pass\b`, "i").test(text);
+  const hasNegatedFail = new RegExp(String.raw`\b${NEG}\s+fail\b`, "i").test(text);
   
   const failMatch = /\bFAIL\b/i.test(text);
   const passMatch = /\bPASS\b/i.test(text);

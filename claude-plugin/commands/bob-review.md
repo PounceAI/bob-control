@@ -41,12 +41,12 @@ Do this:
 
 3. **Surface the result.** Report the new task id and that it routes to `{review}`. Then call
    `get_task` on it once or twice:
-   - When Bob's worker has drained it (status `done`), tell the user the **findings have been
-     generated in Bob's findings panel** (with suggested fixes), and include whatever the
-     task `result` carries. **Note:** review mode is designed to write findings to Bob's panel
-     and return only a brief pointer as the completion result — so the full findings live in
-     Bob's UI, not necessarily in the board `result`. Tell the user to open Bob's **findings
-     panel** to see the issues and apply `fixed_diff` suggestions.
+   - When Bob's worker has drained it (status `done`), the full review is in the task
+     **`result`** and the worker also persists a structured **`bob-review` note** (findings
+     parsed into severity / location / category, with any `fixed_diff`). Surface those
+     findings to the user. **Note:** under headless dispatch review mode returns the review as
+     completion text rather than writing to Bob's webview findings panel, so the board — not
+     the panel — is the source of truth here.
    - If it's still `pending`/`in_progress`, tell the user it's **queued as #id** — Bob reviews
      it when its worker pulls — and they can re-run this command or `/bob-board` to check status.
 

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ReviewIssue } from "./bob-ipc.js";
+import { formatReviewFindings } from "./review-findings.js";
 
 // Test the review findings capture and formatting logic.
 // These tests verify that submit_review_findings tool calls are properly
@@ -46,31 +47,6 @@ test("ReviewIssue accepts optional fixed_diff", () => {
   assert.ok(issue.fixed_diff);
   assert.ok(issue.fixed_diff.includes("const"));
 });
-
-// Mock formatReviewFindings function for testing
-function formatReviewFindings(issues: ReviewIssue[]): string {
-  const lines: string[] = ["## Review Findings", ""];
-  for (const issue of issues) {
-    lines.push(`### ${issue.severity.toUpperCase()}: ${issue.title}`);
-    const file = issue.file || issue.filePath;
-    if (file) {
-      const location = issue.line ? `${file}:${issue.line}` : file;
-      lines.push(`**Location:** ${location}`);
-    }
-    lines.push(`**Category:** ${issue.category}`);
-    lines.push("");
-    lines.push(issue.description);
-    if (issue.fixed_diff) {
-      lines.push("");
-      lines.push("**Suggested Fix:**");
-      lines.push("```diff");
-      lines.push(issue.fixed_diff);
-      lines.push("```");
-    }
-    lines.push("");
-  }
-  return lines.join("\n");
-}
 
 test("formatReviewFindings renders a single issue without fixed_diff", () => {
   const issues: ReviewIssue[] = [
