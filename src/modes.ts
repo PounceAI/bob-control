@@ -88,6 +88,23 @@ const STANDARD: ModeProfile = {
   },
 };
 
+// Read-only analysis profile shared by plan + review: reads and safe analysis
+// commands are auto-run, but writes are off (alwaysAllowWrite:false) so the mode
+// can't mutate code. Shared so the two never drift (the same reason `STANDARD`
+// is shared by code/orchestrator/refactor/devsecops).
+const READONLY_ANALYSIS: ModeProfile = {
+  risk: "safe",
+  commandPolicy: "allowlist",
+  autoApprove: {
+    autoApprovalEnabled: true,
+    alwaysAllowReadOnly: true,
+    alwaysAllowWrite: false,
+    alwaysAllowExecute: true, // safe analysis commands (SAFE_COMMANDS only)
+    alwaysAllowMcp: true,
+    alwaysAllowBrowser: false,
+  },
+};
+
 export const MODE_PROFILES: Record<string, ModeProfile> = {
   // Read-only: safe unattended; no writes/commands even if attempted.
   ask: {
@@ -104,31 +121,9 @@ export const MODE_PROFILES: Record<string, ModeProfile> = {
     },
   },
   // Plan mode: read-only analysis and planning, no code changes.
-  plan: {
-    risk: "safe",
-    commandPolicy: "allowlist",
-    autoApprove: {
-      autoApprovalEnabled: true,
-      alwaysAllowReadOnly: true,
-      alwaysAllowWrite: false,
-      alwaysAllowExecute: true, // Allow safe commands for analysis
-      alwaysAllowMcp: true,
-      alwaysAllowBrowser: false,
-    },
-  },
+  plan: READONLY_ANALYSIS,
   // Review mode: read-only code review, can use submit_review_findings tool.
-  review: {
-    risk: "safe",
-    commandPolicy: "allowlist",
-    autoApprove: {
-      autoApprovalEnabled: true,
-      alwaysAllowReadOnly: true,
-      alwaysAllowWrite: false,
-      alwaysAllowExecute: true, // Allow safe commands for analysis
-      alwaysAllowMcp: true,
-      alwaysAllowBrowser: false,
-    },
-  },
+  review: READONLY_ANALYSIS,
   code: STANDARD,
   orchestrator: STANDARD,
   // Refactor mode: code editing with standard risk profile.
@@ -157,6 +152,38 @@ export function profileFor(mode: string): ModeProfile {
 }
 
 /**
+ * True when the mode is read-only analysis (writes off): ask / plan / review.
+ * These never edit code, so a diff-based check (the LLM judge) is meaningless for
+ * them, and they should not arm the command classifier — a gray-zone command in a
+ * read-only mode is an attempt to mutate, which must not be auto-approved.
+ */
+export function isReadOnlyMode(mode: string): boolean {
+  return !profileFor(mode).autoApprove.alwaysAllowWrite;
+}
+
+// Modes whose completion_result text IS a structured review (severity-ranked
+// findings) the worker parses onto the board, and which produce no code diff (so
+// the LLM judge is skipped). Only `review` — Bob's native read-only code review,
+// whose fix is a separate task (per IBM's docs). `devsecops` is NOT here: per IBM's
+// shift-left model it's security embedded in coding — a write-capable fixer (STANDARD
+// profile) whose diff the judge SHOULD verify, like `code`/`refactor`.
+export const REVIEW_FINDING_MODES: ReadonlySet<string> = new Set(["review"]);
+
+/** True when the mode returns review findings as its result (see REVIEW_FINDING_MODES). */
+export function producesReviewFindings(mode: string): boolean {
+  return REVIEW_FINDING_MODES.has(mode);
+}
+
+/**
+ * True when a diff-based completion judge is meaningful for this mode: the mode is
+ * expected to write code. Read-only and review-producing modes return prose/findings
+ * with no diff, so judging them against an (empty) diff would wrongly fail them.
+ */
+export function judgeAppliesToMode(mode: string): boolean {
+  return !isReadOnlyMode(mode) && !producesReviewFindings(mode);
+}
+
+/**
  * True if a command policy has a gray zone (commands outside the allowlist that
  * could be approved by the classifier). Both 'allowlist' and 'classifier' have
  * gray zones; 'none' and 'auto' do not.
@@ -168,7 +195,9 @@ export function policyHasGrayZone(policy: CommandPolicy): boolean {
 /**
  * True if any mode with a gray zone (allowlist or classifier policy) is within
  * the risk gate. If none is, the classifier never fires (those tasks aren't
- * dispatched) — the worker warns on this.
+ * dispatched) — the worker warns on this. Read-only modes (plan/review) are
+ * included: the classifier handles their gray-zone commands hands-off (e.g. a
+ * security scanner), while their write tools stay disabled (alwaysAllowWrite:false).
  */
 export function classifierReachable(maxRisk: Risk): boolean {
   const max = RISK_RANK[maxRisk];

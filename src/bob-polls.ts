@@ -7,6 +7,7 @@
 // Mirrors the command-gate.ts pattern: injectable deps, unit-testable.
 
 import { spawn } from "node:child_process";
+import type { ReviewIssue } from "./bob-ipc.js";
 
 /** A dispatch result, narrowed to the fields the poll loop reads and passes through. */
 export interface PollResult {
@@ -14,16 +15,7 @@ export interface PollResult {
   result: string;
   lastText: string;
   status: "completed" | "aborted" | "timeout";
-  reviewFindings?: Array<{
-    title: string;
-    description: string;
-    file?: string;
-    filePath?: string;
-    line?: number;
-    severity: string;
-    category: string;
-    fixed_diff?: string;
-  }>;
+  reviewFindings?: ReviewIssue[];
 }
 
 export interface VerifyResult {
@@ -107,7 +99,7 @@ export async function defaultVerify(
  * (porcelain shows ?? for both snapshots, diff omits untracked content). This is acceptable
  * because untracked files are typically intermediate artifacts, not the primary deliverable.
  */
-async function defaultCaptureSnapshot(cwd: string): Promise<string> {
+export async function defaultCaptureSnapshot(cwd: string): Promise<string> {
   return new Promise<string>((resolve) => {
     // Run both commands in parallel for efficiency
     const statusProc = spawn("git", ["status", "--porcelain"], { cwd, stdio: "pipe" });
