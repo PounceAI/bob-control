@@ -1,7 +1,7 @@
-# Bob Foreman — Claude Code plugin
+# Bob Companion (Claude Code plugin)
 
 Use Claude Code, **from any repo**, as the foreman and worker for the
-[IBM Bob Task Connector](../README.md) board: describe work in plain language and Claude
+[Bob Control](../README.md) board: describe work in plain language and Claude
 provisions, routes, and triages tasks — or claims and *executes* them itself. Bob and
 Claude share one queue.
 
@@ -63,8 +63,8 @@ npm install && npm run build      # produces claude-plugin/server/server.mjs
 In Claude Code (from anywhere):
 
 ```
-/plugin marketplace add /absolute/path/to/ibm-bob-connector
-/plugin install bob-foreman@ibm-bob-connector
+/plugin marketplace add /absolute/path/to/bob-control
+/plugin install bob-companion@bob-control
 ```
 
 Reload when prompted, approve the `bob-tasks` server, and the commands are available in

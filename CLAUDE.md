@@ -1,6 +1,6 @@
 # Working in this repo with Claude Code
 
-The IBM Bob Task Connector is an MCP server + CLI + auto-dispatch worker over a SQLite
+Bob Control is an MCP server + CLI + auto-dispatch worker over a SQLite
 task board (`data/tasks.db`). Bob runs on native Windows and holds the board open in WAL.
 
 ## Two execution contexts

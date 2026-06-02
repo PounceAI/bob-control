@@ -4,11 +4,11 @@
     "bob-tasks": {
       "type": "stdio",
       "command": "node",
-      "args": ["/absolute/path/to/ibm-bob-connector/dist/server.js"],
+      "args": ["/absolute/path/to/bob-control/dist/server.js"],
       "env": {
         "BOB_TASKS_PORTABLE": "1"
       },
-      "cwd": "/absolute/path/to/ibm-bob-connector",
+      "cwd": "/absolute/path/to/bob-control",
       "timeout": 60,
       "disabled": false,
       "alwaysAllow": [
@@ -23,7 +23,7 @@
         "set_task_mode",
         "delete_task"
       ],
-      "watchPaths": ["/absolute/path/to/ibm-bob-connector/dist/server.js"]
+      "watchPaths": ["/absolute/path/to/bob-control/dist/server.js"]
     }
   }
 }

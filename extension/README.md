@@ -18,7 +18,7 @@ All settings are under the `bobTasks.*` namespace:
 
 ### Core Settings
 
-- **`bobTasks.projectRoot`** — Path to the IBM Bob Connector project (containing `dist/worker.js`). Empty = the first workspace folder.
+- **`bobTasks.projectRoot`** — Path to the Bob Control project (containing `dist/worker.js`). Empty = the first workspace folder.
 - **`bobTasks.nodePath`** — Node executable used to run the worker. Must be Node >= 22.5 (for `node:sqlite`). Set an absolute path if `node` on PATH is older.
 - **`bobTasks.dbPath`** — SQLite task DB (`BOB_TASKS_DB`). Empty = the project's `data/tasks.db`. Must match the MCP server's DB.
 - **`bobTasks.pipe`** — Bob IPC named pipe. Default: `\\\\.\\pipe\\pipe\\bob-ipc`.
@@ -113,7 +113,7 @@ When the extension is active, a status-bar item shows the worker state (click it
 
 ### Prerequisites
 
-1. **IBM Bob Connector built** — The parent project must be built at `../dist` (relative to this extension directory). Run `npm install && npm run build` in the project root.
+1. **Bob Control built** — The parent project must be built at `../dist` (relative to this extension directory). Run `npm install && npm run build` in the project root.
 2. **Bob launched with IPC** — Bob must be running with `ROO_CODE_IPC_SOCKET_PATH` set to the named pipe (e.g., `\\\\.\\pipe\\pipe\\bob-ipc` on Windows). Use the project's `launch-bob-ipc.cmd` script.
 3. **Node >= 22.5** — The worker requires Node 22.5 or later for `node:sqlite`. Verify with `node --version`. If your system Node is older, set `bobTasks.nodePath` to an absolute path to a newer Node binary.
 
