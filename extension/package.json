@@ -116,6 +116,11 @@
           "default": "",
           "description": "Command to run for acceptance checks when verifyAndContinue is on. Empty = use built-in heuristics (git working-tree check). Exit code 0 = pass, non-zero = fail."
         },
+        "bobTasks.verifyJudge": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use an LLM judge to verify task completion when no verifyCommand is set. The judge reviews Bob's work against the task criteria and actual code changes. Uses the same backend as the command classifier. When both verifyCommand and verifyJudge are on, the command runs first and the judge provides an additional gate."
+        },
         "bobTasks.maxContinues": {
           "type": "number",
           "default": 3,

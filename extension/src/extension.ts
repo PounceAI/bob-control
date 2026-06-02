@@ -92,16 +92,19 @@ function startWorker(): void {
   const tag = c.get<string>("tag");
   if (tag && tag.trim()) args.push("--tag", tag.trim());
   // Reversible toggles. The command classifier (approve/deny gray-zone commands,
-  // needs the Bob button patch) and the followup answerer (answer Bob's questions)
-  // are independent but share one Claude backend, so push the backend config when
-  // either is on. Off by default = manual approval / questions wait for you.
+  // needs the Bob button patch), the followup answerer (answer Bob's questions),
+  // and the LLM judge (verify task completion) are independent but share one Claude
+  // backend, so push the backend config when any is on. Off by default = manual
+  // approval / questions wait for you / no judge.
   const wantClassifier = c.get<boolean>("commandClassifier");
   const wantFollowups = c.get<boolean>("answerFollowups");
+  const verifyAndContinue = c.get<boolean>("verifyAndContinue");
+  const wantJudge = verifyAndContinue && c.get<boolean>("verifyJudge");
   if (wantClassifier) args.push("--command-classifier");
   if (wantFollowups) args.push("--answer-followups");
   if (c.get<boolean>("escalateAll")) args.push("--escalate-all");
   if (c.get<boolean>("reviewPlans")) args.push("--review-plans");
-  if (wantClassifier || wantFollowups) {
+  if (wantClassifier || wantFollowups || wantJudge) {
     args.push("--classifier-backend", c.get<string>("classifierBackend") ?? "cli");
     const model = c.get<string>("classifierModel");
     if (model && model.trim()) args.push("--classifier-model", model.trim());
@@ -109,10 +112,11 @@ function startWorker(): void {
     if (cliPath && cliPath.trim()) args.push("--classifier-cli", cliPath.trim());
   }
   // Verify-and-continue: loop back to Bob to fix issues until acceptance check passes
-  if (c.get<boolean>("verifyAndContinue")) {
+  if (verifyAndContinue) {
     args.push("--verify-and-continue");
     const verifyCmd = c.get<string>("verifyCommand");
     if (verifyCmd && verifyCmd.trim()) args.push("--verify-command", verifyCmd.trim());
+    if (c.get<boolean>("verifyJudge")) args.push("--verify-judge");
     args.push("--max-continues", String(c.get<number>("maxContinues") ?? 3));
   }
   // Detect plan-only completions (no code written) and auto-continue

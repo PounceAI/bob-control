@@ -21,6 +21,9 @@ connector is plain TypeScript on the built-in `node:sqlite`.
   - `/bob-next [tag]` — what Bob pulls next and the mode it routes to (read-only).
   - `/bob-route <id | text>` — predict the dispatch mode for a task or a hypothetical.
   - `/bob-triage [focus]` — review the board, propose fixes, apply the safe ones on confirm.
+  - `/bob-review [focus | git-range]` — queue a read-only (`ask`-mode) Bob code review of the
+    diff you just made (defaults to the uncommitted working-tree changes); Bob returns a
+    prioritized, correctness-first findings list when its worker drains the task.
 - **Worker command**
   - `/bob-work [tag] [--max N] [--one] [--dry-run]` — claim pending tasks Claude can do in
     the current repo, execute them, log progress, and submit results. Claims as `claude`

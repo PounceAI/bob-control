@@ -2,7 +2,7 @@ import type { Task } from "./types.js";
 
 // Bob's built-in modes. `mode` is stored as a free string so custom Roo
 // .roomodes slugs work too; setting configuration.mode on dispatch switches Bob.
-export const BUILT_IN_MODES = ["code", "advanced", "ask", "orchestrator"] as const;
+export const BUILT_IN_MODES = ["code", "advanced", "ask", "orchestrator", "plan", "review", "refactor", "devsecops"] as const;
 export type BuiltInMode = (typeof BUILT_IN_MODES)[number];
 
 export const DEFAULT_MODE: BuiltInMode = "code";
@@ -103,8 +103,38 @@ export const MODE_PROFILES: Record<string, ModeProfile> = {
       alwaysAllowBrowser: false,
     },
   },
+  // Plan mode: read-only analysis and planning, no code changes.
+  plan: {
+    risk: "safe",
+    commandPolicy: "allowlist",
+    autoApprove: {
+      autoApprovalEnabled: true,
+      alwaysAllowReadOnly: true,
+      alwaysAllowWrite: false,
+      alwaysAllowExecute: true, // Allow safe commands for analysis
+      alwaysAllowMcp: true,
+      alwaysAllowBrowser: false,
+    },
+  },
+  // Review mode: read-only code review, can use submit_review_findings tool.
+  review: {
+    risk: "safe",
+    commandPolicy: "allowlist",
+    autoApprove: {
+      autoApprovalEnabled: true,
+      alwaysAllowReadOnly: true,
+      alwaysAllowWrite: false,
+      alwaysAllowExecute: true, // Allow safe commands for analysis
+      alwaysAllowMcp: true,
+      alwaysAllowBrowser: false,
+    },
+  },
   code: STANDARD,
   orchestrator: STANDARD,
+  // Refactor mode: code editing with standard risk profile.
+  refactor: STANDARD,
+  // DevSecOps mode: code editing with security focus, standard risk profile.
+  devsecops: STANDARD,
   // Adds Browser plus command power; gated above the default worker threshold.
   // Gray-zone commands route to the Claude classifier rather than a human.
   advanced: {
