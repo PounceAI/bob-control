@@ -28,6 +28,12 @@ connector is plain TypeScript on the built-in `node:sqlite`.
     respects each task's mode (an `ask` task stays read-only); parks anything it can't finish
     as `blocked`.
 - **Subagent** `bob-foreman` — split a large request into several correctly-routed, ordered tasks.
+- **Status line** (`bin/statusline-bob.mjs`) — a live one-line board summary
+  (`⚡ Bob: N running (M queued) · #id title …`) shown next to the model and directory.
+  Run `/bob-statusline` once to install it (Claude Code doesn't let plugins set a status
+  line directly, so this command writes the snippet into your `~/.claude/settings.json`
+  for you, pointing at the shared portable board). `/bob-statusline --remove` undoes it.
+  The line stays quiet (model · dir only) whenever nothing is running or queued.
 
 The commands mirror the dispatcher's mode-routing rules (`src/modes.ts`), so the mode
 Claude predicts is the mode Bob gets.
@@ -48,7 +54,8 @@ In Claude Code (from anywhere):
 ```
 
 Reload when prompted, approve the `bob-tasks` server, and the commands are available in
-**every** repo you open.
+**every** repo you open. Optionally run `/bob-statusline` once to add the live board
+status line to your settings.
 
 ## Share the board with Bob
 
