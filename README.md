@@ -1,9 +1,30 @@
 # IBM Bob Task Connector
 
-An MCP server that provisions tasks for [IBM Bob](https://www.ibm.com/products/ai-coding-agent)
-(IBM's AI coding agent for IBM i) and other MCP-capable agents. It keeps a small
-SQLite task board: you queue work, Bob pulls it, logs progress, and writes back
-results. Bob is the MCP client; this is the server it connects to.
+**What it adds to your stack — and why you should care.** An AI coding agent on its own is a
+chat window: you drive it one prompt at a time and babysit every approval. This library turns
+it into an **unattended queue worker** — fill a board and each task gets dispatched, auto-approved
+inside risk guardrails, answered when the agent asks a question, verified (a command check or an
+LLM judge), retried on transient failures, and written back — in dependency order, with no one
+watching. You trade *babysitting one task* for *draining a backlog*, while gating and an acceptance
+judge keep it honest — and IBM Bob and Claude Code can share one board so each does the work it's
+best at. If your stack already has an agent, this is the missing piece that makes it run on its own.
+
+Concretely: an MCP **server** + **CLI** + auto-dispatch **worker** over a SQLite task board.
+The worker pulls each task in dependency and priority order and dispatches it to
+[IBM Bob](https://www.ibm.com/products/ai-coding-agent) (IBM's AI coding agent for IBM i)
+**live over IPC**, streaming back its events. Bob is the MCP client; this is the server it
+connects to — and Claude Code speaks the same MCP, so it can work the **same board** as
+foreman (provision / route / triage) or worker.
+
+### Where it fits
+
+This is the **runtime execution + orchestration** layer: it actually drives a live agent,
+keeps it unattended, and verifies the output. That's a different job from **planning /
+governance** CLIs (e.g. [MissionForge](https://github.com/loudiman/Mission-Forge)), which
+deterministically *decompose and scope* work but don't run an agent. The two compose — plan
+upstream, then queue the pieces here with `depends_on` ordering and let the worker drain them.
+What this layer owns that a planning CLI doesn't: live IPC control (dispatch / approve /
+answer / cancel), LLM-judged acceptance, a multi-agent shared board, and command/risk gating.
 
 ## Setup
 
@@ -90,6 +111,7 @@ flag the board stays repo-local at `data/tasks.db`.)
 | `add_task_note` | Append a progress note |
 | `submit_result` | Attach a result and mark done |
 | `set_task_mode` | Set or clear a task's mode slug |
+| `set_task_dependencies` | Set/clear the task IDs this one waits on (all must be `done`); rejects cycles |
 | `delete_task` | Permanently delete a task and its notes |
 | `board_report` | Markdown standup/audit of the board, grouped by status |
 
@@ -105,9 +127,13 @@ node dist/cli.js create "Modernize INVRPT report" --priority high --tags rpg
 node dist/cli.js list --status pending --tag rpg
 node dist/cli.js show 1
 node dist/cli.js claim 1 --assignee bob
+node dist/cli.js status 1 blocked                     # set status
+node dist/cli.js mode 1 refactor                      # set/clear the mode slug
+node dist/cli.js deps 3 1,2                            # task 3 waits on 1 and 2 (empty clears)
 node dist/cli.js note 1 "Waiting on test data"
 node dist/cli.js result 1 "Done; 3 procedures extracted"
 node dist/cli.js next                                 # next pending task + its routed mode
+node dist/cli.js delete 1
 node dist/cli.js stats
 node dist/cli.js report                               # markdown standup/audit of the board
 node dist/cli.js report --status blocked --out report.md
@@ -154,9 +180,10 @@ then `code`.
 
 ## Worker
 
-The worker drains the board one task at a time: pull the next pending task,
-route it, dispatch to Bob in the sidebar, wait for the result, write it back,
-mark it done.
+The worker drains the board one task at a time: pull the next eligible task
+(highest priority whose dependencies are all `done`), route it, dispatch to Bob
+in the sidebar, wait for the result, write it back, mark it done (verification and
+retry below are opt-in).
 
 ```powershell
 npm run worker              # drain, then idle-poll
@@ -165,31 +192,52 @@ node dist/worker.js --tag rpg
 node dist/worker.js --dry-run
 ```
 
-Flags: `--pipe` `--poll` `--timeout` `--assignee` `--new-tab`
-`--max-risk <safe|standard|elevated>` `--no-notify` `--no-defer` `--answer-followups`
-`--escalate-all` `--review-plans` `--allow-commands <prefix,prefix>`. Needs Bob running
-with IPC enabled (see below).
-Aborted or timed-out tasks are parked as `blocked`.
+Flags: `--once` `--tag <t>` `--dry-run` `--pipe` `--poll` `--timeout` `--assignee`
+`--new-tab` `--max-risk <safe|standard|elevated>` `--retry <N>` `--detect-plan-stop`
+`--no-notify` `--no-defer` `--answer-followups` `--escalate-all` `--review-plans`
+`--allow-commands <prefix,prefix>` (plus the verify-and-continue flags below). Needs Bob
+running with IPC enabled (see below).
+Aborted or timed-out tasks are parked as `blocked`; with `--retry <N>` the worker first
+re-dispatches a transient failure (timeout/abort) up to N times before parking it.
+`--detect-plan-stop` catches a "completion" that wrote no code (Bob just presented a plan)
+and continues it instead of marking it done.
 
 Each mode has a risk level, and the worker only dispatches tasks at or below
 `--max-risk` (default `standard`); higher-risk ones stay pending for manual
 dispatch. On finish the worker pops a tray toast (`--no-notify` to silence; the
 system sound and terminal bell are off by default).
 
+### Task dependencies
+
+A task can declare `depends_on` — other task IDs that must all be `done` before it
+becomes eligible. The worker's pull queue **skips a task while any dependency is unmet**
+(surfaced as *blocked on dependencies*), so you can queue an ordered pipeline and let one
+drain run it end to end. Dependencies are validated when set: a missing ID is rejected, and
+an edge that would form a **cycle** is refused (DFS check in [src/db.ts](src/db.ts)).
+
+```powershell
+node dist/cli.js create "Write tests for INVRPT"        # -> #5
+node dist/cli.js create "Refactor INVRPT" --depends-on 5  # won't dispatch until #5 is done
+node dist/cli.js deps 6 5                                # set/clear deps on an existing task (empty clears)
+```
+
+Over MCP, pass `create_task {depends_on:[…]}` or call the `set_task_dependencies` tool.
+
 ### Unattended execution
 
 Each dispatch sends the mode's auto-approve profile — the `autoApprovalEnabled`
 master switch, per-category toggles, and a curated `SAFE_COMMANDS` allowlist — so
-Bob runs without stalling on approval prompts. `ask` stays read-only;
-`code`/`orchestrator` add writes and auto-run allowlisted commands (build/test/vcs);
-anything else still prompts. This per-dispatch profile is enough for the worker on
+Bob runs without stalling on approval prompts. Read-only modes (`ask`/`plan`/`review`)
+take no writes; the write-capable modes (`code`/`refactor`/`devsecops`/`orchestrator`/
+`advanced`) add writes; all of them auto-run allowlisted commands (build/test/vcs) and
+prompt for anything else. This per-dispatch profile is enough for the worker on
 its own; to apply the same auto-approve to your *interactive* Bob session, fully quit
 Bob and launch via [launch-bob-ipc.cmd](launch-bob-ipc.cmd) (it runs
 [set-bob-autoapprove.mjs](set-bob-autoapprove.mjs), which writes the same allowlist to
 Bob's global state).
 
-For the gray zone (a command not on the allowlist), `code`, `orchestrator`, and
-`advanced` modes can hand the decision to Claude instead of a human:
+For the gray zone (a command not on the allowlist), any mode that runs commands can
+hand the decision to Claude instead of a human:
 
 ```powershell
 node dist/worker.js --command-classifier                             # cli backend: reuses your Claude login, no key
@@ -198,8 +246,9 @@ node dist/worker.js --command-classifier --classifier-backend api    # one Anthr
 
 The classifier presses approve/reject over IPC, which needs a one-time patch that
 exposes Bob's buttons — `node tools/patch-bob-buttons.mjs`, then restart Bob. It
-engages for any mode with gray-zone commands (`code`, `orchestrator`, `advanced`),
-so it works at the default `--max-risk standard`. Fail-safe: only an explicit
+engages for any mode with a gray zone — every mode except `ask` (which runs no
+commands), including the read-only `plan`/`review` modes — so it works at the default
+`--max-risk standard`. Fail-safe: only an explicit
 "approve" runs a command; any error or timeout leaves it for a human. Extra flags:
 `--classifier-backend <cli|api>` `--classifier-model` `--classifier-cli`.
 
@@ -301,7 +350,8 @@ unattended runs — see above).
 
 `id`, `title`, `description`, `status` (pending/in_progress/blocked/done/cancelled),
 `priority` (low/medium/high/urgent), `tags[]`, `mode` (or null to auto-route),
-`assignee`, `result`, timestamps, and a per-task notes table.
+`depends_on[]` (task IDs that must be `done` first), `assignee`, `result`, timestamps,
+and a per-task notes table.
 
 ## Layout
 
