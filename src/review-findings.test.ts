@@ -137,4 +137,33 @@ test("format -> parse round-trips the structured fields", () => {
   assert.equal(round[0].fixed_diff, original[0].fixed_diff);
 });
 
+test("formatReviewFindings preserves line 0 (round-trips, not dropped as falsy)", () => {
+  const md = formatReviewFindings([
+    { title: "X", description: "d", file: "a.ts", line: 0, severity: "low", category: "general" },
+  ]);
+  assert.ok(md.includes("**Location:** a.ts:0"), "line 0 should appear in the location");
+  const round = parseReviewFindings(md);
+  assert.equal(round[0].file, "a.ts");
+  assert.equal(round[0].line, 0);
+});
+
+test("parseReviewFindings ignores a '### ' heading inside a fenced diff (no spurious finding, fix intact)", () => {
+  const md = [
+    "### HIGH: Refactor the header",
+    "**Location:** src/h.ts:3",
+    "**Category:** style",
+    "Tidy this up.",
+    "",
+    "**Suggested Fix:**",
+    "```diff",
+    "-### old heading",
+    "+### new heading",
+    "```",
+  ].join("\n");
+  const issues = parseReviewFindings(md);
+  assert.equal(issues.length, 1, "the ### inside the diff must not split into a second finding");
+  assert.equal(issues[0].title, "Refactor the header");
+  assert.ok(issues[0].fixed_diff?.includes("+### new heading"), "the diff fix must survive intact");
+});
+
 // Made with Bob

@@ -200,7 +200,10 @@ export class BobClient {
             try {
               const parsed = JSON.parse(text);
               if (parsed.tool === "submit_review_findings" && Array.isArray(parsed.issues)) {
-                this.active.reviewFindings = parsed.issues;
+                // Append, don't overwrite: Bob may emit findings across multiple
+                // submit_review_findings calls (e.g. high-severity then low) — last-wins
+                // assignment would silently drop the earlier batches.
+                this.active.reviewFindings = [...(this.active.reviewFindings ?? []), ...parsed.issues];
               }
             } catch {
               // Ignore parse errors; text may be incomplete or not JSON
