@@ -61,9 +61,10 @@ npm install && npm run build      # build also bundles claude-plugin/server/serv
 | `/bob-next [tag]` | What Bob pulls next and the mode it routes to (read-only; never claims) |
 | `/bob-route <id\|text>` | Predict the dispatch mode for a task or a hypothetical |
 | `/bob-triage [focus]` | Review the board, propose fixes, apply the safe ones on confirm |
-| `/bob-review [range]` | Queue a read-only (ask-mode) Bob code review of the diff you just made |
+| `/bob-review [range]` | Queue a read-only Bob (`review`-mode) code review of the diff you just made; findings land on the board |
 | `/bob-work [tag] [--max N]` | **Worker:** claim pending tasks Claude can do, execute them, submit results |
 | `bob-foreman` subagent | Split a large request into several correctly-routed, ordered tasks |
+| **Skills** (model-invoked) | Ask for IBM Bob by name to dispatch its specialty modes: **bob-review** (`review`), **bob-plan** (`plan`), **bob-refactor** (`refactor`), **bob-security** (`devsecops`) |
 
 ### Shared board
 
