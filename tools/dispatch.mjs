@@ -61,7 +61,10 @@ console.log(`\n— dispatching #${id} to Bob (tag ${tag}) —`);
 const workerArgs = [
   worker, "--once", "--tag", tag,
   "--max-risk", opt("--max-risk") ?? "standard",
-  "--no-defer", "--new-tab",
+  // Sidebar surface (no --new-tab): the quiet, focus-preserving path, and the one
+  // the command classifier presses reliably (see tools/patch-bob-buttons.mjs).
+  // --new-tab steals focus and is the less-tested approval surface.
+  "--no-defer",
   "--timeout", opt("--timeout") ?? "300000",
 ];
 process.stdout.write(run(workerArgs, "worker"));

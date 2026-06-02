@@ -277,6 +277,12 @@ export class BobClient {
    * Answer a pending approval (e.g. a command ask): primary = approve/run,
    * secondary = reject. Requires the Bob IPC button patch (tools/patch-bob-buttons.mjs)
    * — without it Bob's IPC switch ignores these commandNames.
+   *
+   * We send our Bob task id as the command `data`: the patch presses ONLY the webview
+   * instance whose `getCurrentTask().taskId` matches it (else the sole running instance),
+   * so the press lands on the instance actually showing the prompt and never on an idle
+   * one (an idle-sidebar press aborts a --new-tab task). If no instance owns the task,
+   * the patch no-ops rather than guessing.
    */
   approve(): void {
     if (!this.active) return; // no dispatch in flight — don't press a stray button
@@ -284,7 +290,7 @@ export class BobClient {
       type: "TaskCommand",
       origin: "client",
       clientId: this.clientId,
-      data: { commandName: "PressPrimaryButton", data: null },
+      data: { commandName: "PressPrimaryButton", data: this.active.ourTaskId },
     });
   }
 
@@ -294,7 +300,7 @@ export class BobClient {
       type: "TaskCommand",
       origin: "client",
       clientId: this.clientId,
-      data: { commandName: "PressSecondaryButton", data: null },
+      data: { commandName: "PressSecondaryButton", data: this.active.ourTaskId },
     });
   }
 
