@@ -252,4 +252,26 @@ test("captureGitDiff: skips untracked files listed in priorUntracked", async () 
   assert.equal(diff, "(no changes detected)");
 });
 
+test("parseVerdict: reason containing a brace is extracted whole (balanced scan)", () => {
+  // A `\{[^{}]*\}` regex would stop at the inner '{' and miss this object, falling
+  // through to the token scan. The balanced scanner extracts it intact.
+  const verdict = parseVerdict('{"pass":true,"reason":"matches spec {see note}"}');
+  assert.equal(verdict.pass, true);
+  assert.equal(verdict.reason, "matches spec {see note}");
+});
+
+test("parseVerdict: nested JSON object is parsed, not truncated", () => {
+  const verdict = parseVerdict('{"pass":false,"reason":"incomplete","meta":{"missing":["tests"]}}');
+  assert.equal(verdict.pass, false);
+  assert.equal(verdict.reason, "incomplete");
+});
+
+test("parseVerdict: a PASS verdict whose reason mentions 'fail' is NOT inverted", () => {
+  // Previously the brace-naive regex could miss the object and the token fallback
+  // would see 'fail' and return FAIL. Balanced extraction keeps the JSON verdict.
+  const verdict = parseVerdict('{"pass":true,"reason":"no path can fail here"}');
+  assert.equal(verdict.pass, true);
+  assert.equal(verdict.reason, "no path can fail here");
+});
+
 // Made with Bob

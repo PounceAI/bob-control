@@ -133,7 +133,7 @@ Eight built-in modes:
 | `review` | safe | Read-only code review — returns structured findings (see below). |
 | `code` | standard | Normal edit + build + run. The default. |
 | `refactor` | standard | Behavior-preserving restructuring/cleanup. |
-| `devsecops` | standard | Security-focused review/scan. |
+| `devsecops` | standard | Security-focused remediation — finds **and fixes** vulnerabilities (write-capable; the LLM judge verifies the fix). |
 | `orchestrator` | standard | Coordinate a multi-step epic with sub-tasks. |
 | `advanced` | elevated | `code` plus MCP + browser power. |
 

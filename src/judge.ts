@@ -60,17 +60,52 @@ function userContent(ctx: JudgeContext): string {
 }
 
 /**
+ * Scan `text` for balanced top-level `{...}` substrings, returning each as a string.
+ * String-aware (braces inside JSON string literals are ignored) and nesting-aware,
+ * so a verdict whose reason contains a brace — e.g. {"pass":true,"reason":"see {x}"}
+ * — or a nested object is still extracted whole, unlike a `\{[^{}]*\}` regex which
+ * stops at the first inner brace. Pure; never throws.
+ */
+function extractJsonObjects(text: string): string[] {
+  const objs: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === "}" && depth > 0) {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        objs.push(text.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  return objs;
+}
+
+/**
  * Parse the model's reply into a JudgeVerdict. Pure and total: never throws,
  * defaults to a safe FAIL when the output isn't a clear decision.
  * Accepts both JSON {"pass":boolean,"reason":"..."} and bare PASS/FAIL tokens.
  */
 export function parseVerdict(text: string): JudgeVerdict {
-  // Try JSON first (preferred format). Extract all potential JSON objects and try
+  // Try JSON first (preferred format). Extract all balanced {...} objects and try
   // to parse each one, taking the first valid one with a pass field.
-  const jsonMatches = text.matchAll(/\{[^{}]*\}/g);
-  for (const match of jsonMatches) {
+  for (const candidate of extractJsonObjects(text)) {
     try {
-      const obj = JSON.parse(match[0]);
+      const obj = JSON.parse(candidate);
       // Accept boolean pass, or coerce string 'true'/'false' and numeric 0/1
       let pass: boolean | undefined;
       if (typeof obj?.pass === "boolean") {

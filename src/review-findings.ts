@@ -30,7 +30,9 @@ export function formatReviewFindings(issues: ReviewIssue[]): string {
     lines.push(`### ${severity.toUpperCase()}: ${issue.title || "(untitled)"}`);
     const file = issue.file || issue.filePath;
     if (file) {
-      const location = issue.line ? `${file}:${issue.line}` : file;
+      // Number.isFinite (not a truthy check): a line of 0 is a valid line number and
+      // must survive a format/parse round-trip — `issue.line ? …` would drop it.
+      const location = Number.isFinite(issue.line) ? `${file}:${issue.line}` : file;
       lines.push(`**Location:** ${location}`);
     }
     lines.push(`**Category:** ${issue.category || "general"}`);
@@ -59,6 +61,30 @@ function field(body: string, label: string): string | undefined {
 }
 
 /**
+ * Split review text into section bodies on `### ` headings, IGNORING headings that
+ * fall inside a fenced code block (``` or ~~~). A plain `text.split(/^###\s+/m)` is
+ * fence-unaware, so a `### ` line inside a finding's ```diff fix (or quoted prose)
+ * would spuriously start a new finding AND truncate that fix. Each returned string is
+ * "<heading text>\n<body…>" — the `### ` prefix stripped — matching the old shape.
+ */
+function splitH3Sections(text: string): string[] {
+  const sections: string[] = [];
+  let current: string[] | null = null;
+  let inFence = false;
+  for (const line of text.split("\n")) {
+    if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
+    if (!inFence && /^###\s+/.test(line)) {
+      if (current) sections.push(current.join("\n"));
+      current = [line.replace(/^###\s+/, "")];
+    } else if (current) {
+      current.push(line);
+    }
+  }
+  if (current) sections.push(current.join("\n"));
+  return sections;
+}
+
+/**
  * Parse a markdown review (Bob's completion_result text) back into structured
  * issues — the inverse of formatReviewFindings, tolerant of the looser shape a
  * model emits. Splits on `### ` headings; for each, recovers severity/title from
@@ -69,8 +95,9 @@ function field(body: string, label: string): string | undefined {
 export function parseReviewFindings(markdown: string): ReviewIssue[] {
   if (typeof markdown !== "string" || !markdown.trim()) return [];
   const text = markdown.replace(/\r\n/g, "\n");
-  // Each section runs from a `### ` heading to the next one (or end of text).
-  const sections = text.split(/^###\s+/m).slice(1);
+  // Each section runs from a `### ` heading to the next one (or end of text),
+  // skipping headings inside fenced code blocks.
+  const sections = splitH3Sections(text);
   const issues: ReviewIssue[] = [];
 
   for (const section of sections) {

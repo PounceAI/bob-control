@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import "./suppress-warnings.js";
 import * as repo from "./db.js";
-import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, MODE_PROFILES, classifierReachable, policyHasGrayZone, type Risk } from "./modes.js";
+import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, MODE_PROFILES, classifierReachable, policyHasGrayZone, producesReviewFindings, judgeAppliesToMode, type Risk } from "./modes.js";
 import { createCommandGate } from "./command-gate.js";
 import { createFollowupGate } from "./followup-gate.js";
 import { handleStdinAnswer } from "./worker-answer.js";
 import { BobClient, resolvePipe, type DispatchResult } from "./bob-ipc.js";
 import { formatReviewFindings, parseReviewFindings } from "./review-findings.js";
-import { createPollLoop, defaultVerify, type VerifyResult } from "./bob-polls.js";
+import { createPollLoop, defaultVerify, defaultCaptureSnapshot, type VerifyResult } from "./bob-polls.js";
 import { ExternalActivity } from "./defer.js";
 import { notify } from "./notify.js";
 import { shouldRetry, executeRetry } from "./retry-policy.js";
@@ -350,10 +350,20 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   // - If verifyCommand is set, it runs FIRST and must pass, then judge provides additional gate
   // - If NO command is set, judge is the sole acceptance signal
   // When --verify-judge is off, the default verifier handles command execution (or blind-pass).
+  //
+  // The judge is diff-based, so it only applies to modes that write code. Read-only
+  // and review-producing modes (ask/plan/review/devsecops) return prose/findings with
+  // no diff; judging them against an empty diff would wrongly FAIL them and loop until
+  // --max-continues, parking a completed task as blocked. For those modes we fall back
+  // to the default verifier (runs --verify-command if set, else blind-passes).
+  const judgeOn = opts.verifyJudge && judgeAppliesToMode(mode);
+  if (opts.verifyJudge && !judgeOn) {
+    console.log(`  [judge] skipped for {${mode}} (no code diff expected in this mode)`);
+  }
   // Pre-task working-tree snapshot so the judge diffs only THIS task's changes
   // (set just before the initial dispatch below; closed over by the verifier).
   let judgeBaseline: GitBaseline | undefined;
-  const compositeVerifier = opts.verifyJudge
+  const compositeVerifier = judgeOn
     ? async (result: string, command: string | undefined, cwd: string): Promise<VerifyResult> => {
         // Run command verifier first if a command is set (reuse defaultVerify logic)
         if (command) {
@@ -388,13 +398,14 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
           return { passed: true, reason: verdict.reason };
         }
 
-        if (command && verdict.pass) {
-          return { passed: true, reason: "command and judge both passed" };
-        } else if (command && !verdict.pass) {
-          return { passed: false, reason: `command passed but judge failed: ${verdict.reason}` };
-        } else {
-          return { passed: verdict.pass, reason: verdict.reason };
+        // With a command, it already passed (short-circuited above on failure), so the
+        // verdict is the deciding signal; without one the judge is the sole gate.
+        if (command) {
+          return verdict.pass
+            ? { passed: true, reason: "command and judge both passed" }
+            : { passed: false, reason: `command passed but judge failed: ${verdict.reason}` };
         }
+        return { passed: verdict.pass, reason: verdict.reason };
       }
     : undefined;
 
@@ -416,57 +427,17 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
 
   // Capture baseline snapshot BEFORE initial dispatch for plan-stop detection.
   // This allows detecting changes even when the tree is already dirty from prior tasks.
-  let baseline: string | undefined;
-  if (opts.detectPlanStop) {
-    const { spawn } = await import("node:child_process");
-    baseline = await new Promise<string>((resolve) => {
-      const statusProc = spawn("git", ["status", "--porcelain"], { cwd: process.cwd(), stdio: "pipe" });
-      const diffProc = spawn("git", ["diff", "HEAD"], { cwd: process.cwd(), stdio: "pipe" });
-      let statusOut = "";
-      let diffOut = "";
-      let completed = 0;
-      let failed = false;
-      const checkComplete = () => {
-        if (++completed === 2 && !failed) {
-          resolve(`STATUS:\n${statusOut}\nDIFF:\n${diffOut}`);
-        }
-      };
-      statusProc.stdout?.on("data", (chunk: Buffer) => (statusOut += chunk.toString()));
-      statusProc.on("close", (code: number | null) => {
-        if (code !== 0 && !failed) {
-          failed = true;
-          resolve("GIT_ERROR");
-        } else {
-          checkComplete();
-        }
-      });
-      statusProc.on("error", () => {
-        if (!failed) {
-          failed = true;
-          resolve("GIT_ERROR");
-        }
-      });
-      diffProc.stdout?.on("data", (chunk: Buffer) => (diffOut += chunk.toString()));
-      diffProc.on("close", (code: number | null) => {
-        if (code !== 0 && !failed) {
-          failed = true;
-          resolve("GIT_ERROR");
-        } else {
-          checkComplete();
-        }
-      });
-      diffProc.on("error", () => {
-        if (!failed) {
-          failed = true;
-          resolve("GIT_ERROR");
-        }
-      });
-    });
-  }
+  // Reuses the poll loop's own snapshot fn so the baseline string-matches the snapshot
+  // taken after a continue (the comparison in checkDidWork is exact-string).
+  const baseline: string | undefined = opts.detectPlanStop
+    ? await defaultCaptureSnapshot(process.cwd())
+    : undefined;
 
   // Snapshot the pre-task tree so the judge sees only THIS task's changes (not
   // pre-existing dirt). Captured before dispatch; read by the verifier after.
-  if (opts.verifyJudge) judgeBaseline = await captureGitBaseline(process.cwd());
+  // Only when the judge will actually run (judgeOn), so no-diff modes don't pay
+  // for an unused `git stash create`.
+  if (judgeOn) judgeBaseline = await captureGitBaseline(process.cwd());
 
   // Initial dispatch.
   const initialRes = await doDispatch(buildPrompt(task));
@@ -474,14 +445,14 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   // Run the poll loop (no-op if feature is off).
   const res = await pollLoop(initialRes, baseline);
 
-  // Format and persist review findings (review mode). Prefer the structured
-  // submit_review_findings capture; but under headless IPC dispatch Bob is
-  // tool-restricted and never calls that tool — it returns the review as
-  // completion_result *text*. So when the structured capture is empty, parse
-  // the result markdown into findings so the board still gets a structured note.
+  // Format and persist review findings (review-producing modes: review + devsecops).
+  // Prefer the structured submit_review_findings capture; but under headless IPC
+  // dispatch Bob is tool-restricted and never calls that tool — it returns the review
+  // as completion_result *text*. So when the structured capture is empty, parse the
+  // result markdown into findings so the board still gets a structured note.
   // (The raw text is also stored verbatim as the task result below.)
   let findings = res.reviewFindings ?? [];
-  if (findings.length === 0 && mode === "review" && res.result.trim()) {
+  if (findings.length === 0 && producesReviewFindings(mode) && res.result.trim()) {
     findings = parseReviewFindings(res.result);
   }
   if (findings.length > 0) {

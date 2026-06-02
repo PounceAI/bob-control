@@ -9,9 +9,11 @@ description: >-
 allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks
 ---
 
-You are the **foreman**. The user wants **IBM Bob** to perform a security / DevSecOps review.
-Bob runs this in its `devsecops` mode (security focus, standard risk — it can read code and run
-safe analysis commands).
+You are the **foreman**. The user wants **IBM Bob** to do security / DevSecOps work. Bob runs
+this in its `devsecops` mode — security embedded in coding (IBM's shift-left model): it reads
+code, runs analysis/scan commands, **and edits code to remediate** the vulnerabilities it finds
+(standard risk, write-capable). The auto-dispatch worker's LLM judge verifies the fix diff, so
+phrase the task as "find **and fix**", not just "report".
 
 Do this:
 
@@ -30,9 +32,11 @@ Do this:
    - **priority**: `high` for anything the user frames as a vuln/incident, else `medium`.
    - **description**: what to inspect (injection, authz, secrets/credentials, unsafe
      deserialization, path traversal, dependency risk, etc.), the scope (paths or the embedded
-     ```diff block), and ask for findings ranked by severity with concrete remediations.
+     ```diff block), and ask Bob to **fix the vulnerabilities it finds**, highest-severity first,
+     and summarize what it changed (note anything it flagged but deliberately left unfixed).
 
 4. **Surface the result.** Report the new task id and that it routes to `{devsecops}`. Then
    `get_task`:
-   - When `done`, present Bob's findings from the task **`result`**, highest-severity first.
+   - When `done`, present what Bob **fixed** from the task **`result`** (highest-severity first),
+     plus any residual risks it flagged. The diff is on the working tree for the user to review.
    - If still `pending`/`in_progress`, say it's **queued as #id** (check `/bob-board`).

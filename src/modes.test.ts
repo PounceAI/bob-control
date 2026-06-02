@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, classifierReachable, policyHasGrayZone } from "./modes.js";
+import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, classifierReachable, policyHasGrayZone, isReadOnlyMode, producesReviewFindings, judgeAppliesToMode } from "./modes.js";
 
 // The dispatcher's routing is the source of truth for "what mode Bob runs a task
 // in". These tests pin that behavior; the plugin command docs must match it
@@ -164,12 +164,32 @@ test("policyHasGrayZone: identifies policies with gray-zone commands", () => {
 });
 
 test("classifierReachable: the classifier engages when any gray-zone mode is within the risk gate", () => {
-  // plan/review (risk:safe, policy:allowlist), code/orchestrator/refactor/devsecops
-  // (risk:standard, policy:allowlist), and advanced (risk:elevated, policy:classifier)
-  // all have gray zones. The classifier is reachable at all risk levels now.
-  assert.equal(classifierReachable("safe"), true, "safe: plan/review modes reachable");
+  // plan/review (risk:safe, policy:allowlist) arm the classifier hands-off for their
+  // gray-zone commands; code/orchestrator/refactor/devsecops (risk:standard) and
+  // advanced (risk:elevated, policy:classifier) too. Reachable at every risk level.
+  assert.equal(classifierReachable("safe"), true, "safe: plan/review are gray-zone reachable");
   assert.equal(classifierReachable("standard"), true, "standard: code/orchestrator/refactor/devsecops reachable");
   assert.equal(classifierReachable("elevated"), true, "elevated: all gray-zone modes reachable");
+});
+
+test("isReadOnlyMode / producesReviewFindings / judgeAppliesToMode classify modes correctly", () => {
+  // Read-only = writes off: ask, plan, review.
+  for (const m of ["ask", "plan", "review"]) assert.equal(isReadOnlyMode(m), true, `${m} is read-only`);
+  for (const m of ["code", "orchestrator", "refactor", "devsecops", "advanced"]) {
+    assert.equal(isReadOnlyMode(m), false, `${m} can write`);
+  }
+  // Review-producing = returns findings with no code diff: only `review`. `devsecops`
+  // is a write-capable fixer (per IBM's shift-left model), so it is NOT review-producing.
+  assert.equal(producesReviewFindings("review"), true);
+  assert.equal(producesReviewFindings("devsecops"), false);
+  assert.equal(producesReviewFindings("code"), false);
+  // The diff-based judge applies to write-capable, non-review modes — including devsecops.
+  for (const m of ["code", "orchestrator", "refactor", "devsecops"]) {
+    assert.equal(judgeAppliesToMode(m), true, `${m} judged`);
+  }
+  for (const m of ["ask", "plan", "review"]) {
+    assert.equal(judgeAppliesToMode(m), false, `${m} not judged (no diff expected)`);
+  }
 });
 
 test("bare SAFE_COMMANDS entries auto-run their forms, and no destructive command shares a bare prefix", () => {
