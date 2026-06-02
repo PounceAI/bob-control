@@ -73,7 +73,8 @@ const SCHEMA_ANCHOR =
   `text:ye.string().optional(),images:ye.array(ye.string()).optional()})})])`;
 const SCHEMA_MEMBERS =
   `,ye.object({commandName:ye.literal("PressPrimaryButton"),data:ye.any().optional()})` +
-  `,ye.object({commandName:ye.literal("PressSecondaryButton"),data:ye.any().optional()})`;
+  `,ye.object({commandName:ye.literal("PressSecondaryButton"),data:ye.any().optional()})` +
+  `,ye.object({commandName:ye.literal("GetReviewFindings"),data:ye.any().optional()})`;
 const SCHEMA_INJECT = SCHEMA_ANCHOR.replace(/\]\)$/, SCHEMA_MEMBERS + "])");
 // Unique to the schema edit; "PressPrimaryButton" also appears in the switch, so we
 // match the zod-literal form specifically.
@@ -95,10 +96,26 @@ const press = (invoke, answer) =>
   `_task=_i?_ct(_i):null;` +
   `if(_task&&_task.handleWebviewAskResponse)await _task.handleWebviewAskResponse("${answer}");` +
   `else if(_i)await _i.postMessageToWebview({type:"invoke",invoke:"${invoke}"})}catch{}break}`;
+// GetReviewFindings: serialize the findings store and broadcast it back over IPC as a
+// normal TaskEvent (eventName:"reviewFindings") — reusing this.ipc.broadcast, the proven
+// path. The findings manager is reached defensively (controller field, else the registry
+// singleton `ii.Instance.findings`); `reachedVia` reports which resolved so the first run
+// is self-diagnosing. Read-only: serialize/getAll only, no mutation. Never throws.
+const getFindings =
+  `{try{` +
+  `const _fm=(this.findingsManager&&this.findingsManager.serializeFindings)?this.findingsManager` +
+  `:((typeof ii!=="undefined"&&ii&&ii.Instance&&ii.Instance.findings)?ii.Instance.findings:null),` +
+  `_via=this.findingsManager?"this":((typeof ii!=="undefined"&&ii&&ii.Instance&&ii.Instance.findings)?"ii":"none"),` +
+  `_ser=_fm&&_fm.serializeFindings?_fm.serializeFindings():null,` +
+  `_all=_fm&&_fm.getAllFindings?_fm.getAllFindings():null;` +
+  `if(this.ipc&&this.ipc.broadcast)this.ipc.broadcast({type:"TaskEvent",origin:"server",` +
+  `data:{eventName:"reviewFindings",payload:{taskId:(c&&c.taskId)||null,reachedVia:_via,serialized:_ser,allFindings:_all}}})` +
+  `}catch{}break}`;
 const SWITCH_INJECT =
   SWITCH_ANCHOR +
   `;case"PressPrimaryButton":${press("primaryButtonClick", "yesButtonClicked")}` +
-  `;case"PressSecondaryButton":${press("secondaryButtonClick", "noButtonClicked")}`;
+  `;case"PressSecondaryButton":${press("secondaryButtonClick", "noButtonClicked")}` +
+  `;case"GetReviewFindings":${getFindings}`;
 // Unique to the switch edit (the direct handleWebviewAskResponse call).
 const SWITCH_MARKER = `handleWebviewAskResponse("yesButtonClicked")`;
 
@@ -158,4 +175,5 @@ console.log(`✓ Patched ${target}`);
 console.log(`  backup: ${backup}`);
 console.log(`  edit 1: PressPrimaryButton/PressSecondaryButton added to the commandName schema (jls union)`);
 console.log(`  edit 2: PressPrimaryButton/PressSecondaryButton cases added to the IPC switch (select owning instance [id-match, else sole runner], then call getCurrentTask().handleWebviewAskResponse directly; webview-post fallback)`);
+console.log(`  edit 3: GetReviewFindings case added to the IPC switch (serialize the findings store and broadcast it back as a TaskEvent[reviewFindings]; reachedVia self-diagnoses the findings reference)`);
 console.log(`  → Restart Bob (reload window) for the change to load.`);
