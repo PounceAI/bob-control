@@ -1,7 +1,7 @@
 {
-  "name": "ibm-bob-task-connector",
+  "name": "bob-control",
   "version": "0.1.0",
-  "description": "MCP server that provisions tasks for IBM Bob (and any other MCP-capable agent).",
+  "description": "Bob Control: MCP server + CLI + worker that runs IBM Bob (and any MCP-capable agent) unattended against a SQLite task board.",
   "type": "module",
   "bin": {
     "bob-tasks": "dist/cli.js"

@@ -1,4 +1,4 @@
-# IBM Bob Task Connector
+# Bob Control
 
 **What it adds to your stack — and why you should care.** An AI coding agent on its own is a
 chat window: you drive it one prompt at a time and babysit every approval. This library turns
@@ -45,7 +45,7 @@ it at your clone:
 
 ```powershell
 cp .bob/mcp.json.example .bob/mcp.json
-# edit the three /absolute/path/to/ibm-bob-connector paths
+# edit the three /absolute/path/to/bob-control paths
 ```
 
 Bob hot-reloads `.bob/mcp.json` on save and lists `bob-tasks` under the MCP
@@ -56,7 +56,7 @@ same `mcpServers` block in the global file instead:
 %APPDATA%\IBM Bob\User\globalStorage\ibm.bob-code\settings\mcp_settings.json
 ```
 
-## Claude Code companion (plugin)
+## Bob Companion (Claude Code plugin)
 
 Because the connector is an MCP server and Claude Code is an MCP client, Claude Code can
 work the **same board Bob drains** — as the *foreman* (provision / route / triage) and as
@@ -71,8 +71,8 @@ runtime. Build it, add the local marketplace, install:
 ```powershell
 npm install && npm run build      # build also bundles claude-plugin/server/server.mjs
 # in Claude Code, from anywhere:
-#   /plugin marketplace add /absolute/path/to/ibm-bob-connector
-#   /plugin install bob-foreman@ibm-bob-connector
+#   /plugin marketplace add /absolute/path/to/bob-control
+#   /plugin install bob-companion@bob-control
 ```
 
 | Surface | What it does |

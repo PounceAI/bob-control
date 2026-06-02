@@ -6,7 +6,7 @@ import * as repo from "./db.js";
 import { TASK_STATUSES, TASK_PRIORITIES } from "./types.js";
 import { buildReport } from "./report.js";
 
-// IBM Bob Task Connector MCP server. Bob connects and gets tools to pull, claim,
+// Bob Control MCP server. Bob connects and gets tools to pull, claim,
 // log, and complete tasks; work is provisioned via create_task or the CLI and
 // persisted in local SQLite.
 //
@@ -14,7 +14,7 @@ import { buildReport } from "./report.js";
 // stderr via console.error.
 
 const server = new McpServer({
-  name: "ibm-bob-task-connector",
+  name: "bob-control",
   version: "0.1.0",
 });
 
@@ -284,11 +284,11 @@ async function main(): Promise<void> {
   repo.getDb();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("[ibm-bob-task-connector] MCP server ready on stdio");
-  console.error(`[ibm-bob-task-connector] board: ${repo.defaultDbPath()}`);
+  console.error("[bob-control] MCP server ready on stdio");
+  console.error(`[bob-control] board: ${repo.defaultDbPath()}`);
 }
 
 main().catch((err) => {
-  console.error("[ibm-bob-task-connector] fatal:", err);
+  console.error("[bob-control] fatal:", err);
   process.exit(1);
 });

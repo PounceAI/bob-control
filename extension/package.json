@@ -16,7 +16,7 @@
         "bobTasks.projectRoot": {
           "type": "string",
           "default": "",
-          "description": "Path to the IBM Bob Connector project (containing dist/worker.js). Empty = the first workspace folder."
+          "description": "Path to the Bob Control project (containing dist/worker.js). Empty = the first workspace folder."
         },
         "bobTasks.nodePath": {
           "type": "string",
