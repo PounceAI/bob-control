@@ -13,10 +13,15 @@
     "configuration": {
       "title": "Bob Tasks",
       "properties": {
+        "bobTasks.connectorPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the Bob Control connector install (the folder containing dist/worker.js). Set this once (User scope) so the worker can start regardless of which project Bob has open. Empty = auto-detect: any open workspace folder that contains dist/worker.js, else the legacy bobTasks.projectRoot if it still points at the install."
+        },
         "bobTasks.projectRoot": {
           "type": "string",
           "default": "",
-          "description": "Path to the Bob Control project (containing dist/worker.js). Empty = the first workspace folder."
+          "description": "Working directory the worker runs in — the project Bob operates on (verify/judge run git here). The board DB stays with the connector regardless. Empty = the first open workspace folder. To locate dist/worker.js, use bobTasks.connectorPath instead."
         },
         "bobTasks.nodePath": {
           "type": "string",

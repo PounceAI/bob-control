@@ -12,8 +12,10 @@ The status-line script ships with this plugin at:
 
     ${CLAUDE_PLUGIN_ROOT}/bin/statusline-bob.mjs
 
-It reads the **shared portable board** (`~/.bob-tasks/tasks.db`) by default — the same
-board this plugin's MCP server uses — so it works from any repo.
+It tracks the **current session's project board** (`<project>/data/tasks.db`) — the same
+board this plugin's MCP server uses (`${CLAUDE_PROJECT_DIR}/data/tasks.db`) — so each
+open project shows only its own queue. If a project has no board yet, it falls back to
+the shared portable board (`~/.bob-tasks/tasks.db`).
 
 Do this:
 
@@ -37,8 +39,8 @@ Do this:
 
    where `<ABS_SCRIPT_PATH>` is the resolved absolute path from step 1. On Windows,
    JSON-escape the backslashes in the path (each `\` becomes `\\`). Do **not** append a
-   board-path argument — omitting it makes the script use the shared portable board,
-   which is what you want for cross-repo use.
+   board-path argument — omitting it lets the script resolve the current project's board
+   per session (and fall back to the shared portable board when a project has none).
 
    If a `statusLine` key already exists, replace it (tell the user you overwrote the
    previous one, and what it was).

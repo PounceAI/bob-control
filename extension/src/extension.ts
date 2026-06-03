@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { StringDecoder } from "string_decoder";
 import * as path from "path";
+import * as fs from "fs";
 
 /**
  * Bob Tasks extension. Drives dist/worker.js as a child process (real Node >=22.5
@@ -12,6 +13,7 @@ import * as path from "path";
 
 let worker: ChildProcessWithoutNullStreams | null = null;
 let starting = false; // set between spawn() and child going live; blocks double-start
+let connected = false; // true once the worker reports `connected`; reset on each start
 let connectTimer: ReturnType<typeof setTimeout> | null = null; // startup watchdog
 let status: vscode.StatusBarItem;
 let out: vscode.OutputChannel;
@@ -49,10 +51,45 @@ function cfg(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration("bobTasks");
 }
 
+/**
+ * Working directory the worker runs in — the project Bob operates on. The board DB
+ * is anchored to the connector install (db.ts resolves it from the module dir, not
+ * cwd), so this only steers where verify/judge run `git`. Defaults to the open
+ * workspace folder, so those checks act on whatever project you have open in Bob.
+ */
 function projectRoot(): string | undefined {
   const set = cfg().get<string>("projectRoot");
   if (set && set.trim()) return set.trim();
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
+/**
+ * Locate the connector install that holds dist/worker.js. Independent of the open
+ * folder, so the worker can run while Bob has ANY project open — not just the
+ * connector repo. Resolution order:
+ *   1. bobTasks.connectorPath        — explicit install path wins.
+ *   2. any open workspace folder      — covers having the connector repo open.
+ *      that contains dist/worker.js
+ *   3. legacy bobTasks.projectRoot    — back-compat: it used to double as the install
+ *      (if it still holds worker.js)    path before connectorPath existed.
+ * Returns undefined if none has dist/worker.js, so the caller can give a clear error.
+ */
+function connectorRoot(): string | undefined {
+  const hasWorker = (dir: string): boolean => {
+    try {
+      return fs.existsSync(path.join(dir, "dist", "worker.js"));
+    } catch {
+      return false;
+    }
+  };
+  const explicit = cfg().get<string>("connectorPath");
+  if (explicit && explicit.trim()) return explicit.trim(); // honored even if missing, so the error names it
+  for (const f of vscode.workspace.workspaceFolders ?? []) {
+    if (hasWorker(f.uri.fsPath)) return f.uri.fsPath;
+  }
+  const legacy = cfg().get<string>("projectRoot");
+  if (legacy && legacy.trim() && hasWorker(legacy.trim())) return legacy.trim();
+  return undefined;
 }
 
 function setStatus(state: "stopped" | "running" | "deferred" | "idle", detail = ""): void {
@@ -69,13 +106,26 @@ function startWorker(): void {
     vscode.window.showInformationMessage("Bob Tasks worker is already running.");
     return;
   }
-  const root = projectRoot();
-  if (!root) {
-    vscode.window.showErrorMessage("Bob Tasks: set 'bobTasks.projectRoot' or open the connector folder.");
+  const connector = connectorRoot();
+  if (!connector) {
+    vscode.window.showErrorMessage(
+      "Bob Tasks: can't find dist/worker.js. Set 'bobTasks.connectorPath' to the Bob Control " +
+        "connector folder (the one containing dist/worker.js), or open that folder in this window.",
+    );
     return;
   }
   const c = cfg();
-  const workerJs = path.join(root, "dist", "worker.js");
+  const workerJs = path.join(connector, "dist", "worker.js");
+  if (!fs.existsSync(workerJs)) {
+    vscode.window.showErrorMessage(
+      `Bob Tasks: no worker at ${workerJs}. Check 'bobTasks.connectorPath' and run 'npm run build' in the connector.`,
+    );
+    return;
+  }
+  // The worker runs in the project Bob has open (verify/judge git operations target
+  // it); the board DB stays with the connector regardless. Fall back to the connector
+  // when no folder is open so cwd is always a real directory spawn() can use.
+  const cwd = projectRoot() ?? connector;
   const args = [
     workerJs,
     "--emit-json",
@@ -129,15 +179,21 @@ function startWorker(): void {
   if (allowCommands && allowCommands.trim()) args.push("--allow-commands", allowCommands.trim());
 
   const env = { ...process.env };
+  // Per-session board: the worker reads the open project's own data/tasks.db, so each
+  // project Bob opens has its own queue (matching the plugin MCP's ${CLAUDE_PROJECT_DIR}
+  // board and that project's .bob/mcp.json). Without this the worker would fall back to
+  // db.ts's module-relative default = the connector's board, sharing one queue across
+  // every project. An explicit bobTasks.dbPath still overrides.
   const dbPath = c.get<string>("dbPath");
-  if (dbPath && dbPath.trim()) env.BOB_TASKS_DB = dbPath.trim();
+  env.BOB_TASKS_DB = dbPath && dbPath.trim() ? dbPath.trim() : path.join(cwd, "data", "tasks.db");
 
   const node = c.get<string>("nodePath") || "node";
-  out.appendLine(`[start] ${node} ${args.join(" ")}`);
+  out.appendLine(`[start] (cwd ${cwd}) ${node} ${args.join(" ")}`);
   starting = true;
+  connected = false; // not yet acknowledged by Bob; the exit handler reads this
   let child: ChildProcessWithoutNullStreams;
   try {
-    child = spawn(node, args, { cwd: root, env });
+    child = spawn(node, args, { cwd, env });
   } catch (err) {
     // Sync spawn failures only (e.g. bad cwd). ENOENT for a missing `node`
     // arrives async via the 'error' event below.
@@ -188,7 +244,18 @@ function startWorker(): void {
     buf += decoder.end(); // flush bytes held back mid multi-byte sequence
     if (buf.trim()) consume(buf); // flush a final line lacking a trailing newline
     buf = "";
+    // A worker that dies BEFORE it ever connected (nonzero exit) looks like the
+    // status bar "turning itself off" with no reason. The fast-path connect failure
+    // (worker.js missing, Bob not exposing IPC on this window) beats the 30s watchdog
+    // to the punch, so say why here instead of leaving a silent flip to "stopped".
+    const diedUnconnected = !connected && code !== 0 && code !== null;
     finalize(`[exit] worker exited (code ${code})`);
+    if (diedUnconnected) {
+      vscode.window.showErrorMessage(
+        `Bob Tasks: worker stopped before connecting (exit ${code}). Is Bob running with IPC on ` +
+          `THIS window, and is 'bobTasks.connectorPath' correct? See the "Bob Tasks" output for details.`,
+      );
+    }
   });
 
   // Watchdog: if the worker never reports `connected` (Bob down, IPC wedged,
@@ -259,6 +326,7 @@ function handleEvent(json: string): void {
   }
   switch (ev.type) {
     case "connected":
+      connected = true; // the exit handler uses this to tell a clean stop from a failed start
       if (connectTimer) {
         clearTimeout(connectTimer);
         connectTimer = null;
