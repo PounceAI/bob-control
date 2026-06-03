@@ -3,6 +3,7 @@
 // Designed to be testable: the LLM call is injected, and the verdict parsing is pure.
 import { callModel, type LlmDeps } from "./llm.js";
 import { spawn } from "node:child_process";
+import { resolve as resolvePath } from "node:path";
 
 export interface JudgeVerdict {
   pass: boolean;
@@ -228,6 +229,32 @@ export async function captureGitDiff(
   } finally {
     if (newFiles.length) await runGit(["reset", "--quiet", "--", ...newFiles], cwd);
   }
+}
+
+export interface ChangedFiles {
+  /** Absolute paths of files this task created or changed (for artifact recording / cleanup). */
+  files: string[];
+  /** Human-readable `git diff --stat` summary (tracked changes). */
+  diffstat: string;
+  /** Total distinct files changed (tracked + new untracked). */
+  count: number;
+}
+
+/**
+ * List the files THIS task changed, vs a pre-task baseline — used as execution evidence
+ * for the done-integrity gate and to record artifacts for delete-safety. Combines tracked
+ * changes (`git diff --name-only <ref>`) with task-created untracked files (excluding those
+ * that predated the task). Returns absolute paths. Empty when not a git repo / no changes.
+ */
+export async function captureChangedFiles(cwd: string, baseline?: GitBaseline): Promise<ChangedFiles> {
+  const ref = baseline?.ref ?? "HEAD";
+  const prior = new Set(baseline?.untracked ?? []);
+  const tracked = splitLines(await runGit(["diff", "--name-only", ref], cwd));
+  const untrackedNow = splitLines(await runGit(["ls-files", "--others", "--exclude-standard"], cwd));
+  const newUntracked = untrackedNow.filter((f) => !prior.has(f));
+  const rel = Array.from(new Set([...tracked, ...newUntracked]));
+  const diffstat = (await runGit(["diff", "--stat", ref], cwd, 2000)).trim();
+  return { files: rel.map((f) => resolvePath(cwd, f)), diffstat, count: rel.length };
 }
 
 /**

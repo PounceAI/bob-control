@@ -88,7 +88,7 @@ function requireId(positional: string[]): number {
 const HELP = `bob-tasks — provision tasks for IBM Bob
 
 Commands:
-  create <title> [--desc <text>] [--priority low|medium|high|urgent] [--tags a,b,c] [--mode <slug>] [--template <name>] [--depends-on <id,id,...>]
+  create <title> [--desc <text>] [--priority low|medium|high|urgent] [--tags a,b,c] [--mode <slug>] [--template <name>] [--depends-on <id,id,...>] [--staged]
   templates                                list available task templates
   list [--status <status>] [--tag <tag>] [--limit <n>]
   show <id>
@@ -100,7 +100,11 @@ Commands:
   next                                     show the next pending task the worker would pull, and its routed mode
   note <id> <text> [--author <name>]
   result <id> <text> [--open]
-  delete <id>
+  delete <id> [--force] [--cleanup]        refuses if the task recorded artifacts; --force deletes anyway, --cleanup also removes files
+  disarm [reason...]                       pause dispatch (no worker pulls until armed)
+  arm                                      resume dispatch
+  release [ids...] [--tag <tag>]           move staged tasks to pending (all if no filter)
+  board                                    show dispatch state (armed?) and status counts
   stats
   report [--status <status>] [--out <file>] [--limit <n>]   markdown standup/audit of the board
   help
@@ -157,6 +161,7 @@ function main(): void {
           tags,
           mode: mode ?? null,
           depends_on,
+          staged: flags.staged === true,
         });
         console.log(`created ${fmtTask(task)}`);
       } catch (err) {
@@ -306,7 +311,47 @@ function main(): void {
 
     case "delete": {
       const id = requireId(positional);
-      console.log(repo.deleteTask(id) ? `deleted #${id}` : `task ${id} not found`);
+      const r = repo.deleteTaskSafe(id, { force: flags.force === true, cleanup: flags.cleanup === true });
+      if (!r.deleted) {
+        die(r.warning ?? `task ${id} not found`);
+      }
+      const cleaned = r.cleaned?.length ? ` (removed ${r.cleaned.length} file(s))` : "";
+      console.log(`deleted #${id}${cleaned}`);
+      break;
+    }
+
+    case "disarm": {
+      repo.setBoardArmed(false, positional.join(" ") || undefined);
+      console.log("board disarmed — dispatch paused (run 'arm' to resume)");
+      break;
+    }
+
+    case "arm": {
+      repo.setBoardArmed(true);
+      console.log("board armed — dispatch resumed");
+      break;
+    }
+
+    case "release": {
+      const ids = positional.length
+        ? positional.map((s) => {
+            const n = Number(s);
+            if (!Number.isInteger(n)) die(`invalid task id '${s}'`);
+            return n;
+          })
+        : undefined;
+      const n = repo.releaseTasks({ ids, tag: str(flags.tag) });
+      console.log(`released ${n} staged task(s) to pending`);
+      break;
+    }
+
+    case "board": {
+      const tasks = repo.listTasks({});
+      const counts: Record<string, number> = {};
+      for (const s of TASK_STATUSES) counts[s] = 0;
+      for (const t of tasks) counts[t.status]++;
+      console.log(`armed: ${repo.isBoardArmed()}`);
+      for (const s of TASK_STATUSES) if (counts[s]) console.log(`  ${s}: ${counts[s]}`);
       break;
     }
 

@@ -23,6 +23,19 @@ const RULES: { mode: BuiltInMode; re: RegExp }[] = [
   { mode: "ask", re: /\b(explain|describe|document|docs|summari[sz]e|analy[sz]e|research|investigate|what is|what are|how does|how do|why does|why is|question|clarify|review (the )?(concept|approach|design)|understand)\b/i },
 ];
 
+// Implementation verbs. A task carrying these wants code WRITTEN, so it must NOT be
+// silently routed to read-only `ask` just because it also says "analyze"/"review"
+// (incident C: a PHI-MINIMIZATION task auto-routed to ask, then marked done with no
+// code). When both signals are present, implementation wins — ask is suppressed and the
+// task falls through to `code`.
+const IMPL_VERBS =
+  /\b(implement|fix|patch|add|create|build|migrat\w*|refactor|rewrite|remove|delete|rename|wire up|integrate|enforce|minimi[sz]e|sanitiz\w*|redact|encrypt|deduplicat\w*|harden|update the code|change the code)\b/i;
+
+/** True when the task text asks for code to be written (see IMPL_VERBS). */
+export function looksLikeImplementation(text: string): boolean {
+  return IMPL_VERBS.test(text);
+}
+
 // Per-mode safety profile. `risk` gates which tasks the worker dispatches
 // (see worker --max-risk). `autoApprove` is the per-dispatch toggle set so e.g.
 // an ask task runs read-only even if global state.vscdb has everything on.
@@ -256,7 +269,11 @@ export function resolveMode(task: Pick<Task, "mode" | "title" | "description" | 
   }
 
   const hay = `${task.title} ${task.description ?? ""} ${task.tags.join(" ")}`;
+  const impl = looksLikeImplementation(hay);
   for (const rule of RULES) {
+    // Never route an implementation task to read-only `ask` — that produces an
+    // analysis with no code, which then can't honestly reach 'done'.
+    if (rule.mode === "ask" && impl) continue;
     if (rule.re.test(hay)) return { mode: rule.mode, source: "auto-router" };
   }
 

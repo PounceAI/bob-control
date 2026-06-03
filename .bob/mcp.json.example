@@ -21,7 +21,12 @@
         "submit_result",
         "create_task",
         "set_task_mode",
-        "delete_task"
+        "delete_task",
+        "board_status",
+        "record_artifact",
+        "release_tasks",
+        "arm_board",
+        "disarm_board"
       ],
       "watchPaths": ["/absolute/path/to/bob-control/dist/server.js"]
     }

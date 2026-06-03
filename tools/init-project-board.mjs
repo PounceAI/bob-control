@@ -61,6 +61,7 @@ const entry = {
   alwaysAllow: [
     "list_tasks", "get_task", "get_next_task", "claim_task", "update_task_status",
     "add_task_note", "submit_result", "create_task", "set_task_mode", "delete_task",
+    "board_status", "record_artifact", "release_tasks", "arm_board", "disarm_board",
   ],
   watchPaths: [serverJs],
 };

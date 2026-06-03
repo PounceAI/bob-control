@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import "./suppress-warnings.js";
 import * as repo from "./db.js";
-import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, MODE_PROFILES, classifierReachable, policyHasGrayZone, producesReviewFindings, judgeAppliesToMode, type Risk } from "./modes.js";
+import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, MODE_PROFILES, classifierReachable, policyHasGrayZone, producesReviewFindings, judgeAppliesToMode, isReadOnlyMode, type Risk } from "./modes.js";
 import { createCommandGate } from "./command-gate.js";
 import { createFollowupGate } from "./followup-gate.js";
 import { handleStdinAnswer } from "./worker-answer.js";
@@ -11,7 +11,7 @@ import { createPollLoop, defaultVerify, defaultCaptureSnapshot, type VerifyResul
 import { ExternalActivity } from "./defer.js";
 import { notify } from "./notify.js";
 import { shouldRetry, executeRetry } from "./retry-policy.js";
-import { judgeCompletion, captureGitDiff, captureGitBaseline, type JudgeContext, type GitBaseline } from "./judge.js";
+import { judgeCompletion, captureGitDiff, captureGitBaseline, captureChangedFiles, type JudgeContext, type GitBaseline } from "./judge.js";
 import type { Task } from "./types.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -433,11 +433,12 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     ? await defaultCaptureSnapshot(process.cwd())
     : undefined;
 
-  // Snapshot the pre-task tree so the judge sees only THIS task's changes (not
-  // pre-existing dirt). Captured before dispatch; read by the verifier after.
-  // Only when the judge will actually run (judgeOn), so no-diff modes don't pay
-  // for an unused `git stash create`.
-  if (judgeOn) judgeBaseline = await captureGitBaseline(process.cwd());
+  // One pre-task git snapshot, reused by the judge (when on) AND by the completion
+  // gate to compute execution evidence / record file artifacts. The judge needs it
+  // only for code modes, but completion evidence + delete-safety want it for every
+  // task (a read-only task that wrote a file must still be recorded — incident B).
+  const evidenceBaseline = await captureGitBaseline(process.cwd());
+  if (judgeOn) judgeBaseline = evidenceBaseline;
 
   // Initial dispatch.
   const initialRes = await doDispatch(buildPrompt(task));
@@ -473,7 +474,20 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   const captured = res.result.trim();
   if (!verifyGaveUp && (res.status === "completed" || captured)) {
     const result = captured || "(completed; no completion_result text captured)";
-    repo.setResult(task.id, result, true);
+
+    // Done-integrity gate (incident C): record what the task actually changed, then let
+    // completeTask decide the terminal status. A read-only run → analysis_done; a code
+    // run reaches 'done' only with evidence (files changed). Record artifacts for EVERY
+    // completion so a later delete warns about side effects (incident B).
+    const ranReadOnly = isReadOnlyMode(mode);
+    const changed = await captureChangedFiles(process.cwd(), evidenceBaseline);
+    for (const f of changed.files) repo.recordArtifact(task.id, { kind: "file", path: f });
+    if (changed.diffstat) {
+      repo.addNote(task.id, `Changed ${changed.count} file(s) (evidence):\n${changed.diffstat}`, "worker");
+    }
+    const completed = repo.completeTask(task.id, { result, ranReadOnly });
+    const finalStatus = completed?.status ?? "done";
+
     // Reset retry attempts on success so a future failure starts fresh.
     if (task.retry_attempts > 0) {
       repo.resetRetryAttempts(task.id);
@@ -482,9 +496,13 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
       repo.addNote(task.id, `Captured completion_result despite terminal '${res.status}' event.`, "worker");
     }
     const tail = res.status === "completed" ? "" : ` (Bob signalled '${res.status}' after completing)`;
-    console.log(`  ✓ done — result captured (${result.length} chars)${tail}`);
-    emit(opts, "taskDone", { id: task.id, title: task.title, chars: result.length });
-    if (opts.notify) notify(`Bob finished #${task.id}`, `${task.title} — ${result}`);
+    if (finalStatus === "done") {
+      console.log(`  ✓ done — ${changed.count} file(s) changed, result captured (${result.length} chars)${tail}`);
+    } else {
+      console.log(`  ◑ ${finalStatus} — analysis captured (${result.length} chars), no verified code change${tail}`);
+    }
+    emit(opts, "taskDone", { id: task.id, title: task.title, chars: result.length, status: finalStatus, filesChanged: changed.count });
+    if (opts.notify) notify(`Bob finished #${task.id} (${finalStatus})`, `${task.title} — ${result}`);
   } else if (verifyGaveUp) {
     repo.updateStatus(task.id, "blocked");
     repo.addNote(task.id, `Blocked: result never passed verification after ${opts.maxContinues} continue(s).`, "worker");
@@ -663,7 +681,26 @@ async function main(): Promise<void> {
   }
   let idled = false;
   let deferring = false;
+  let disarmed = false;
   while (!stopping) {
+    // Board-level dispatch gate: while the board is disarmed, pull nothing — the curator
+    // is bulk-creating/triaging and will arm when ready (anti-race, incident A). Checked
+    // first so a disarm halts dispatch even mid-drain.
+    if (!opts.dryRun && !repo.isBoardArmed()) {
+      if (!disarmed) {
+        console.log("bob-worker: board disarmed — dispatch paused (arm the board to resume).");
+        emit(opts, "idle", { disarmed: true });
+        disarmed = true;
+      }
+      await sleep(opts.pollMs);
+      continue;
+    }
+    if (disarmed) {
+      console.log("bob-worker: board armed — resuming.");
+      disarmed = false;
+      idled = false;
+    }
+
     // Defer while the user is chatting with Bob, checked before any dispatch so a
     // live conversation is never aborted by our same-tab StartNewTask.
     if (opts.defer && !opts.dryRun && external.shouldDefer(opts.deferIdleMs)) {
