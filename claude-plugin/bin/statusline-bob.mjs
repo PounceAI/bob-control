@@ -2,9 +2,11 @@
 // statusline-bob.mjs — a Claude Code `statusLine` command that appends a live
 // summary of IBM Bob's task board (running + queued) to a compact base segment.
 //
-// This is the plugin-shipped, cross-project version: it defaults to the SHARED
-// portable board (~/.bob-tasks/tasks.db) — the same board the plugin's MCP server
-// uses (BOB_TASKS_PORTABLE=1) — so it works from any repo, not just this one.
+// This is the plugin-shipped version. It tracks a PER-SESSION board: the current
+// project's own data/tasks.db — the same board the plugin's MCP server uses
+// (BOB_TASKS_DB=${CLAUDE_PROJECT_DIR}/data/tasks.db) and that project's .bob/mcp.json —
+// so each open project shows only its own queue. If the project has no board, it
+// falls back to the shared portable board so it still works from a bare repo.
 //
 // Wire it with the `/bob-statusline` command (writes the snippet into your
 // ~/.claude/settings.json for you), or by hand:
@@ -14,11 +16,12 @@
 //   }
 //
 // Board path resolution (first wins):
-//   1. argv[2]              — explicit path (used by local dev to point at a
-//                            repo-local data/tasks.db; cross-platform, unlike an
-//                            inline env var which Windows `cmd` won't honor).
-//   2. $BOB_TASKS_DB        — explicit path via env.
-//   3. ~/.bob-tasks/tasks.db — the shared portable board (DEFAULT).
+//   1. argv[2]                 — explicit path (cross-platform, unlike an inline env
+//                                var which Windows `cmd` won't honor).
+//   2. $BOB_TASKS_DB           — explicit path via env.
+//   3. <project>/data/tasks.db — the current session's project board, if it exists
+//                                (project dir comes from the session JSON on stdin).
+//   4. ~/.bob-tasks/tasks.db   — the shared portable board (fallback).
 //
 // Claude Code pipes session JSON on stdin (model, workspace, …) and renders the
 // command's first stdout line. The board is read with a plain SELECT (NO migrate /
@@ -40,10 +43,15 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, basename } from "node:path";
 
-function dbPath() {
-  if (process.argv[2]) return resolve(process.argv[2]);
+function dbPath(projectDir) {
+  if (process.argv[2]) return resolve(process.argv[2]); // explicit path wins
   if (process.env.BOB_TASKS_DB) return resolve(process.env.BOB_TASKS_DB);
-  return resolve(homedir(), ".bob-tasks", "tasks.db");
+  // Per-session: the current project's own board, if it has one.
+  if (projectDir) {
+    const local = resolve(projectDir, "data", "tasks.db");
+    if (existsSync(local)) return local;
+  }
+  return resolve(homedir(), ".bob-tasks", "tasks.db"); // shared fallback
 }
 
 async function readStdin() {
@@ -74,7 +82,7 @@ const base = [model, basename(cwd)].filter(Boolean).join(" · ");
 // Bob segment: a single read-only SELECT against the board.
 let bob = "";
 try {
-  const path = dbPath();
+  const path = dbPath(session?.workspace?.project_dir ?? cwd);
   if (existsSync(path)) {
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(path);
