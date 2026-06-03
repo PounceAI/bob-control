@@ -82,7 +82,7 @@ npm install && npm run build      # build also bundles claude-plugin/server/serv
 | `/bob-next [tag]` | What Bob pulls next and the mode it routes to (read-only; never claims) |
 | `/bob-route <id\|text>` | Predict the dispatch mode for a task or a hypothetical |
 | `/bob-triage [focus]` | Review the board, propose fixes, apply the safe ones on confirm |
-| `/bob-review [range]` | Queue a read-only Bob (`review`-mode) code review of the diff you just made; findings land on the board |
+| `/bob-review-diff [range]` | Queue a read-only Bob (`review`-mode) code review of the diff you just made; findings land on the board |
 | `/bob-work [tag] [--max N]` | **Worker:** claim pending tasks Claude can do, execute them, submit results |
 | `/bob-statusline` | Install (or `--remove`) a live one-line board summary in your Claude Code status line |
 | `bob-foreman` subagent | Split a large request into several correctly-routed, ordered tasks |
@@ -315,7 +315,7 @@ native review writes structured issues (severity, location, category, often a su
 completion text instead, so the worker parses that text back into structured findings
 ([src/review-findings.ts](src/review-findings.ts)). Either way the findings land as the task
 `result` plus a `bob-review` note — the board, not Bob's webview panel, is the source of
-truth. Queue one with `/bob-review` (or the `bob-review` skill / `--mode review`).
+truth. Queue one with `/bob-review-diff` (or the `bob-review` skill / `--mode review`).
 
 ### Templates
 

@@ -21,7 +21,7 @@ connector is plain TypeScript on the built-in `node:sqlite`.
   - `/bob-next [tag]` — what Bob pulls next and the mode it routes to (read-only).
   - `/bob-route <id | text>` — predict the dispatch mode for a task or a hypothetical.
   - `/bob-triage [focus]` — review the board, propose fixes, apply the safe ones on confirm.
-  - `/bob-review [focus | git-range]` — queue a read-only (`ask`-mode) Bob code review of the
+  - `/bob-review-diff [focus | git-range]` — queue a read-only (`ask`-mode) Bob code review of the
     diff you just made (defaults to the uncommitted working-tree changes); Bob returns a
     prioritized, correctness-first findings list when its worker drains the task.
 - **Worker command**
@@ -34,7 +34,7 @@ connector is plain TypeScript on the built-in `node:sqlite`.
   name; they auto-load from `skills/`). Each checks for duplicates, files the task in the right
   Bob mode, reports the id + routed mode, and surfaces the result via `get_task`:
   - **bob-review** (`review`) — "have Bob review this diff"; returns a correctness-first findings
-    list (severity / location / `fixed_diff`) on the board. Mirrors `/bob-review`.
+    list (severity / location / `fixed_diff`) on the board. Mirrors `/bob-review-diff`.
   - **bob-plan** (`plan`) — "ask Bob to plan/design X"; read-only, returns a plan, no code changes.
   - **bob-refactor** (`refactor`) — "have Bob refactor/restructure Y"; behavior-preserving edits.
   - **bob-security** (`devsecops`) — "ask Bob for a security review/scan"; vuln-focused findings.
