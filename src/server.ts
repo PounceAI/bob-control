@@ -199,6 +199,10 @@ server.registerTool(
   },
   async ({ id, status }) => {
     if (!repo.getTask(id)) return fail(`Task ${id} not found`);
+    // 'staged' isn't an arbitrary transition (would reopen the pull race) — use create/release_tasks.
+    if (status === "staged") {
+      return fail("cannot move a task to 'staged'; create with staged:true, or use release_tasks to unstage");
+    }
     const task = repo.updateStatus(id, status);
     // Manual done is allowed (backward-compatible), but flag it when there's no
     // recorded execution evidence so the board distinguishes verified from asserted.
@@ -399,13 +403,10 @@ server.registerTool(
   },
   async () => {
     const tasks = repo.listTasks({});
-    const counts: Record<string, number> = {};
-    for (const s of TASK_STATUSES) counts[s] = 0;
-    for (const t of tasks) counts[t.status] = (counts[t.status] ?? 0) + 1;
     return json({
       armed: repo.isBoardArmed(),
       worker_likely_active: workerLikelyActive(),
-      counts,
+      counts: repo.countByStatus(tasks),
       total: tasks.length,
     });
   },

@@ -13,6 +13,7 @@ import { notify } from "./notify.js";
 import { shouldRetry, executeRetry } from "./retry-policy.js";
 import { judgeCompletion, captureGitDiff, captureGitBaseline, captureChangedFiles, type JudgeContext, type GitBaseline } from "./judge.js";
 import type { Task } from "./types.js";
+import { isCompleted } from "./types.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -173,19 +174,9 @@ function parseOpts(argv: string[]): Opts {
  * Returns null if satisfied, or a description of blocking dependencies if not.
  */
 function checkDependencies(task: Task): string | null {
-  if (!task.depends_on.length) return null;
-
-  const blocking: string[] = [];
-  for (const depId of task.depends_on) {
-    const dep = repo.getTask(depId);
-    if (!dep) {
-      blocking.push(`#${depId}[missing]`);
-    } else if (dep.status !== "done") {
-      blocking.push(`#${depId}[${dep.status}]`);
-    }
-  }
-
-  return blocking.length ? blocking.join(", ") : null;
+  // Delegate to the shared classifier so 'analysis_done' counts as satisfied (an analysis
+  // prerequisite legitimately finishes there; strict 'done' would deadlock analyze→implement).
+  return repo.blockingDependencies(task);
 }
 
 /**
@@ -475,17 +466,22 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   if (!verifyGaveUp && (res.status === "completed" || captured)) {
     const result = captured || "(completed; no completion_result text captured)";
 
-    // Done-integrity gate (incident C): record what the task actually changed, then let
-    // completeTask decide the terminal status. A read-only run → analysis_done; a code
-    // run reaches 'done' only with evidence (files changed). Record artifacts for EVERY
-    // completion so a later delete warns about side effects (incident B).
+    // Record what changed, then let completeTask pick the terminal status. created/modified
+    // count as evidence; read-only writes are tagged 'side-effect' so they don't (and aren't
+    // cleanup-removable). Artifacts are recorded for every completion so delete can warn.
     const ranReadOnly = isReadOnlyMode(mode);
     const changed = await captureChangedFiles(process.cwd(), evidenceBaseline);
-    for (const f of changed.files) repo.recordArtifact(task.id, { kind: "file", path: f });
+    for (const f of changed.created) {
+      repo.recordArtifact(task.id, { kind: "file", path: f, detail: ranReadOnly ? "side-effect" : "created" });
+    }
+    for (const f of changed.modified) {
+      repo.recordArtifact(task.id, { kind: "file", path: f, detail: ranReadOnly ? "side-effect" : "modified" });
+    }
     if (changed.diffstat) {
       repo.addNote(task.id, `Changed ${changed.count} file(s) (evidence):\n${changed.diffstat}`, "worker");
     }
-    const completed = repo.completeTask(task.id, { result, ranReadOnly });
+    // !gitAvailable → don't demote a real implementation just because we couldn't read the diff.
+    const completed = repo.completeTask(task.id, { result, ranReadOnly, evidenceReliable: changed.gitAvailable });
     const finalStatus = completed?.status ?? "done";
 
     // Reset retry attempts on success so a future failure starts fresh.
@@ -687,6 +683,11 @@ async function main(): Promise<void> {
     // is bulk-creating/triaging and will arm when ready (anti-race, incident A). Checked
     // first so a disarm halts dispatch even mid-drain.
     if (!opts.dryRun && !repo.isBoardArmed()) {
+      if (opts.once) {
+        // --once must terminate; don't spin forever waiting for an arm that may never come.
+        console.log("bob-worker: board disarmed — nothing to dispatch (--once); exiting.");
+        break;
+      }
       if (!disarmed) {
         console.log("bob-worker: board disarmed — dispatch paused (arm the board to resume).");
         emit(opts, "idle", { disarmed: true });
@@ -745,9 +746,10 @@ async function main(): Promise<void> {
       await runOne(client, task, opts);
     } catch (err) {
       console.error(`  ! error on #${task.id}: ${(err as Error).message}`);
-      // Don't clobber a task that already completed (e.g. error thrown after the
-      // result was captured); only park genuinely unfinished work.
-      if (repo.getTask(task.id)?.status !== "done") {
+      // Only park genuinely unfinished work — don't clobber a task that already completed
+      // (done OR analysis_done) when the error is thrown after completion.
+      const cur = repo.getTask(task.id)?.status;
+      if (!cur || !isCompleted(cur)) {
         repo.updateStatus(task.id, "blocked");
         repo.addNote(task.id, `Worker error: ${(err as Error).message}`, "worker");
         emit(opts, "taskFail", { id: task.id, status: "error", message: (err as Error).message });

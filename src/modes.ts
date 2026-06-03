@@ -28,8 +28,10 @@ const RULES: { mode: BuiltInMode; re: RegExp }[] = [
 // (incident C: a PHI-MINIMIZATION task auto-routed to ask, then marked done with no
 // code). When both signals are present, implementation wins — ask is suppressed and the
 // task falls through to `code`.
+// Recall-favoring (missing an impl verb is worse than a false match). The (?<![\w-]) stops a
+// verb matching inside a hyphen-compound, e.g. "value-add" must not count as "add".
 const IMPL_VERBS =
-  /\b(implement|fix|patch|add|create|build|migrat\w*|refactor|rewrite|remove|delete|rename|wire up|integrate|enforce|minimi[sz]e|sanitiz\w*|redact|encrypt|deduplicat\w*|harden|update the code|change the code)\b/i;
+  /(?<![\w-])(implement|fix|patch|add|create|build|migrat\w*|refactor|rewrite|remove|delete|rename|wire up|integrate|enforce|minimi[sz]e|sanitiz\w*|redact|encrypt|deduplicat\w*|harden|update the code|change the code)\b/i;
 
 /** True when the task text asks for code to be written (see IMPL_VERBS). */
 export function looksLikeImplementation(text: string): boolean {

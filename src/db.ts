@@ -12,6 +12,7 @@ import type {
   TaskArtifact,
   ArtifactKind,
 } from "./types.js";
+import { CLAIMABLE_STATUS, isCompleted, TASK_STATUSES } from "./types.js";
 
 // Required lazily in getDb so the warning suppressor runs before node:sqlite loads.
 const requireModule = createRequire(import.meta.url);
@@ -432,7 +433,8 @@ export function setBoardArmed(armed: boolean, reason?: string): void {
 
 /** Release staged tasks to pending (optionally filtered by ids and/or tag). Returns the count released. */
 export function releaseTasks(opts: { ids?: number[]; tag?: string } = {}): number {
-  const ids = opts.ids ? new Set(opts.ids) : null;
+  // Empty ids = no filter (release all / by tag), not "release none".
+  const ids = opts.ids && opts.ids.length ? new Set(opts.ids) : null;
   let released = 0;
   for (const t of listTasks({ status: "staged" })) {
     if (ids && !ids.has(t.id)) continue;
@@ -459,8 +461,8 @@ export function claimBlockReason(id: number): string | null {
   const task = getTask(id);
   if (!task) return `task #${id} not found`;
   if (!isBoardArmed()) return "board is disarmed — dispatch paused; arm the board to claim";
-  if (task.status !== "pending")
-    return `task #${id} is '${task.status}', not pending — only pending tasks can be claimed`;
+  if (task.status !== CLAIMABLE_STATUS)
+    return `task #${id} is '${task.status}', not ${CLAIMABLE_STATUS} — only ${CLAIMABLE_STATUS} tasks can be claimed`;
   return null;
 }
 
@@ -470,11 +472,31 @@ export function claimTask(id: number, assignee: string): Task | null {
   const task = getTask(id);
   if (!task) return null;
   if (!isBoardArmed()) return null;
-  if (task.status !== "pending") return null;
+  if (task.status !== CLAIMABLE_STATUS) return null;
   getDb()
     .prepare("UPDATE tasks SET status = 'in_progress', assignee = ?, updated_at = ? WHERE id = ?")
     .run(assignee, nowIso(), id);
   return getTask(id);
+}
+
+/** Unsatisfied dependencies (not yet isCompleted), or null if all are. Shared by the worker
+ *  and CLI so analysis_done deps don't deadlock the analyze→implement pattern. */
+export function blockingDependencies(task: Task): string | null {
+  if (!task.depends_on.length) return null;
+  const blocking: string[] = [];
+  for (const depId of task.depends_on) {
+    const dep = getTask(depId);
+    if (!dep) blocking.push(`#${depId}[missing]`);
+    else if (!isCompleted(dep.status)) blocking.push(`#${depId}[${dep.status}]`);
+  }
+  return blocking.length ? blocking.join(", ") : null;
+}
+
+/** Count tasks by status, zero-filled for every known status. Shared by board_status / CLI. */
+export function countByStatus(tasks: Task[]): Record<TaskStatus, number> {
+  const counts = Object.fromEntries(TASK_STATUSES.map((s) => [s, 0])) as Record<TaskStatus, number>;
+  for (const t of tasks) counts[t.status]++;
+  return counts;
 }
 
 export function updateStatus(id: number, status: TaskStatus): Task | null {
@@ -533,8 +555,7 @@ function recordEvidenceArtifacts(taskId: number, e: Evidence): void {
   for (const f of e.files ?? []) recordArtifact(taskId, { kind: "file", path: f });
   if (e.commit && e.commit.trim()) recordArtifact(taskId, { kind: "commit", detail: e.commit.trim() });
   if (e.test && e.test.trim()) recordArtifact(taskId, { kind: "test", detail: e.test.trim() });
-  if (e.diffstat && e.diffstat.trim() && !(e.files && e.files.length))
-    recordArtifact(taskId, { kind: "file", detail: e.diffstat.trim() });
+  // diffstat-only evidence stays a caller note, not a pathless 'file' artifact (would block delete).
 }
 
 export interface CompleteOptions {
@@ -542,27 +563,39 @@ export interface CompleteOptions {
   /** True when the resolved mode was read-only (ask/plan/review): never reaches done. */
   ranReadOnly: boolean;
   evidence?: Evidence;
+  /** False when changes couldn't be checked (cwd not a git repo): impl-with-no-evidence is
+   *  then marked done-UNVERIFIED, not demoted to analysis_done. Default true. */
+  evidenceReliable?: boolean;
 }
 
 /**
- * Gated completion used by the automated drainers (worker + submit_result). Decides the
- * terminal status so the board can't show green for unbuilt/unverified work (incident C):
- *   - read-only run            -> analysis_done (analysis is the deliverable; never done)
- *   - implementation + evidence -> done (and the evidence is recorded as artifacts)
- *   - implementation, no evidence -> analysis_done + a note (it didn't actually implement)
+ * Gated completion (worker + submit_result): read-only → analysis_done; impl+evidence → done;
+ * impl+no-evidence → analysis_done, or done-UNVERIFIED when evidence wasn't checkable.
  */
 export function completeTask(id: number, opts: CompleteOptions): Task | null {
   const task = getTask(id);
   if (!task) return null;
   if (opts.evidence) recordEvidenceArtifacts(id, opts.evidence);
-  const hasEv = evidenceHasChanges(opts.evidence) || hasEvidence(id);
 
+  // Read-only is a mode fact, reliable regardless of cwd.
   if (opts.ranReadOnly) {
     writeResult(id, opts.result, "analysis_done");
     return getTask(id);
   }
+
+  const hasEv = evidenceHasChanges(opts.evidence) || hasEvidence(id);
   if (hasEv) {
     writeResult(id, opts.result, "done");
+    return getTask(id);
+  }
+  if (opts.evidenceReliable === false) {
+    // Couldn't verify changes — trust the completion, flag it, don't mismark as analysis_done.
+    writeResult(id, opts.result, "done");
+    addNote(
+      id,
+      "Completed; execution evidence could not be captured (working dir is not a git repo, or not the workspace that was edited) — marked done UNVERIFIED.",
+      "worker",
+    );
     return getTask(id);
   }
   writeResult(id, opts.result, "analysis_done");
@@ -644,10 +677,12 @@ export function getArtifacts(taskId: number): TaskArtifact[] {
   ).map(rowToArtifact);
 }
 
-/** True if the task has any recorded execution artifact (file/commit/test). */
+/** True if the task has execution evidence (excludes read-only 'side-effect' file artifacts). */
 export function hasEvidence(taskId: number): boolean {
   const row = getDb()
-    .prepare("SELECT COUNT(*) AS c FROM task_artifacts WHERE task_id = ?")
+    .prepare(
+      "SELECT COUNT(*) AS c FROM task_artifacts WHERE task_id = ? AND (detail IS NULL OR detail != 'side-effect')",
+    )
     .get(taskId) as { c: number };
   return Number(row.c) > 0;
 }
@@ -675,28 +710,33 @@ export function deleteTaskSafe(
   if (!task) return { deleted: false, warning: `task #${id} not found` };
   const artifacts = getArtifacts(id);
 
+  // Only CREATED files are safe to unlink on cleanup; 'modified' files are live source.
+  const created = artifacts.filter((a) => a.kind === "file" && a.path && a.detail === "created");
+  const touched = artifacts.filter((a) => a.kind === "file" && a.path);
+
   if (artifacts.length > 0 && !opts.force && !opts.cleanup) {
-    const files = artifacts.filter((a) => a.kind === "file" && a.path).map((a) => a.path);
-    const detail = files.length ? ` Orphaned paths: ${files.join(", ")}.` : "";
+    const paths = touched.map((a) => a.path).join(", ");
+    const detail = touched.length ? ` Files touched: ${paths}.` : "";
+    const cleanupNote = created.length
+      ? ` cleanup:true removes the ${created.length} file(s) it created (edited files are left intact).`
+      : "";
     return {
       deleted: false,
       artifacts,
       warning:
         `task #${id} has ${artifacts.length} recorded artifact(s); deleting the record will NOT undo them.${detail} ` +
-        `Re-run with force:true to delete the record anyway, or cleanup:true to also remove the files.`,
+        `Re-run with force:true to delete the record anyway, or cleanup:true to remove created files.${cleanupNote}`,
     };
   }
 
   const cleaned: string[] = [];
   if (opts.cleanup) {
-    for (const a of artifacts) {
-      if (a.kind === "file" && a.path) {
-        try {
-          unlinkSync(a.path);
-          cleaned.push(a.path);
-        } catch {
-          /* already gone / not a file we can remove */
-        }
+    for (const a of created) {
+      try {
+        unlinkSync(a.path!);
+        cleaned.push(a.path!);
+      } catch {
+        /* already gone / not removable */
       }
     }
   }

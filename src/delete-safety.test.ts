@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync, existsSync, mkdtempSync } from "node:fs";
+import { rmSync, writeFileSync, readFileSync, existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getDb, createTask, recordArtifact, deleteTaskSafe, getTask } from "./db.js";
@@ -42,17 +42,31 @@ describe("delete safety (incident B)", () => {
     assert.equal(getTask(t.id), null);
   });
 
-  it("cleanup unlinks the orphaned files, then deletes", () => {
+  it("cleanup unlinks only files the task CREATED, then deletes", () => {
     const dir = mkdtempSync(join(tmpdir(), "bob-art-"));
     const f = join(dir, "PLAN.md");
     writeFileSync(f, "orphan");
     const t = createTask({ title: "ran and wrote" });
-    recordArtifact(t.id, { kind: "file", path: f });
+    recordArtifact(t.id, { kind: "file", path: f, detail: "created" });
 
     const r = deleteTaskSafe(t.id, { cleanup: true });
     assert.equal(r.deleted, true);
     assert.deepEqual(r.cleaned, [f]);
     assert.equal(existsSync(f), false);
+  });
+
+  it("cleanup NEVER unlinks files the task only MODIFIED (no data loss on edited source)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bob-src-"));
+    const src = join(dir, "auth.ts");
+    writeFileSync(src, "real source code");
+    const t = createTask({ title: "edited existing source" });
+    recordArtifact(t.id, { kind: "file", path: src, detail: "modified" });
+
+    const r = deleteTaskSafe(t.id, { cleanup: true });
+    assert.equal(r.deleted, true);
+    assert.equal(r.cleaned, undefined); // nothing cleaned
+    assert.equal(existsSync(src), true); // edited source survives
+    assert.equal(readFileSync(src, "utf8"), "real source code");
   });
 
   it("a task with no artifacts deletes as before", () => {

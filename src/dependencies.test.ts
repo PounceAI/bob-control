@@ -1,7 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { unlinkSync } from "node:fs";
-import { getDb, createTask, getTask, setDependencies, updateStatus, listTasks } from "./db.js";
+import { getDb, createTask, getTask, setDependencies, updateStatus, listTasks, blockingDependencies } from "./db.js";
 
 const TEST_DB = "./test-deps.db";
 
@@ -222,6 +222,33 @@ describe("Task Dependencies", () => {
     // Re-read from DB
     const reloaded = getTask(task.id);
     assert.deepEqual(reloaded?.depends_on, [dep.id]);
+  });
+
+  it("blockingDependencies: a 'done' OR 'analysis_done' dependency is satisfied", () => {
+    const a = createTask({ title: "analysis prereq" });
+    const b = createTask({ title: "implement", depends_on: [a.id] });
+
+    // pending dep blocks
+    assert.match(blockingDependencies(getTask(b.id)!)!, /#\d+\[pending\]/);
+
+    // analysis_done dep SATISFIES (the analyze→implement chain must not deadlock)
+    updateStatus(a.id, "analysis_done");
+    assert.equal(blockingDependencies(getTask(b.id)!), null);
+
+    // done also satisfies
+    const c = createTask({ title: "dep2" });
+    const d = createTask({ title: "task2", depends_on: [c.id] });
+    updateStatus(c.id, "done");
+    assert.equal(blockingDependencies(getTask(d.id)!), null);
+  });
+
+  it("blockingDependencies: blocked/cancelled/staged/missing deps still block", () => {
+    for (const st of ["blocked", "cancelled", "staged"] as const) {
+      const dep = createTask({ title: `dep-${st}` });
+      const task = createTask({ title: `task-${st}`, depends_on: [dep.id] });
+      updateStatus(dep.id, st);
+      assert.match(blockingDependencies(getTask(task.id)!)!, new RegExp(`\\[${st}\\]`));
+    }
   });
 });
 

@@ -21,6 +21,7 @@
         "submit_result",
         "create_task",
         "set_task_mode",
+        "set_task_dependencies",
         "delete_task",
         "board_status",
         "record_artifact",

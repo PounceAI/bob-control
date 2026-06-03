@@ -19,6 +19,13 @@ export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 /** The only status a worker may claim/pull from. */
 export const CLAIMABLE_STATUS: TaskStatus = "pending";
 
+/** Successful terminal states. Both satisfy a dependency and count as "already completed". */
+export const COMPLETED_STATUSES: readonly TaskStatus[] = ["done", "analysis_done"];
+
+export function isCompleted(status: TaskStatus): boolean {
+  return COMPLETED_STATUSES.includes(status);
+}
+
 /** Kinds of execution artifact a worker can record against a task. */
 export const ARTIFACT_KINDS = ["file", "commit", "test"] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];

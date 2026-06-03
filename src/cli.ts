@@ -2,7 +2,7 @@
 import "./suppress-warnings.js";
 import { writeFileSync } from "node:fs";
 import * as repo from "./db.js";
-import { TASK_PRIORITIES, TASK_STATUSES, type Task, type TaskStatus } from "./types.js";
+import { TASK_PRIORITIES, TASK_STATUSES, isCompleted, type Task, type TaskStatus } from "./types.js";
 import { BUILT_IN_MODES, isBuiltInMode, resolveMode } from "./modes.js";
 import { TEMPLATES, getTemplate } from "./templates.js";
 import { buildReport } from "./report.js";
@@ -62,7 +62,8 @@ function fmtTask(t: Task, showBlocked = false): string {
     const blockingDeps: number[] = [];
     for (const depId of t.depends_on) {
       const dep = repo.getTask(depId);
-      if (!dep || dep.status !== "done") {
+      // satisfied = isCompleted (done OR analysis_done), mirroring repo.blockingDependencies.
+      if (!dep || !isCompleted(dep.status)) {
         blockingDeps.push(depId);
       }
     }
@@ -226,9 +227,18 @@ function main(): void {
       if (!status || !TASK_STATUSES.includes(status as never)) {
         die(`status must be one of ${TASK_STATUSES.join(", ")}`);
       }
+      // 'staged' isn't an arbitrary transition (would resurrect the pull race) — use create/release.
+      if (status === "staged") {
+        die("cannot move a task to 'staged' via status; create with --staged, or use 'release' to unstage");
+      }
+      if (!repo.getTask(id)) die(`task ${id} not found`);
       const task = repo.updateStatus(id, status as Task["status"]);
-      if (!task) die(`task ${id} not found`);
-      console.log(`updated ${fmtTask(task)}`);
+      if (status === "done" && !repo.hasEvidence(id)) {
+        console.error(
+          "warning: marked done without recorded execution evidence (unverified); prefer 'result' with evidence, or use 'analysis_done'",
+        );
+      }
+      console.log(`updated ${fmtTask(task!)}`);
       break;
     }
 
@@ -279,9 +289,10 @@ function main(): void {
     }
 
     case "next": {
-      const [task] = repo.listTasks({ status: "pending", limit: 1 });
+      // Armed-aware pull: matches what the worker would actually pull (nothing while disarmed).
+      const task = repo.nextTask();
       if (!task) {
-        console.log("(no pending tasks)");
+        console.log(repo.isBoardArmed() ? "(no pending tasks)" : "(board disarmed — dispatch paused)");
         break;
       }
       const { mode } = resolveMode(task);
@@ -303,8 +314,14 @@ function main(): void {
       const id = requireId(positional);
       const text = positional[1];
       if (!text) die("result requires text");
-      const task = repo.setResult(id, text, flags.open !== true);
+      const markDone = flags.open !== true;
+      const task = repo.setResult(id, text, markDone);
       if (!task) die(`task ${id} not found`);
+      if (markDone && !repo.hasEvidence(id)) {
+        console.error(
+          "warning: marked done without recorded execution evidence (unverified); use --open to keep it open, or record evidence",
+        );
+      }
       console.log(`result saved for ${fmtTask(task)}`);
       break;
     }
@@ -346,10 +363,7 @@ function main(): void {
     }
 
     case "board": {
-      const tasks = repo.listTasks({});
-      const counts: Record<string, number> = {};
-      for (const s of TASK_STATUSES) counts[s] = 0;
-      for (const t of tasks) counts[t.status]++;
+      const counts = repo.countByStatus(repo.listTasks({}));
       console.log(`armed: ${repo.isBoardArmed()}`);
       for (const s of TASK_STATUSES) if (counts[s]) console.log(`  ${s}: ${counts[s]}`);
       break;
@@ -357,13 +371,7 @@ function main(): void {
 
     case "stats": {
       const allTasks = repo.listTasks({});
-      const counts: Record<string, number> = {};
-      for (const status of TASK_STATUSES) {
-        counts[status] = 0;
-      }
-      for (const task of allTasks) {
-        counts[task.status]++;
-      }
+      const counts = repo.countByStatus(allTasks);
       if (flags.json === true) {
         console.log(JSON.stringify({ ...counts, total: allTasks.length }));
         break;

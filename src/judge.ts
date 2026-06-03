@@ -232,29 +232,42 @@ export async function captureGitDiff(
 }
 
 export interface ChangedFiles {
-  /** Absolute paths of files this task created or changed (for artifact recording / cleanup). */
+  /** Absolute paths of all files this task created or modified (created ∪ modified). */
   files: string[];
+  /** Absolute paths of files the task CREATED (new untracked) — safe to remove on cleanup. */
+  created: string[];
+  /** Absolute paths of pre-existing tracked files the task MODIFIED — NOT safe to delete. */
+  modified: string[];
   /** Human-readable `git diff --stat` summary (tracked changes). */
   diffstat: string;
-  /** Total distinct files changed (tracked + new untracked). */
+  /** Total distinct files changed (created + modified). */
   count: number;
+  /** False when cwd is not a git work tree — so callers can avoid mismarking work as unbuilt. */
+  gitAvailable: boolean;
 }
 
 /**
- * List the files THIS task changed, vs a pre-task baseline — used as execution evidence
- * for the done-integrity gate and to record artifacts for delete-safety. Combines tracked
- * changes (`git diff --name-only <ref>`) with task-created untracked files (excluding those
- * that predated the task). Returns absolute paths. Empty when not a git repo / no changes.
+ * Files this task changed vs a pre-task baseline, split CREATED (new untracked, minus prior)
+ * vs MODIFIED (tracked changes vs `ref`), as absolute paths. gitAvailable:false when cwd isn't
+ * a git work tree, so callers don't read "no changes" as "did no work".
  */
 export async function captureChangedFiles(cwd: string, baseline?: GitBaseline): Promise<ChangedFiles> {
+  const empty: ChangedFiles = { files: [], created: [], modified: [], diffstat: "", count: 0, gitAvailable: false };
+  if ((await runGit(["rev-parse", "--is-inside-work-tree"], cwd)).trim() !== "true") return empty;
+
   const ref = baseline?.ref ?? "HEAD";
   const prior = new Set(baseline?.untracked ?? []);
-  const tracked = splitLines(await runGit(["diff", "--name-only", ref], cwd));
-  const untrackedNow = splitLines(await runGit(["ls-files", "--others", "--exclude-standard"], cwd));
-  const newUntracked = untrackedNow.filter((f) => !prior.has(f));
-  const rel = Array.from(new Set([...tracked, ...newUntracked]));
-  const diffstat = (await runGit(["diff", "--stat", ref], cwd, 2000)).trim();
-  return { files: rel.map((f) => resolvePath(cwd, f)), diffstat, count: rel.length };
+  const [trackedRaw, untrackedRaw, diffstatRaw] = await Promise.all([
+    runGit(["diff", "--name-only", ref], cwd),
+    runGit(["ls-files", "--others", "--exclude-standard"], cwd),
+    runGit(["diff", "--stat", ref], cwd, 2000),
+  ]);
+  const modified = splitLines(trackedRaw).map((f) => resolvePath(cwd, f));
+  const created = splitLines(untrackedRaw)
+    .filter((f) => !prior.has(f))
+    .map((f) => resolvePath(cwd, f));
+  const files = Array.from(new Set([...created, ...modified]));
+  return { files, created, modified, diffstat: diffstatRaw.trim(), count: files.length, gitAvailable: true };
 }
 
 /**

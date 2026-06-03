@@ -141,7 +141,8 @@ export function buildReport(
     }
     // Cap only the terminal groups (done, cancelled) so a long history doesn't bury
     // active work; in_progress/blocked/pending are never truncated.
-    const isTerminal = status === "done" || status === "cancelled" || status === "analysis_done";
+    // Cap only true history (done/cancelled); analysis_done is actionable backlog, don't truncate it.
+    const isTerminal = status === "done" || status === "cancelled";
     const cap = isTerminal && opts.limit && inGroup.length > opts.limit ? opts.limit : undefined;
     const shown = cap ? inGroup.slice(0, cap) : inGroup;
     for (const t of shown) {

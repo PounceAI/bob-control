@@ -56,6 +56,15 @@ describe("staging + arming gate (incident A)", () => {
     assert.equal(getTask(b.id)?.status, "pending");
   });
 
+  it("release with an empty ids array releases ALL staged (not none)", () => {
+    const a = createTask({ title: "E1", staged: true });
+    const b = createTask({ title: "E2", staged: true });
+    const released = releaseTasks({ ids: [] }); // empty = no id filter, not 'release nothing'
+    assert.ok(released >= 2);
+    assert.equal(getTask(a.id)?.status, "pending");
+    assert.equal(getTask(b.id)?.status, "pending");
+  });
+
   it("a disarmed board pulls nothing and refuses claims", () => {
     const p = createTask({ title: "pending work" });
     assert.equal(getTask(p.id)?.status, "pending");

@@ -54,4 +54,20 @@ describe("done-integrity gate (incident C)", () => {
     const done = completeTask(t.id, { result: "done", ranReadOnly: false });
     assert.equal(done?.status, "done");
   });
+
+  it("a read-only 'side-effect' file artifact does NOT count as implementation evidence", () => {
+    const t = createTask({ title: "Implement W", mode: "code" });
+    // A file recorded as a read-only side-effect must not satisfy the done gate.
+    recordArtifact(t.id, { kind: "file", path: "/tmp/w.log", detail: "side-effect" });
+    assert.equal(hasEvidence(t.id), false);
+    const done = completeTask(t.id, { result: "done", ranReadOnly: false });
+    assert.equal(done?.status, "analysis_done");
+  });
+
+  it("an implementation with no evidence reaches done (UNVERIFIED) when evidence is NOT reliably checkable", () => {
+    const t = createTask({ title: "Implement V in a non-git dir", mode: "code" });
+    const done = completeTask(t.id, { result: "did it", ranReadOnly: false, evidenceReliable: false });
+    assert.equal(done?.status, "done"); // fail-open: don't mismark real work as analysis_done
+    assert.ok(getNotes(t.id).some((n) => /could not be captured|UNVERIFIED/i.test(n.note)));
+  });
 });
