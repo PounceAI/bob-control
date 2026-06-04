@@ -25,12 +25,17 @@ Do this:
      - `code` — normal edit + build + run. The default.
      - `advanced` — adds Browser + MCP power. Use for anything touching a website/URL/scrape/screenshot.
      - `orchestrator` — coordinating a multi-step epic with sub-tasks.
+     - `plan` / `review` — read-only: produce a design/plan, or review-findings on a diff. No writes.
+     - `devsecops` — security work (scan + remediate). Standard risk, write-capable.
 
-**How the auto-router will read your task** (so you can pick tags/wording that route well — it matches title + description + tags, first rule wins):
+**How the auto-router will read your task** (so you can pick tags/wording that route well — it matches title + description + tags, first rule wins). The read-only modes (`review`/`plan`/`ask`) are skipped when the task has an implementation verb, so impl work isn't stranded:
+- → `review` if it mentions review the diff/code/changes/PR/implementation.
+- → `plan` if it mentions plan/design/outline/propose the approach/strategy/rollout/architecture.
+- → `devsecops` if it mentions security scan/review/audit, vulnerability, CVE, secrets scan, threat model, OWASP, pentest.
 - → `advanced` if it mentions browser, webpage, website, url, scrape, crawl, navigate, screenshot, mcp tool, fetch the, http(s).
 - → `orchestrator` if it mentions orchestrate, coordinate, multi-step, break down, sub-tasks, workflow, epic, several steps.
 - → `ask` if it mentions explain, describe, document, docs, summarize, analyze, research, investigate, "what is", "what are", "how does", "how do", "why does", "why is", question, clarify, understand, review the concept/approach/design.
 - → `code` otherwise.
-- A tag that names a mode (`ask`, `code`, `advanced`, `orchestrator`) is treated as a mode hint.
+- A tag that names a mode (`ask`, `code`, `advanced`, `orchestrator`, `plan`, `review`, `devsecops`, `refactor`) is treated as a mode hint.
 
 After creating it, report the new task id, the title, and the mode it will route to (with a one-line "why"). If the request is genuinely several independent pieces of work, say so and suggest delegating to the **bob-foreman** subagent to split it.

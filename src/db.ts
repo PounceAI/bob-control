@@ -473,12 +473,18 @@ export function releaseTasks(opts: { ids?: number[]; tag?: string } = {}): numbe
   return released;
 }
 
-/** Highest-priority pending task (optionally tag-filtered), or null. Returns null while
- *  the board is disarmed so pollers idle instead of pulling mid-curation. */
+/** Highest-priority ELIGIBLE pending task (optionally tag-filtered), or null. Returns null while
+ *  the board is disarmed so pollers idle instead of pulling mid-curation. Skips tasks whose
+ *  dependencies aren't satisfied — eligibility, not just priority — so this MCP/CLI pull path
+ *  matches the worker's pickEligible (both gate on blockingDependencies) instead of handing out a
+ *  task whose prerequisites aren't done. */
 export function nextTask(opts: { tag?: string } = {}): Task | null {
   if (!isBoardArmed()) return null;
-  const tasks = listTasks({ status: "pending", tag: opts.tag, limit: 1 });
-  return tasks[0] ?? null;
+  // listTasks is already in pull order (priority, then oldest); return the first eligible one.
+  for (const t of listTasks({ status: "pending", tag: opts.tag })) {
+    if (!blockingDependencies(t)) return t;
+  }
+  return null;
 }
 
 /**
@@ -491,16 +497,20 @@ export function claimBlockReason(id: number): string | null {
   if (!isBoardArmed()) return "board is disarmed — dispatch paused; arm the board to claim";
   if (task.status !== CLAIMABLE_STATUS)
     return `task #${id} is '${task.status}', not ${CLAIMABLE_STATUS} — only ${CLAIMABLE_STATUS} tasks can be claimed`;
+  const blocking = blockingDependencies(task);
+  if (blocking) return `task #${id} is blocked on unfinished dependencies: ${blocking}`;
   return null;
 }
 
-/** Claim a task (pending -> in_progress). Refuses staged/non-pending tasks and refuses
- *  while the board is disarmed: this is the single chokepoint both drainers pass through. */
+/** Claim a task (pending -> in_progress). Refuses staged/non-pending tasks, tasks with unsatisfied
+ *  dependencies, and any claim while the board is disarmed: this is the single chokepoint both
+ *  drainers pass through, so deps are enforced even for a direct claim (not just the worker's pick). */
 export function claimTask(id: number, assignee: string): Task | null {
   const task = getTask(id);
   if (!task) return null;
   if (!isBoardArmed()) return null;
   if (task.status !== CLAIMABLE_STATUS) return null;
+  if (blockingDependencies(task)) return null; // deps not satisfied — never claim out of order
   getDb()
     .prepare("UPDATE tasks SET status = 'in_progress', assignee = ?, updated_at = ? WHERE id = ?")
     .run(assignee, nowIso(), id);

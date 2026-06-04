@@ -12,15 +12,26 @@ export function isBuiltInMode(slug: string): slug is BuiltInMode {
 }
 
 // Keyword router for tasks with no explicit mode. Order matters:
-// advanced > orchestrator > ask, then code as fallback.
-const RULES: { mode: BuiltInMode; re: RegExp }[] = [
-  // Needs MCP/Browser tools, which plain code mode lacks; must win.
+// review > plan > devsecops > advanced > orchestrator > ask, then code as fallback.
+// `readOnly` rules (review/plan/ask) are suppressed when the task carries an impl verb, so
+// implementation work is never stranded in a no-write mode (see resolveMode + incident C).
+const RULES: { mode: BuiltInMode; re: RegExp; readOnly?: boolean }[] = [
+  // Read-only INTENT first: a task that wants findings or a plan (not code written) belongs in the
+  // matching read-only mode, not the write-capable `code` fallback — otherwise a review/plan task
+  // gets write auto-approve it shouldn't have.
+  // Review of an actual code artifact (not "review the concept/approach", which is ask).
+  { mode: "review", readOnly: true, re: /\breview\w*\b[\s\S]{0,40}\b(diff|code|changes?|pull[- ]?request|\bpr\b|implementation|patch|commit)\b/i },
+  // Plan/design an approach (read-only). The noun anchor keeps it from matching bare "plan".
+  { mode: "plan", readOnly: true, re: /\b(plan|design|outline|propose)\w*\b[\s\S]{0,30}\b(approach|strateg\w*|rollout|architecture|roadmap|migration|design|plan)\b/i },
+  // Security work — devsecops reads, scans, AND edits code to remediate (standard risk, write-capable).
+  { mode: "devsecops", re: /\b(security\s+(scan\w*|review|audit|assessment)|vulnerabilit\w*|\bcve\b|secrets?\s+scan\w*|threat\s+model\w*|owasp|pen[- ]?test\w*)\b/i },
+  // Needs MCP/Browser tools, which plain code mode lacks; must win over the generic fallbacks.
   // `https?` so an https URL matches too (bare `http` before \b misses "https").
   { mode: "advanced", re: /\b(browser|web ?page|website|url|scrape|crawl|navigate|screenshot|mcp tool|fetch the|https?)\b/i },
   // `orchestrat\w*` so the stem matches orchestrate / orchestrator / orchestration
   // (a bare `orchestrat` before the trailing \b never matches the full word).
   { mode: "orchestrator", re: /\b(orchestrat\w*|coordinate|multi[- ]step|break (it |this )?down|sub-?tasks?|workflow|epic|several steps)\b/i },
-  { mode: "ask", re: /\b(explain|describe|document|docs|summari[sz]e|analy[sz]e|research|investigate|what is|what are|how does|how do|why does|why is|question|clarify|review (the )?(concept|approach|design)|understand)\b/i },
+  { mode: "ask", readOnly: true, re: /\b(explain|describe|document|docs|summari[sz]e|analy[sz]e|research|investigate|what is|what are|how does|how do|why does|why is|question|clarify|review (the )?(concept|approach|design)|understand)\b/i },
 ];
 
 // Implementation verbs. A task carrying these wants code WRITTEN, so it must NOT be
@@ -273,9 +284,9 @@ export function resolveMode(task: Pick<Task, "mode" | "title" | "description" | 
   const hay = `${task.title} ${task.description ?? ""} ${task.tags.join(" ")}`;
   const impl = looksLikeImplementation(hay);
   for (const rule of RULES) {
-    // Never route an implementation task to read-only `ask` — that produces an
-    // analysis with no code, which then can't honestly reach 'done'.
-    if (rule.mode === "ask" && impl) continue;
+    // Never route an implementation task to a read-only mode (review/plan/ask) — that produces an
+    // analysis with no code, which then can't honestly reach 'done' (incident C).
+    if (rule.readOnly && impl) continue;
     if (rule.re.test(hay)) return { mode: rule.mode, source: "auto-router" };
   }
 

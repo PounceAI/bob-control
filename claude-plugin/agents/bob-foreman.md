@@ -41,19 +41,22 @@ large request into a set of clean, independently-runnable tasks queued via
 
 The dispatcher resolves mode by: explicit `mode` › a tag naming a mode › keyword router › `code`.
 Keyword router (first match wins), scanning title + description + tags:
+- `review` — review the diff/code/changes/PR/implementation (read-only findings)
+- `plan` — plan/design/outline/propose the approach/strategy/rollout/architecture (read-only)
+- `devsecops` — security scan/review/audit, vulnerability, CVE, secrets scan, threat model, OWASP, pentest
 - `advanced` — browser, webpage, website, url, scrape, crawl, navigate, screenshot, mcp tool, fetch the, http(s)
 - `orchestrator` — orchestrate, coordinate, multi-step, break down, sub-tasks, workflow, epic, several steps
 - `ask` — explain, describe, document, docs, summarize, analyze, research, investigate, what is, what are, how does, how do, why does, why is, question, clarify, understand, review the concept/approach/design
 - else `code`
 
 Risk by mode (the worker auto-dispatches only at/below `--max-risk`, default `standard`):
-`ask`=safe, `code`/`orchestrator`=standard, `advanced`=elevated. If you create an
-`advanced` task, note that it will wait for manual dispatch.
+`ask`/`plan`/`review`=safe, `code`/`orchestrator`/`refactor`/`devsecops`=standard, `advanced`=elevated.
+If you create an `advanced` task, note that it will wait for manual dispatch.
 
-An implementation task wins over `ask`: if the text carries an implementation verb
-(implement, fix, add, migrate, refactor, minimize, sanitize, encrypt, …), the router
-suppresses `ask` and routes to `code` even when it also says "analyze/review" — because a
-read-only run of an implementation task can only reach `analysis_done`, never `done`. So
+An implementation task wins over the read-only modes (`ask`/`plan`/`review`): if the text carries
+an implementation verb (implement, fix, add, migrate, refactor, minimize, sanitize, encrypt, …),
+the router suppresses those and routes to `code` even when it also says "analyze/review/plan" —
+because a read-only run of an implementation task can only reach `analysis_done`, never `done`. So
 phrase implementation tasks with a clear build verb, and keep genuine read-only
 investigation as its own `ask` task ("Do NOT modify files"), separate from the
 implementation it informs.

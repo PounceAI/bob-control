@@ -86,6 +86,47 @@ test("default is code when nothing matches", () => {
   assert.equal(routeOf({ title: "add a stats command", tags: ["cli"] }).mode, "code");
 });
 
+test("auto-router: review of a code artifact routes to review (read-only), not code", () => {
+  for (const title of [
+    "review the diff for regressions",
+    "review the code changes in this PR",
+    "review the implementation of the parser",
+  ]) {
+    assert.equal(routeOf({ title }).mode, "review", title);
+  }
+  // "review the concept/approach/design" has no code artifact → stays ask (unchanged).
+  assert.equal(routeOf({ title: "review the approach" }).mode, "ask");
+});
+
+test("auto-router: plan/design an approach routes to plan (read-only), not code", () => {
+  for (const title of [
+    "plan the rollout strategy for Q3",
+    "design the caching architecture",
+    "propose an approach for the new pagination API",
+  ]) {
+    assert.equal(routeOf({ title }).mode, "plan", title);
+  }
+});
+
+test("auto-router: security work routes to devsecops (write-capable, even with an impl verb)", () => {
+  for (const title of [
+    "run a security scan of the dependencies",
+    "audit the code for security vulnerabilities",
+    "remediate the OWASP top 10 issues",
+    "patch the disclosed CVE in the parser", // 'patch' is an impl verb; devsecops is write-capable so NOT suppressed
+  ]) {
+    assert.equal(routeOf({ title }).mode, "devsecops", title);
+  }
+});
+
+test("read-only modes (review/plan) are suppressed by an impl verb → code, never stranded", () => {
+  // The incident-C guard now covers plan/review too, not just ask.
+  assert.equal(routeOf({ title: "plan the database migration" }).mode, "code"); // 'migrat*' is impl
+  assert.equal(routeOf({ title: "review the diff and fix the regression" }).mode, "code"); // 'fix' is impl
+  // And the modes they route to when NOT impl are genuinely read-only (the safety win).
+  for (const m of ["review", "plan"]) assert.equal(isReadOnlyMode(m), true, m);
+});
+
 test("risk profiles gate the worker correctly", () => {
   assert.equal(profileFor("ask").risk, "safe");
   assert.equal(profileFor("plan").risk, "safe");

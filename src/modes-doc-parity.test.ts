@@ -18,6 +18,10 @@ const pluginDir = resolve(moduleDir, "..", "claude-plugin");
 // mis-stated in docs before. Any command that documents the keyword router must
 // mention all of these verbatim.
 const REQUIRED = [
+  "review the diff", // review
+  "rollout", // plan
+  "security scan", // devsecops
+  "vulnerability", // devsecops
   "mcp tool", // advanced
   "fetch the", // advanced (NOT bare "fetch")
   "several steps", // orchestrator
