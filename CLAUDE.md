@@ -27,6 +27,17 @@ Instead, reach the board through **Windows `node.exe`** (available via WSL inter
 No boundary, so the plain scripts work directly: `node dist/cli.js ...`, `npm run worker`,
 `npm run build`. The `./bob` shim also works here (it falls back to plain `node`).
 
+## Quality gate
+
+Before pushing or opening a PR, run the same checks CI enforces and make sure they're green:
+
+```
+npm run lint && npm run format:check && npm test
+```
+
+(`npm run format` auto-fixes formatting.) CI runs lint → format:check → build → test+coverage on
+Windows for Node 22 and 24; a red check blocks the merge.
+
 ## Notes
 
 - The board is a pull queue: creating a task does not start Bob. Bob runs it when its
