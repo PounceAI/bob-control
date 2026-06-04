@@ -49,10 +49,25 @@ describe("delete safety (incident B)", () => {
     const t = createTask({ title: "ran and wrote" });
     recordArtifact(t.id, { kind: "file", path: f, detail: "created" });
 
-    const r = deleteTaskSafe(t.id, { cleanup: true });
+    const r = deleteTaskSafe(t.id, { cleanup: true, root: dir });
     assert.equal(r.deleted, true);
     assert.deepEqual(r.cleaned, [f]);
     assert.equal(existsSync(f), false);
+  });
+
+  it("cleanup REFUSES to unlink a created file that resolves outside the project root", () => {
+    const root = mkdtempSync(join(tmpdir(), "bob-root-"));
+    const outside = mkdtempSync(join(tmpdir(), "bob-outside-"));
+    const escapee = join(outside, "do-not-delete.txt");
+    writeFileSync(escapee, "important");
+    const t = createTask({ title: "recorded a path outside the root" });
+    recordArtifact(t.id, { kind: "file", path: escapee, detail: "created" });
+
+    const r = deleteTaskSafe(t.id, { cleanup: true, root });
+    assert.equal(r.deleted, true, "the record is still deleted");
+    assert.equal(r.cleaned, undefined, "nothing inside root was cleaned");
+    assert.deepEqual(r.skipped, [escapee], "the out-of-root path is reported as skipped");
+    assert.equal(existsSync(escapee), true, "the file outside the root is NOT deleted");
   });
 
   it("cleanup NEVER unlinks files the task only MODIFIED (no data loss on edited source)", () => {

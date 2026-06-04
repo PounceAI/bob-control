@@ -5,7 +5,7 @@
 // about-to-be-discarded state is pinned too), and restored WITHOUT moving HEAD (read-tree,
 // so a task's commit is never orphaned).
 import { unlinkSync, rmdirSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, sep } from "node:path";
 import { runGit, gitOut, repoRoot, headSha, refExists, listUntracked, snapshotWorktreeTree } from "./git.js";
 import * as repo from "./db.js";
 import type { TaskCheckpoint } from "./types.js";
@@ -110,9 +110,14 @@ export async function restoreCheckpoint(
   const prior = new Set(cp.untracked);
   const created = (await listUntracked(cwd)).filter((f) => !prior.has(f));
   const removed: string[] = [];
+  const cwdAbs = resolve(cwd);
   for (const f of created) {
+    const abs = resolve(cwd, f);
+    // Defense-in-depth: listUntracked returns repo-relative paths so `abs` is already under the work
+    // tree — still refuse to unlink anything that resolves outside it.
+    if (abs !== cwdAbs && !abs.startsWith(cwdAbs + sep)) continue;
     try {
-      unlinkSync(resolve(cwd, f));
+      unlinkSync(abs);
       removed.push(f);
       pruneEmptyDirs(cwd, f);
     } catch {

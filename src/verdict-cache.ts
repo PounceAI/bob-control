@@ -15,9 +15,10 @@ export class VerdictCache {
     if (maxSize < 1) throw new Error("VerdictCache maxSize must be >= 1");
   }
 
-  /** Build cache key from command and cwd. */
+  /** Build cache key from command and cwd. JSON-encode so a command containing the separator can't
+   *  collide two distinct (command, cwd) pairs onto one key (e.g. cmd "ls" + cwd "/a::b"). */
   private key(command: string, cwd: string): string {
-    return `${command}::${cwd}`;
+    return JSON.stringify([command, cwd]);
   }
 
   /** Get cached verdict, or undefined if not found. Updates access order. */

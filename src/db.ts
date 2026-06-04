@@ -2,7 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import type {
@@ -757,6 +757,14 @@ export interface DeleteSafeResult {
   artifacts?: TaskArtifact[];
   /** File paths removed when cleanup was requested. */
   cleaned?: string[];
+  /** Recorded paths cleanup REFUSED to unlink because they resolve outside the project root. */
+  skipped?: string[];
+}
+
+/** True when `p` resolves to `root` itself or a path beneath it (path-traversal guard for unlinks). */
+function isUnderRoot(p: string, root: string): boolean {
+  const abs = resolve(p);
+  return abs === root || abs.startsWith(root + sep);
 }
 
 /**
@@ -764,7 +772,10 @@ export interface DeleteSafeResult {
  * recorded artifacts (files written, commits, tests), refuse unless `force`, and with
  * `cleanup` also unlink the orphaned files. Tasks with no side effects delete as before.
  */
-export function deleteTaskSafe(id: number, opts: { force?: boolean; cleanup?: boolean } = {}): DeleteSafeResult {
+export function deleteTaskSafe(
+  id: number,
+  opts: { force?: boolean; cleanup?: boolean; root?: string } = {},
+): DeleteSafeResult {
   const task = getTask(id);
   if (!task) return { deleted: false, warning: `task #${id} not found` };
   const artifacts = getArtifacts(id);
@@ -792,8 +803,17 @@ export function deleteTaskSafe(id: number, opts: { force?: boolean; cleanup?: bo
   // order would, on a crash between the two, leave the board pointing at artifacts already gone.
   const deleted = deleteTask(id); // FK ON DELETE CASCADE removes notes + artifacts
   const cleaned: string[] = [];
+  const skipped: string[] = [];
   if (deleted && opts.cleanup) {
+    // Containment: only unlink files that resolve UNDER the project root — a recorded path that
+    // escapes it (a confused/hostile artifact like C:\Windows\… or /etc/…) is refused, never
+    // deleted. Defaults to process.cwd() (where the server/CLI runs); callers/tests can override.
+    const root = resolve(opts.root ?? process.cwd());
     for (const a of created) {
+      if (!isUnderRoot(a.path!, root)) {
+        skipped.push(a.path!);
+        continue;
+      }
       try {
         unlinkSync(a.path!);
         cleaned.push(a.path!);
@@ -802,7 +822,12 @@ export function deleteTaskSafe(id: number, opts: { force?: boolean; cleanup?: bo
       }
     }
   }
-  return { deleted, artifacts, cleaned: cleaned.length ? cleaned : undefined };
+  return {
+    deleted,
+    artifacts,
+    cleaned: cleaned.length ? cleaned : undefined,
+    skipped: skipped.length ? skipped : undefined,
+  };
 }
 
 // ---------------------------------------------------------------------------
