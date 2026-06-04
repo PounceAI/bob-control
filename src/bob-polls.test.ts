@@ -433,7 +433,7 @@ test("snapshot unchanged: detects plan-stop", async () => {
         : { didWork: true, reason: "changed" };
     },
   });
-  const result = await h.loop(initialResult());
+  await h.loop(initialResult());
   assert.equal(h.dispatchArgs.length, 1, "should continue for plan-stop");
   assert.match(h.dispatchArgs[0], /presented a plan but did NOT implement/);
 });
@@ -448,7 +448,7 @@ test("snapshot changed: detects work done", async () => {
       return { didWork: true, reason: "2 new file changes detected" };
     },
   });
-  const result = await h.loop(initialResult());
+  await h.loop(initialResult());
   assert.equal(h.dispatchArgs.length, 0, "should not continue when work detected");
   assert.equal(h.verifyArgs.length, 1, "should proceed to verification");
   assert.match(h.logs.join("\n"), /work detected.*2 new file changes/);
@@ -484,7 +484,7 @@ test("git error in snapshot: conservatively assumes work done", async () => {
       return { didWork: false, reason: "unchanged" };
     },
   });
-  const result = await h.loop(initialResult());
+  await h.loop(initialResult());
   assert.equal(h.dispatchArgs.length, 0, "should not continue on git error");
   assert.match(h.logs.join("\n"), /work detected.*git check failed/);
 });
@@ -510,7 +510,7 @@ test("plan-stop detection: combines with verify-and-continue correctly", async (
       { passed: true, reason: "ok" },
     ],
   );
-  const result = await h.loop(initialResult());
+  await h.loop(initialResult());
   // Flow: initial (no work) -> plan-stop continue -> work detected -> verify fail -> verify continue -> verify pass
   assert.equal(checkCount, 3, "check work 3 times");
   assert.equal(snapshotCount, 3, "capture snapshot 3 times");

@@ -2,7 +2,6 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { unlinkSync } from "node:fs";
 import {
-  getDb,
   createTask,
   getTask,
   setDependencies,
@@ -112,7 +111,7 @@ describe("Task Dependencies", () => {
   it("should block task until all dependencies are done", () => {
     const dep1 = createTask({ title: "Dep 1" });
     const dep2 = createTask({ title: "Dep 2" });
-    const task = createTask({ title: "Task", depends_on: [dep1.id, dep2.id] });
+    createTask({ title: "Task", depends_on: [dep1.id, dep2.id] });
 
     // Task should not be eligible yet
     const pending = listTasks({ status: "pending" });

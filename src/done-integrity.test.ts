@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getDb, createTask, completeTask, getTask, getNotes, recordArtifact, hasEvidence } from "./db.js";
+import { getDb, createTask, completeTask, getNotes, recordArtifact, hasEvidence } from "./db.js";
 
 const DB = join(tmpdir(), "bob-test-done.db");
 function clean(): void {

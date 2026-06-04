@@ -70,7 +70,7 @@ export async function callCli(prompt: string, deps: LlmDeps): Promise<LlmResult>
   const spawn = deps.spawnImpl ?? nodeSpawn;
   const cli = deps.cliPath ?? "claude";
   const model = deps.model ?? DEFAULT_MODELS.cli;
-  if (!/^[a-z0-9.\-]+$/i.test(model)) return { ok: false, reason: "invalid model name" };
+  if (!/^[a-z0-9.-]+$/i.test(model)) return { ok: false, reason: "invalid model name" };
   if (!/^[a-z0-9 .\-_\\/:]+$/i.test(cli)) return { ok: false, reason: "invalid cli path" };
   const argv = ["-p", "--model", model, "--output-format", "json", "--disallowed-tools", "Bash", "Write", "Edit", "NotebookEdit"];
   return new Promise<LlmResult>((resolve) => {

@@ -150,7 +150,7 @@ export function parseReviewFindings(markdown: string): ReviewIssue[] {
     if (diff) issue.fixed_diff = diff[1].replace(/\n$/, "");
 
     // Description: prose after the metadata, before the fix label / diff fence.
-    let desc = body
+    const desc = body
       .replace(/\*\*(?:Location|Category|Severity):\*\*.*(?:\n|$)/gi, "")
       .replace(/\*\*Suggested Fix:\*\*/i, "")
       .replace(/```diff\n[\s\S]*?```/g, "")

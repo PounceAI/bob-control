@@ -1,0 +1,7 @@
+dist/
+claude-plugin/server/
+extension/out/
+extension/node_modules/
+node_modules/
+data/
+*.db

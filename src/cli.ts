@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import "./suppress-warnings.js";
 import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import * as repo from "./db.js";
 import { TASK_PRIORITIES, TASK_STATUSES, isCompleted, type Task, type TaskStatus } from "./types.js";
 import { BUILT_IN_MODES, isBuiltInMode, resolveMode } from "./modes.js";
@@ -27,7 +28,7 @@ interface Parsed {
   positional: string[];
 }
 
-function parse(args: string[]): Parsed {
+export function parse(args: string[]): Parsed {
   const flags: Record<string, string | boolean> = {};
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
@@ -476,7 +477,10 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error(`error: ${(err as Error).message}`);
-  process.exit(1);
-});
+// Run the CLI only when invoked as a script (node dist/cli.js …), not when imported by a test.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(`error: ${(err as Error).message}`);
+    process.exit(1);
+  });
+}

@@ -317,7 +317,6 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
       if (opts.notify) notify(`Bob needs an answer on #${task.id}`, question);
     },
   });
-  const followupGate = followupGateObj.gate;
 
   // Register this gate so stdin answers can reach it
   activeFollowupGates.set(task.id, followupGateObj);
