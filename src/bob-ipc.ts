@@ -93,7 +93,9 @@ export class BobClient {
   private buffer = "";
   private clientId: string | null = null;
   private active: ActiveDispatch | null = null;
+  private connected = false;
   private connectSettle: { resolve: () => void; reject: (e: Error) => void } | null = null;
+  private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private observer: ((ev: TaskLifecycleEvent) => void) | null = null;
   readonly pipe: string;
 
@@ -110,12 +112,40 @@ export class BobClient {
     this.observer = fn;
   }
 
-  /** Connect and resolve once the server's Ack arrives. */
-  connect(): Promise<void> {
+  /**
+   * Connect and resolve once the server's Ack arrives. Re-callable: a dropped client can be
+   * reconnected by calling this again (see dispatch's reconnect). Rejects — instead of hanging
+   * forever — if no Ack arrives within `timeoutMs` (a half-up Bob whose pipe exists but never acks).
+   */
+  connect(timeoutMs = 10_000): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       this.connectSettle = { resolve, reject };
+      this.connectTimer = setTimeout(() => {
+        this.connectSettle = null;
+        this.teardownSocket();
+        reject(new Error(`Bob IPC connect timed out after ${timeoutMs}ms (${this.pipe})`));
+      }, timeoutMs);
+      this.connectTimer.unref?.();
       this.open(this.pipe, false);
     });
+  }
+
+  private clearConnectTimer(): void {
+    if (this.connectTimer) {
+      clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
+  }
+
+  /** Detach + destroy the current socket so a stale one can't fire handlers or leak a handle. */
+  private teardownSocket(): void {
+    const sock = this.sock;
+    this.sock = null;
+    this.connected = false;
+    if (sock) {
+      sock.removeAllListeners();
+      sock.destroy();
+    }
   }
 
   private open(path: string, isRetry: boolean): void {
@@ -127,21 +157,47 @@ export class BobClient {
       if (err.code === "ENOENT" && !isRetry) {
         const doubled = path.replace(/^(\\\\\.\\pipe\\)(?!pipe\\)/, "$1pipe\\");
         if (doubled !== path) {
+          // Tear the failed socket down (listeners + handle) before retrying the doubled path,
+          // so the orphaned socket can't later fire a stale close/error against a live dispatch.
+          sock.removeAllListeners();
+          sock.destroy();
           this.open(doubled, true);
           return;
         }
       }
-      this.connectSettle?.reject(err);
-      this.connectSettle = null;
+      this.connected = false;
+      if (this.connectSettle) {
+        // Failure during connect: reject the connect() promise.
+        this.clearConnectTimer();
+        this.connectSettle.reject(err);
+        this.connectSettle = null;
+      } else {
+        // Error after connect (e.g. EPIPE writing to a dropped pipe): abort any in-flight dispatch.
+        this.finish("aborted");
+      }
     });
     sock.on("close", () => {
-      // If a task was mid-flight, surface it as aborted rather than hang.
+      // The pipe dropped. Null the socket so the next dispatch reconnects instead of writing into a
+      // dead handle, and surface any mid-flight task as aborted rather than hanging out the timeout.
+      if (this.sock === sock) {
+        this.sock = null;
+        this.connected = false;
+      }
       this.finish("aborted");
     });
   }
 
-  private send(obj: unknown): void {
-    this.sock?.write(JSON.stringify({ type: "message", data: obj }) + DELIM);
+  /** Write a framed message. Never throws — returns false if the socket is gone or the write fails,
+   *  so callers (cancel/approve/sendMessage) can't leak an unhandled rejection on a dropped pipe. */
+  private send(obj: unknown): boolean {
+    if (!this.sock) return false;
+    try {
+      this.sock.write(JSON.stringify({ type: "message", data: obj }) + DELIM);
+      return true;
+    } catch {
+      this.connected = false;
+      return false;
+    }
   }
 
   private onData(chunk: Buffer): void {
@@ -166,6 +222,8 @@ export class BobClient {
 
     if (msg.type === "Ack") {
       this.clientId = msg.data?.clientId ?? null;
+      this.connected = true;
+      this.clearConnectTimer();
       this.connectSettle?.resolve();
       this.connectSettle = null;
       return;
@@ -252,10 +310,11 @@ export class BobClient {
     });
   }
 
-  /** Dispatch one task and resolve when it completes (or aborts / times out). */
-  dispatch(opts: DispatchOptions): Promise<DispatchResult> {
-    if (!this.sock) throw new Error("BobClient.dispatch called before connect()");
+  /** Dispatch one task and resolve when it completes (or aborts / times out). Reconnects first if
+   *  the pipe dropped since the last dispatch, so a Bob restart between tasks doesn't wedge the worker. */
+  async dispatch(opts: DispatchOptions): Promise<DispatchResult> {
     if (this.active) throw new Error("BobClient is busy — dispatch tasks sequentially");
+    if (!this.connected || !this.sock) await this.connect(); // (re)connect if never connected or dropped
     const timeoutMs = opts.timeoutMs ?? 300_000;
     return new Promise<DispatchResult>((resolve) => {
       const active: ActiveDispatch = {
@@ -269,27 +328,24 @@ export class BobClient {
       };
       active.timer.unref?.();
       this.active = active;
-      try {
-        this.send({
-          type: "TaskCommand",
-          origin: "client",
-          clientId: this.clientId,
+      const sent = this.send({
+        type: "TaskCommand",
+        origin: "client",
+        clientId: this.clientId,
+        data: {
+          commandName: "StartNewTask",
           data: {
-            commandName: "StartNewTask",
-            data: {
-              configuration: {
-                ...(opts.config ?? {}),
-                ...(opts.mode ? { mode: opts.mode } : {}),
-              },
-              text: opts.text,
-              newTab: opts.newTab ?? false,
+            configuration: {
+              ...(opts.config ?? {}),
+              ...(opts.mode ? { mode: opts.mode } : {}),
             },
+            text: opts.text,
+            newTab: opts.newTab ?? false,
           },
-        });
-      } catch {
-        // Socket write failed: settle now instead of waiting out the timeout.
-        this.finish("aborted");
-      }
+        },
+      });
+      // Socket write failed (dropped pipe): settle now instead of waiting out the timeout.
+      if (!sent) this.finish("aborted");
     });
   }
 
@@ -350,11 +406,12 @@ export class BobClient {
   }
 
   close(): void {
+    this.clearConnectTimer();
     try {
       this.sock?.end();
     } catch {
       /* ignore */
     }
-    this.sock = null;
+    this.teardownSocket();
   }
 }

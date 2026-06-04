@@ -376,8 +376,14 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
           }
 
           if (ask && !partial) lastAsk = ask;
-          void commandGate({ ask, text, partial, ts });
-          void followupGateObj.gate({ ask, text, partial, ts });
+          // .catch each gate: a press/answer that throws (e.g. an IPC write on a dropped pipe, or an
+          // answerer failure) must not become an unhandled rejection that crashes the worker.
+          commandGate({ ask, text, partial, ts }).catch((e) =>
+            console.error(`  ⚠ command gate error on #${task.id}: ${(e as Error).message}`),
+          );
+          followupGateObj
+            .gate({ ask, text, partial, ts })
+            .catch((e) => console.error(`  ⚠ followup gate error on #${task.id}: ${(e as Error).message}`));
         },
       });
     } finally {
@@ -514,8 +520,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     console.log(`  ❓ #${task.id} parked needs_input (awaiting a human answer on the board) — leaving it.`);
     if (res.status === "timeout" && res.taskId) client.cancel(res.taskId);
     emit(opts, "idle", { needsInput: task.id });
-    activeFollowupGates.delete(task.id);
-    return;
+    return; // the loop's finally unregisters the gate
   }
 
   // Mark done only on a GENUINE completion: Bob fired taskCompleted, or it
@@ -634,14 +639,25 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
       if (opts.notify) notify(`Bob task #${task.id} ${res.status}`, task.title);
     }
   }
-
-  // Unregister the gate when the task completes
-  activeFollowupGates.delete(task.id);
+  // The gate is unregistered by the caller's finally (guaranteed on every exit path).
 }
 
 async function main(): Promise<void> {
   const opts = parseOpts(process.argv.slice(2));
+  // A stray unhandled rejection must not crash a long-running drain — log it and keep going.
+  process.on("unhandledRejection", (reason) => {
+    const detail = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+    console.error(`bob-worker: unhandled rejection (ignored): ${detail}`);
+  });
   repo.getDb(); // surface schema errors up front
+
+  // Recover tasks a previous worker run left claimed when it died mid-dispatch (crash / hard kill):
+  // re-queue this assignee's in_progress tasks so they aren't stranded in_progress forever. Assumes
+  // one worker per assignee (the design — a single IPC pipe dispatches serially).
+  if (!opts.dryRun) {
+    const reclaimed = repo.reclaimStaleInProgress(opts.assignee);
+    if (reclaimed) console.log(`bob-worker: re-queued ${reclaimed} stale in_progress task(s) from a prior run.`);
+  }
 
   const client = new BobClient(opts.pipe);
   const external = new ExternalActivity(Date.now, opts.deferStaleMs);
@@ -848,6 +864,10 @@ async function main(): Promise<void> {
         await revertIfEnabled(opts, task.id);
         emit(opts, "taskFail", { id: task.id, status: "error", message: (err as Error).message });
       }
+    } finally {
+      // Guarantee the followup gate is unregistered on EVERY exit path (return / throw / needs_input),
+      // so a throw mid-runOne can't leak the gate or let a stale stdin answer drive a later dispatch.
+      activeFollowupGates.delete(task.id);
     }
     if (opts.once) break;
   }

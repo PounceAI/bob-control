@@ -1031,6 +1031,25 @@ export function incrementRetryAttempts(id: number): Task | null {
   return getTask(id);
 }
 
+/**
+ * Re-queue this assignee's in_progress tasks back to pending — called at worker startup to recover
+ * tasks a previous run left claimed when it died mid-dispatch (crash / hard kill), so they aren't
+ * stranded in_progress forever. Assumes a single worker per assignee (the design — one IPC pipe
+ * dispatches serially). Returns the number re-queued.
+ */
+export function reclaimStaleInProgress(assignee: string): number {
+  const stale = listTasks({ status: "in_progress" }).filter((t) => t.assignee === assignee);
+  for (const t of stale) {
+    updateStatus(t.id, "pending");
+    addNote(
+      t.id,
+      "Re-queued at worker startup: a prior run left this in_progress (likely a crash mid-dispatch).",
+      "worker",
+    );
+  }
+  return stale.length;
+}
+
 /** Reset retry_attempts to 0 for a task. Returns the updated task. */
 export function resetRetryAttempts(id: number): Task | null {
   if (!getTask(id)) return null;

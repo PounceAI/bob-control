@@ -62,25 +62,47 @@ export interface PollDeps {
  * error handling"), so we conservatively PASS rather than trigger a spurious continue.
  * Exported so the composite verifier in worker.ts can reuse this logic.
  */
-export async function defaultVerify(_result: string, command: string | undefined, cwd: string): Promise<VerifyResult> {
+export async function defaultVerify(
+  _result: string,
+  command: string | undefined,
+  cwd: string,
+  timeoutMs = 300_000,
+): Promise<VerifyResult> {
   if (!command) return { passed: true, reason: "no verify command — not checked" };
-  // Run the verify command; exit code 0 = pass, non-zero = fail.
+  // Run the verify command; exit code 0 = pass, non-zero = fail. A timeout kills the process and
+  // fails the check, so a hanging command (a watcher, a credential prompt) can't wedge the worker.
   return new Promise<VerifyResult>((resolve) => {
     const proc = spawn(command, { shell: true, cwd, stdio: "pipe" });
     let stdout = "";
     let stderr = "";
+    let done = false;
+    const finish = (r: VerifyResult) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+    const timer = setTimeout(() => {
+      try {
+        proc.kill();
+      } catch {
+        /* already exited */
+      }
+      finish({ passed: false, reason: `verify command timed out after ${timeoutMs}ms` });
+    }, timeoutMs);
+    timer.unref?.();
     proc.stdout?.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
     proc.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
     proc.on("close", (code: number | null) => {
       if (code === 0) {
-        resolve({ passed: true, reason: "verify command exited 0" });
+        finish({ passed: true, reason: "verify command exited 0" });
       } else {
         const out = (stdout + stderr).trim().slice(0, 200);
-        resolve({ passed: false, reason: `verify command exited ${code}${out ? `: ${out}` : ""}` });
+        finish({ passed: false, reason: `verify command exited ${code}${out ? `: ${out}` : ""}` });
       }
     });
     proc.on("error", (err: Error) => {
-      resolve({ passed: false, reason: `verify command failed to run: ${err.message}` });
+      finish({ passed: false, reason: `verify command failed to run: ${err.message}` });
     });
   });
 }
@@ -95,7 +117,7 @@ export async function defaultVerify(_result: string, command: string | undefined
  * (porcelain shows ?? for both snapshots, diff omits untracked content). This is acceptable
  * because untracked files are typically intermediate artifacts, not the primary deliverable.
  */
-export async function defaultCaptureSnapshot(cwd: string): Promise<string> {
+export async function defaultCaptureSnapshot(cwd: string, timeoutMs = 30_000): Promise<string> {
   return new Promise<string>((resolve) => {
     // Run both commands in parallel for efficiency
     const statusProc = spawn("git", ["status", "--porcelain"], { cwd, stdio: "pipe" });
@@ -104,46 +126,37 @@ export async function defaultCaptureSnapshot(cwd: string): Promise<string> {
     let statusOut = "";
     let diffOut = "";
     let completed = 0;
-    let failed = false;
+    let settled = false;
+
+    // Single idempotent exit: clears the timer, kills both children, resolves once. A git that hangs
+    // (a credential prompt, an index.lock) is bounded by the timeout → GIT_ERROR instead of forever.
+    const finish = (s: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      for (const p of [statusProc, diffProc]) {
+        try {
+          p.kill();
+        } catch {
+          /* already exited */
+        }
+      }
+      resolve(s);
+    };
+    const timer = setTimeout(() => finish("GIT_ERROR"), timeoutMs);
+    timer.unref?.();
 
     const checkComplete = () => {
-      if (++completed === 2 && !failed) {
-        // Combine both outputs into a single snapshot string
-        resolve(`STATUS:\n${statusOut}\nDIFF:\n${diffOut}`);
-      }
+      if (++completed === 2) finish(`STATUS:\n${statusOut}\nDIFF:\n${diffOut}`);
     };
 
     statusProc.stdout?.on("data", (chunk: Buffer) => (statusOut += chunk.toString()));
-    statusProc.on("close", (code: number | null) => {
-      if (code !== 0 && !failed) {
-        failed = true;
-        resolve("GIT_ERROR"); // Sentinel value for git failures
-      } else {
-        checkComplete();
-      }
-    });
-    statusProc.on("error", () => {
-      if (!failed) {
-        failed = true;
-        resolve("GIT_ERROR");
-      }
-    });
+    statusProc.on("close", (code: number | null) => (code !== 0 ? finish("GIT_ERROR") : checkComplete()));
+    statusProc.on("error", () => finish("GIT_ERROR"));
 
     diffProc.stdout?.on("data", (chunk: Buffer) => (diffOut += chunk.toString()));
-    diffProc.on("close", (code: number | null) => {
-      if (code !== 0 && !failed) {
-        failed = true;
-        resolve("GIT_ERROR");
-      } else {
-        checkComplete();
-      }
-    });
-    diffProc.on("error", () => {
-      if (!failed) {
-        failed = true;
-        resolve("GIT_ERROR");
-      }
-    });
+    diffProc.on("close", (code: number | null) => (code !== 0 ? finish("GIT_ERROR") : checkComplete()));
+    diffProc.on("error", () => finish("GIT_ERROR"));
   });
 }
 
