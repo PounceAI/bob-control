@@ -2,8 +2,8 @@
 // the judge asks Claude whether Bob's work actually satisfies the task criteria.
 // Designed to be testable: the LLM call is injected, and the verdict parsing is pure.
 import { callModel, type LlmDeps } from "./llm.js";
-import { spawn } from "node:child_process";
 import { resolve as resolvePath } from "node:path";
+import { gitOut, splitLines, isInsideWorkTree, listUntracked } from "./git.js";
 
 export interface JudgeVerdict {
   pass: boolean;
@@ -23,7 +23,7 @@ export interface JudgeContext {
 
 /** A pre-task working-tree snapshot used to scope the judge's diff to this task. */
 export interface GitBaseline {
-  /** A real git ref/SHA capturing the tree state before the task ran. */
+  /** A real git ref/SHA capturing the tracked tree state before the task ran (stash-create). */
   ref: string;
   /** Untracked files that already existed before the task (so new files can be told apart). */
   untracked: string[];
@@ -155,41 +155,6 @@ export function parseVerdict(text: string): JudgeVerdict {
   return { pass: false, reason: "unparseable judge output" };
 }
 
-/** Run a git command, resolving its stdout (empty string on any failure, so callers
- *  never throw). When maxChars is set, the process is killed and the output truncated
- *  once the limit is exceeded. */
-function runGit(args: string[], cwd: string, maxChars?: number): Promise<string> {
-  return new Promise<string>((resolve) => {
-    let proc;
-    try {
-      proc = spawn("git", args, { cwd, stdio: "pipe" });
-    } catch {
-      return resolve("");
-    }
-    let out = "";
-    let truncated = false;
-    proc.stdout?.on("data", (chunk: Buffer) => {
-      if (truncated) return;
-      out += chunk.toString();
-      if (maxChars && out.length > maxChars) {
-        out = out.slice(0, maxChars) + "\n... (diff truncated for token budget)";
-        truncated = true;
-        try {
-          proc.kill();
-        } catch {
-          /* ignore */
-        }
-      }
-    });
-    proc.on("close", () => resolve(out));
-    proc.on("error", () => resolve(out));
-  });
-}
-
-function splitLines(s: string): string[] {
-  return s.split("\n").map((l) => l.trim()).filter(Boolean);
-}
-
 /**
  * Snapshot the pre-task working tree so the judge can later diff against it and see
  * ONLY this task's changes — not pre-existing dirt from earlier tasks in a drain.
@@ -199,8 +164,8 @@ function splitLines(s: string): string[] {
  * so new-file deliverables can be told apart from pre-existing artifacts.
  */
 export async function captureGitBaseline(cwd: string): Promise<GitBaseline> {
-  const ref = (await runGit(["stash", "create"], cwd)).trim() || "HEAD";
-  const untracked = splitLines(await runGit(["ls-files", "--others", "--exclude-standard"], cwd));
+  const ref = (await gitOut(["stash", "create"], cwd)).trim() || "HEAD";
+  const untracked = await listUntracked(cwd);
   return { ref, untracked };
 }
 
@@ -219,15 +184,13 @@ export async function captureGitDiff(
   priorUntracked: string[] = [],
 ): Promise<string> {
   const prior = new Set(priorUntracked);
-  const newFiles = splitLines(
-    await runGit(["ls-files", "--others", "--exclude-standard"], cwd),
-  ).filter((f) => !prior.has(f));
-  if (newFiles.length) await runGit(["add", "--intent-to-add", "--", ...newFiles], cwd);
+  const newFiles = (await listUntracked(cwd)).filter((f) => !prior.has(f));
+  if (newFiles.length) await gitOut(["add", "--intent-to-add", "--", ...newFiles], cwd);
   try {
-    const diff = await runGit(["diff", baselineRef], cwd, maxChars);
+    const diff = await gitOut(["diff", baselineRef], cwd, maxChars);
     return diff || "(no changes detected)";
   } finally {
-    if (newFiles.length) await runGit(["reset", "--quiet", "--", ...newFiles], cwd);
+    if (newFiles.length) await gitOut(["reset", "--quiet", "--", ...newFiles], cwd);
   }
 }
 
@@ -253,19 +216,17 @@ export interface ChangedFiles {
  */
 export async function captureChangedFiles(cwd: string, baseline?: GitBaseline): Promise<ChangedFiles> {
   const empty: ChangedFiles = { files: [], created: [], modified: [], diffstat: "", count: 0, gitAvailable: false };
-  if ((await runGit(["rev-parse", "--is-inside-work-tree"], cwd)).trim() !== "true") return empty;
+  if (!(await isInsideWorkTree(cwd))) return empty;
 
   const ref = baseline?.ref ?? "HEAD";
   const prior = new Set(baseline?.untracked ?? []);
-  const [trackedRaw, untrackedRaw, diffstatRaw] = await Promise.all([
-    runGit(["diff", "--name-only", ref], cwd),
-    runGit(["ls-files", "--others", "--exclude-standard"], cwd),
-    runGit(["diff", "--stat", ref], cwd, 2000),
+  const [trackedRaw, untracked, diffstatRaw] = await Promise.all([
+    gitOut(["diff", "--name-only", ref], cwd),
+    listUntracked(cwd),
+    gitOut(["diff", "--stat", ref], cwd, 2000),
   ]);
   const modified = splitLines(trackedRaw).map((f) => resolvePath(cwd, f));
-  const created = splitLines(untrackedRaw)
-    .filter((f) => !prior.has(f))
-    .map((f) => resolvePath(cwd, f));
+  const created = untracked.filter((f) => !prior.has(f)).map((f) => resolvePath(cwd, f));
   const files = Array.from(new Set([...created, ...modified]));
   return { files, created, modified, diffstat: diffstatRaw.trim(), count: files.length, gitAvailable: true };
 }

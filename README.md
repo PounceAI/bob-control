@@ -121,6 +121,7 @@ board path on startup, so you can confirm both tools agree.
 | `set_task_dependencies` | Set/clear the task IDs this one waits on (all must be done/analysis_done); rejects cycles |
 | `record_artifact` | Record a file/commit/test a worker produced (delete-safety + done-evidence) |
 | `delete_task` | Delete a task; warns/refuses if it recorded artifacts unless `force`, with optional `cleanup` |
+| `revert_task` | Roll the working tree back to the task's pre-task checkpoint (undo what it changed) |
 | `board_report` | Markdown standup/audit of the board, grouped by status |
 | `board_status` | Dispatch state: armed?, worker-active heuristic, counts by status |
 | `arm_board` / `disarm_board` | Resume / pause all dispatch (curation gate) |
@@ -150,6 +151,7 @@ node dist/cli.js note 1 "Waiting on test data"
 node dist/cli.js result 1 "Done; 3 procedures extracted"
 node dist/cli.js next                                    # next pending task + its routed mode
 node dist/cli.js delete 1 [--force] [--cleanup]          # refuses if it wrote files; cleanup removes created ones
+node dist/cli.js revert 1 [--force]                      # roll the tree back to task 1's checkpoint (--force if HEAD moved)
 node dist/cli.js stats
 node dist/cli.js report                                  # markdown standup/audit of the board
 node dist/cli.js report --status blocked --out report.md
@@ -221,8 +223,8 @@ node dist/worker.js --dry-run
 Flags: `--once` `--tag <t>` `--dry-run` `--pipe` `--poll` `--timeout` `--assignee`
 `--new-tab` `--max-risk <safe|standard|elevated>` `--retry <N>` `--detect-plan-stop`
 `--no-notify` `--no-defer` `--answer-followups` `--escalate-all` `--review-plans`
-`--allow-commands <prefix,prefix>` (plus the verify-and-continue flags below). Needs Bob
-running with IPC enabled (see below).
+`--allow-commands <prefix,prefix>` `--checkpoint` (plus the verify-and-continue flags below).
+Needs Bob running with IPC enabled (see below).
 Aborted or timed-out tasks are parked as `blocked`; with `--retry <N>` the worker first
 re-dispatches a transient failure (timeout/abort) up to N times before parking it.
 `--detect-plan-stop` catches a "completion" that wrote no code (Bob just presented a plan)
@@ -332,6 +334,36 @@ is set, the judge is the sole acceptance signal. The judge fails safe: any LLM e
 is treated as a pass (logged as a task note) so infrastructure failures never block tasks.
 
 When both `--review-plans` and `--escalate-all` are set, `--review-plans` takes precedence.
+
+### Per-task checkpoint / rollback
+
+With `--checkpoint`, the worker captures a **pre-task git snapshot** before each task and
+**auto-reverts** to it on a clean-fail terminal — verify/judge gave up after `--max-continues`,
+a no-result timeout/abort (after retries), or a worker error — so a bad unattended run that wrote
+**uncommitted** changes is rolled back instead of left in the tree. If the task **committed** its
+work, auto-revert won't run (it refuses to rewrite history — see *Verified* below); it logs the
+skip and records a board note, and you can roll back manually with `bob revert <id> --force`. A
+successful task keeps its checkpoint, so you can undo any run on demand with `bob revert <id>`
+(or the `revert_task` tool).
+
+The rollback is destructive, so it's **safe by construction** ([src/checkpoint.ts](src/checkpoint.ts)):
+- **Repo-bound** — the checkpoint records the repo it came from; a revert run in any *other*
+  working tree is **refused**, never applied to the wrong repo.
+- **Pinned** — the snapshot is held by a real ref (`refs/bob/checkpoint/<id>`), so `git gc`
+  can't reclaim it before you revert.
+- **Verified** — if the snapshot is missing, or **HEAD moved** since capture (a commit landed),
+  the revert refuses rather than silently half-restoring or orphaning a commit (`--force` /
+  `force:true` overrides the HEAD-moved check).
+- **Recoverable** — the pre-revert state is pinned to a `refs/bob/recovery/<sha>` ref first, so
+  discarded work is never truly lost (the command prints the ref).
+- **HEAD-preserving** — tracked files are restored with `git read-tree` (HEAD/branch untouched);
+  only files the task *created* are removed (emptied dirs pruned). Pre-task edits and
+  pre-existing untracked files are left intact.
+
+Opt-in (off by default). No-op outside a git repo. Gitignored files a task creates aren't
+auto-removed (they're not the tracked snapshot's concern). Deleting a task also drops its
+checkpoint ref; `refs/bob/recovery/<sha>` refs from past reverts are kept as a safety net and
+can be pruned by hand once you're sure you don't need them.
 
 ### Review-mode findings
 

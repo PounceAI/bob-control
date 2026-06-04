@@ -12,6 +12,7 @@ import { ExternalActivity } from "./defer.js";
 import { notify } from "./notify.js";
 import { shouldRetry, executeRetry } from "./retry-policy.js";
 import { judgeCompletion, captureGitDiff, captureGitBaseline, captureChangedFiles, type JudgeContext, type GitBaseline } from "./judge.js";
+import { captureCheckpoint, revertTaskToCheckpoint } from "./checkpoint.js";
 import type { Task } from "./types.js";
 import { isCompleted } from "./types.js";
 import { readFileSync } from "node:fs";
@@ -102,6 +103,8 @@ interface Opts {
   retry: boolean;
   maxRetryAttempts: number;
   allowCommands: string[];
+  /** Capture a pre-task git checkpoint and auto-revert on a clean-fail terminal. */
+  checkpoint: boolean;
 }
 
 function parseOpts(argv: string[]): Opts {
@@ -166,7 +169,25 @@ function parseOpts(argv: string[]): Opts {
     retry: maxRetryAttempts > 0,
     maxRetryAttempts,
     allowCommands,
+    checkpoint: has("--checkpoint"),
   };
+}
+
+/**
+ * On a clean-fail terminal, roll a task's tree back to its pre-task checkpoint. Opt-in
+ * (--checkpoint); no-op without a checkpoint or outside a git repo. A committed task is refused
+ * (won't rewrite history) and only logged — recover with `bob revert <id> --force`. Best-effort:
+ * never throws into the worker's terminal handling.
+ */
+async function revertIfEnabled(opts: Opts, taskId: number): Promise<void> {
+  if (!opts.checkpoint) return;
+  try {
+    const r = await revertTaskToCheckpoint(process.cwd(), taskId, "worker");
+    if (r?.reverted) console.log(`  ↩ #${taskId} rolled back to pre-task checkpoint (${r.note})`);
+    else if (r) console.log(`  ⚠ #${taskId} checkpoint NOT rolled back: ${r.note}`);
+  } catch (err) {
+    console.log(`  ⚠ #${taskId} checkpoint rollback errored: ${(err as Error).message}`);
+  }
 }
 
 /**
@@ -430,6 +451,13 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   // task (a read-only task that wrote a file must still be recorded — incident B).
   const evidenceBaseline = await captureGitBaseline(process.cwd());
   if (judgeOn) judgeBaseline = evidenceBaseline;
+  // Persist a rollback checkpoint once per task (first attempt). Captured for ALL modes — a
+  // read-only task that wrongly writes files should still be revertable — reusing the evidence
+  // stash so we don't snapshot twice. Repo-bound + pinned (gc-safe) inside captureCheckpoint.
+  if (opts.checkpoint && !repo.getCheckpoint(task.id)) {
+    const cp = await captureCheckpoint(process.cwd(), task.id, evidenceBaseline.ref);
+    if (cp) repo.setCheckpoint(task.id, cp);
+  }
 
   // Initial dispatch.
   const initialRes = await doDispatch(buildPrompt(task));
@@ -514,6 +542,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   } else if (verifyGaveUp) {
     repo.updateStatus(task.id, "blocked");
     repo.addNote(task.id, `Blocked: result never passed verification after ${opts.maxContinues} continue(s).`, "worker");
+    await revertIfEnabled(opts, task.id);
     console.log(`  ✗ verification never passed — task marked blocked`);
     emit(opts, "taskFail", { id: task.id, title: task.title, status: "verify-failed" });
     if (opts.notify) notify(`Bob task #${task.id} failed verification`, task.title);
@@ -559,6 +588,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
       const askNote = lastAsk ? ` Last pending ask: '${lastAsk}'.` : "";
       const retryNote = task.retry_attempts > 0 ? ` After ${task.retry_attempts} retry attempt(s).` : "";
       repo.addNote(task.id, `Dispatch ended as '${res.status}' with no completion_result.${askNote}${lastNote}${retryNote}`, "worker");
+      await revertIfEnabled(opts, task.id);
       console.log(`  ✗ ${res.status} — task marked blocked (${retryDecision.reason})`);
       emit(opts, "taskFail", { id: task.id, title: task.title, status: res.status });
       if (opts.notify) notify(`Bob task #${task.id} ${res.status}`, task.title);
@@ -767,6 +797,7 @@ async function main(): Promise<void> {
       if (!cur || (!isCompleted(cur) && cur !== "needs_input")) {
         repo.updateStatus(task.id, "blocked");
         repo.addNote(task.id, `Worker error: ${(err as Error).message}`, "worker");
+        await revertIfEnabled(opts, task.id);
         emit(opts, "taskFail", { id: task.id, status: "error", message: (err as Error).message });
       }
     }

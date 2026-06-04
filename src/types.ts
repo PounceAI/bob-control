@@ -73,6 +73,18 @@ export interface TaskNote {
   created_at: string;
 }
 
+/** A captured pre-task git state a task can be rolled back to (see src/checkpoint.ts). */
+export interface TaskCheckpoint {
+  /** Repo top-level the snapshot belongs to — restore refuses if cwd's repo differs. */
+  root: string;
+  /** HEAD sha at capture (null on an unborn branch) — restore refuses if HEAD has since moved. */
+  head: string | null;
+  /** Pinned ref (refs/bob/checkpoint/<id>) holding the snapshot commit, gc-safe; "" if none. */
+  ref: string;
+  /** Untracked files that already existed at capture (so task-created files can be told apart). */
+  untracked: string[];
+}
+
 export const QUESTION_STATES = ["open", "answered", "timed_out"] as const;
 export type QuestionState = (typeof QUESTION_STATES)[number];
 
