@@ -61,6 +61,30 @@ export function getDb(path = defaultDbPath()): DatabaseSync {
   return db;
 }
 
+/**
+ * Run `fn` inside a single IMMEDIATE write transaction: it commits atomically on success and
+ * ROLLBACKs on any throw, so a multi-step mutation can never leave a half-applied board (a crash
+ * or validation error between writes undoes them all). IMMEDIATE takes the write lock up front, so
+ * concurrent writers serialize cleanly (waiting out `busy_timeout`) instead of racing a deferred
+ * snapshot. NOT reentrant — callers must not nest transaction() calls (SQLite has no nested BEGIN).
+ */
+function transaction<T>(fn: () => T): T {
+  const d = getDb();
+  d.exec("BEGIN IMMEDIATE");
+  try {
+    const result = fn();
+    d.exec("COMMIT");
+    return result;
+  } catch (err) {
+    try {
+      d.exec("ROLLBACK");
+    } catch {
+      /* nothing to roll back / already rolled back */
+    }
+    throw err;
+  }
+}
+
 function migrate(d: DatabaseSync): void {
   d.exec(`
     CREATE TABLE IF NOT EXISTS tasks (
@@ -318,43 +342,42 @@ export function createTask(input: CreateTaskInput): Task {
   const d = getDb();
   const deps = input.depends_on ?? [];
 
-  // Validate dependencies and check for cycles
-  for (const depId of deps) {
-    if (!getTask(depId)) {
-      throw new Error(`Cannot create task: dependency #${depId} does not exist`);
+  // One transaction: validate → insert → cycle-check. A thrown validation/cycle error (or a crash)
+  // ROLLBACKs the insert, so a half-created or cyclic row can never reach the board.
+  return transaction(() => {
+    for (const depId of deps) {
+      if (!getTask(depId)) {
+        throw new Error(`Cannot create task: dependency #${depId} does not exist`);
+      }
     }
-  }
 
-  const now = nowIso();
-  const status: TaskStatus = input.staged ? "staged" : "pending";
-  const info = d
-    .prepare(
-      `INSERT INTO tasks (title, description, status, priority, tags, mode, depends_on, created_at, updated_at)
+    const now = nowIso();
+    const status: TaskStatus = input.staged ? "staged" : "pending";
+    const info = d
+      .prepare(
+        `INSERT INTO tasks (title, description, status, priority, tags, mode, depends_on, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      input.title,
-      input.description ?? null,
-      status,
-      input.priority ?? "medium",
-      JSON.stringify(input.tags ?? []),
-      input.mode ?? null,
-      JSON.stringify(deps),
-      now,
-      now,
-    );
+      )
+      .run(
+        input.title,
+        input.description ?? null,
+        status,
+        input.priority ?? "medium",
+        JSON.stringify(input.tags ?? []),
+        input.mode ?? null,
+        JSON.stringify(deps),
+        now,
+        now,
+      );
 
-  const taskId = Number(info.lastInsertRowid);
+    const taskId = Number(info.lastInsertRowid);
 
-  // Check for cycles after creation (self-dependency is caught here)
-  const cycleError = detectCycle(d, taskId, deps);
-  if (cycleError) {
-    // Rollback by deleting the task
-    d.prepare("DELETE FROM tasks WHERE id = ?").run(taskId);
-    throw new Error(cycleError);
-  }
+    // Self-dependency / cycle check; on a cycle the throw rolls the insert back (no manual delete).
+    const cycleError = detectCycle(d, taskId, deps);
+    if (cycleError) throw new Error(cycleError);
 
-  return getTask(taskId)!;
+    return getTask(taskId)!;
+  });
 }
 
 /** Set (or clear) a task's dependencies. Empty array clears all dependencies. */
@@ -364,26 +387,27 @@ export function setDependencies(id: number, depends_on: number[]): Task | null {
 
   const d = getDb();
 
-  // Validate dependencies exist
-  for (const depId of depends_on) {
-    if (!getTask(depId)) {
-      throw new Error(`Cannot set dependencies: task #${depId} does not exist`);
+  // One transaction: the cycle check reads the graph and the UPDATE writes the new edges under the
+  // same write lock, so two concurrent setDependencies can't each add an individually-acyclic edge
+  // that jointly forms a cycle (and a throw rolls back cleanly).
+  return transaction(() => {
+    for (const depId of depends_on) {
+      if (!getTask(depId)) {
+        throw new Error(`Cannot set dependencies: task #${depId} does not exist`);
+      }
     }
-  }
 
-  // Check for cycles before committing
-  const cycleError = detectCycle(d, id, depends_on);
-  if (cycleError) {
-    throw new Error(cycleError);
-  }
+    const cycleError = detectCycle(d, id, depends_on);
+    if (cycleError) throw new Error(cycleError);
 
-  d.prepare("UPDATE tasks SET depends_on = ?, updated_at = ? WHERE id = ?").run(
-    JSON.stringify(depends_on),
-    nowIso(),
-    id,
-  );
+    d.prepare("UPDATE tasks SET depends_on = ?, updated_at = ? WHERE id = ?").run(
+      JSON.stringify(depends_on),
+      nowIso(),
+      id,
+    );
 
-  return getTask(id);
+    return getTask(id);
+  });
 }
 
 /** Set (or clear) a task's mode slug. */
@@ -509,9 +533,13 @@ export function claimTask(id: number, assignee: string): Task | null {
   if (!isBoardArmed()) return null;
   if (task.status !== CLAIMABLE_STATUS) return null;
   if (blockingDependencies(task)) return null; // deps not satisfied — never claim out of order
-  getDb()
-    .prepare("UPDATE tasks SET status = 'in_progress', assignee = ?, updated_at = ? WHERE id = ?")
-    .run(assignee, nowIso(), id);
+  // ATOMIC claim: the `AND status = pending` makes the status flip the single source of truth, so
+  // two concurrent claimers (e.g. the worker and an MCP get_next_task(claim)) can't both win — the
+  // checks above are only for an early, precise refusal. The winner is whoever's UPDATE changed a row.
+  const info = getDb()
+    .prepare("UPDATE tasks SET status = 'in_progress', assignee = ?, updated_at = ? WHERE id = ? AND status = ?")
+    .run(assignee, nowIso(), id, CLAIMABLE_STATUS);
+  if (Number(info.changes) === 0) return null; // lost the race — another claimer flipped it first
   return getTask(id);
 }
 
@@ -760,8 +788,11 @@ export function deleteTaskSafe(id: number, opts: { force?: boolean; cleanup?: bo
     };
   }
 
+  // Delete the record FIRST (the cheap, reversible source of truth), THEN unlink files. The reverse
+  // order would, on a crash between the two, leave the board pointing at artifacts already gone.
+  const deleted = deleteTask(id); // FK ON DELETE CASCADE removes notes + artifacts
   const cleaned: string[] = [];
-  if (opts.cleanup) {
+  if (deleted && opts.cleanup) {
     for (const a of created) {
       try {
         unlinkSync(a.path!);
@@ -771,7 +802,6 @@ export function deleteTaskSafe(id: number, opts: { force?: boolean; cleanup?: bo
       }
     }
   }
-  const deleted = deleteTask(id); // FK ON DELETE CASCADE removes notes + artifacts
   return { deleted, artifacts, cleaned: cleaned.length ? cleaned : undefined };
 }
 
@@ -808,23 +838,28 @@ export function askQuestion(
   // Only a task actively being worked can raise a question — prevents a stale/duplicate ask
   // from resurrecting a finished/unclaimed task into needs_input. (needs_input allows a re-ask.)
   if (task.status !== "in_progress" && task.status !== "needs_input") return null;
-  // One open question per task: supersede any prior open one so the answer/timeout correlation
-  // by question_id is unambiguous (getOpenQuestion can't shadow a second open row).
-  getDb().prepare("UPDATE task_questions SET status = 'timed_out' WHERE task_id = ? AND status = 'open'").run(taskId);
   const now = Date.now();
   const asked = nowIso();
   const deadline = new Date(now + Math.min(timeoutMs, MAX_QUESTION_TIMEOUT_MS)).toISOString();
   const id = randomUUID();
-  getDb()
-    .prepare(
-      `INSERT INTO task_questions (question_id, task_id, text, options, status, asked_at, deadline_at)
+  // One transaction for the whole ask: supersede the prior open question, insert the new one, park
+  // the task needs_input, and log — so a crash mid-sequence can never strand the task needs_input
+  // with no open question to answer (an unrecoverable wedge).
+  return transaction(() => {
+    // One open question per task: supersede any prior open one so the answer/timeout correlation
+    // by question_id is unambiguous (getOpenQuestion can't shadow a second open row).
+    getDb().prepare("UPDATE task_questions SET status = 'timed_out' WHERE task_id = ? AND status = 'open'").run(taskId);
+    getDb()
+      .prepare(
+        `INSERT INTO task_questions (question_id, task_id, text, options, status, asked_at, deadline_at)
        VALUES (?, ?, ?, ?, 'open', ?, ?)`,
-    )
-    .run(id, taskId, text, JSON.stringify(options), asked, deadline);
-  updateStatus(taskId, "needs_input");
-  const optStr = options.length ? `\nOptions: ${options.join(" | ")}` : "";
-  addNote(taskId, `❓ Awaiting answer [${id}]: ${text}${optStr}`, "worker");
-  return getQuestion(id);
+      )
+      .run(id, taskId, text, JSON.stringify(options), asked, deadline);
+    updateStatus(taskId, "needs_input");
+    const optStr = options.length ? `\nOptions: ${options.join(" | ")}` : "";
+    addNote(taskId, `❓ Awaiting answer [${id}]: ${text}${optStr}`, "worker");
+    return getQuestion(id);
+  });
 }
 
 export function getQuestion(questionId: string): TaskQuestion | null {
@@ -987,10 +1022,12 @@ export function clearCheckpoint(taskId: number): void {
 
 /** Increment the retry_attempts counter for a task. Returns the updated task. */
 export function incrementRetryAttempts(id: number): Task | null {
-  const task = getTask(id);
-  if (!task) return null;
-  const newCount = task.retry_attempts + 1;
-  getDb().prepare("UPDATE tasks SET retry_attempts = ?, updated_at = ? WHERE id = ?").run(newCount, nowIso(), id);
+  if (!getTask(id)) return null;
+  // Increment in SQL (not read-modify-write) so concurrent increments can't lose an update and let
+  // a task exceed its retry cap.
+  getDb()
+    .prepare("UPDATE tasks SET retry_attempts = retry_attempts + 1, updated_at = ? WHERE id = ?")
+    .run(nowIso(), id);
   return getTask(id);
 }
 
