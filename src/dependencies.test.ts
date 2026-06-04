@@ -17,17 +17,26 @@ import {
 
 const TEST_DB = "./test-deps.db";
 
+// Remove the DB and its WAL/SHM sidecars so a run always starts from a clean slate — a prior
+// run whose `after` unlink lost a Windows file-lock race must not contaminate this run's tag space.
+const wipeDb = () => {
+  for (const f of [TEST_DB, `${TEST_DB}-wal`, `${TEST_DB}-shm`, `${TEST_DB}-journal`]) {
+    try {
+      unlinkSync(f);
+    } catch {
+      // not present — fine
+    }
+  }
+};
+
 describe("Task Dependencies", () => {
   before(() => {
+    wipeDb();
     process.env.BOB_TASKS_DB = TEST_DB;
   });
 
   after(() => {
-    try {
-      unlinkSync(TEST_DB);
-    } catch {
-      // ignore
-    }
+    wipeDb();
   });
 
   it("should parse NULL depends_on as empty array", () => {
