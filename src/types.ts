@@ -3,6 +3,10 @@ export const TASK_STATUSES = [
   "staged",
   "pending",
   "in_progress",
+  // needs_input: a worker parked here while it waits for a human answer to a question
+  // on the board (see task_questions). Non-pullable, non-terminal — resumes to in_progress
+  // when answered, or parks to blocked if the question times out.
+  "needs_input",
   "blocked",
   // analysis_done: terminal state for a read-only run (analysis/findings, no verified
   // implementation). Distinct from done so the board never shows green for unbuilt work.
@@ -67,4 +71,22 @@ export interface TaskNote {
   author: string | null;
   note: string;
   created_at: string;
+}
+
+export const QUESTION_STATES = ["open", "answered", "timed_out"] as const;
+export type QuestionState = (typeof QUESTION_STATES)[number];
+
+/** A human-input question a worker raised on the board, and its answer round-trip. */
+export interface TaskQuestion {
+  question_id: string;
+  task_id: number;
+  text: string;
+  /** Optional multiple-choice answers. */
+  options: string[];
+  status: QuestionState;
+  answer: string | null;
+  asked_at: string;
+  answered_at: string | null;
+  /** ISO deadline; past this an unanswered question times out and the task parks blocked. */
+  deadline_at: string;
 }

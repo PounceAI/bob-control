@@ -452,6 +452,18 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     console.log(`  📋 captured ${findings.length} review finding${findings.length === 1 ? "" : "s"}`);
   }
 
+  // If Bob parked this task awaiting a human answer on the board (called ask_question →
+  // needs_input), the dispatch ending is NOT a failure — leave it awaiting; the question's
+  // own deadline + the board sweeper govern it. Don't clobber needs_input to blocked/done.
+  // (worker.ts doesn't block on board questions; closing that loop is future work.)
+  if (repo.getTask(task.id)?.status === "needs_input") {
+    console.log(`  ❓ #${task.id} parked needs_input (awaiting a human answer on the board) — leaving it.`);
+    if (res.status === "timeout" && res.taskId) client.cancel(res.taskId);
+    emit(opts, "idle", { needsInput: task.id });
+    activeFollowupGates.delete(task.id);
+    return;
+  }
+
   // Mark done only on a GENUINE completion: Bob fired taskCompleted, or it
   // emitted a real attempt_completion (completion_result). In some multi-step
   // tasks Bob emits completion_result then taskAborted/timeout — we still keep
@@ -679,6 +691,8 @@ async function main(): Promise<void> {
   let deferring = false;
   let disarmed = false;
   while (!stopping) {
+    // Sweep stale board questions so a needs_input task whose asker died still times out.
+    if (!opts.dryRun) repo.expireOverdueQuestions();
     // Board-level dispatch gate: while the board is disarmed, pull nothing — the curator
     // is bulk-creating/triaging and will arm when ready (anti-race, incident A). Checked
     // first so a disarm halts dispatch even mid-drain.
@@ -747,9 +761,10 @@ async function main(): Promise<void> {
     } catch (err) {
       console.error(`  ! error on #${task.id}: ${(err as Error).message}`);
       // Only park genuinely unfinished work — don't clobber a task that already completed
-      // (done OR analysis_done) when the error is thrown after completion.
+      // (done OR analysis_done) or is legitimately parked awaiting a human answer (needs_input)
+      // when the error is thrown after completion/parking.
       const cur = repo.getTask(task.id)?.status;
-      if (!cur || !isCompleted(cur)) {
+      if (!cur || (!isCompleted(cur) && cur !== "needs_input")) {
         repo.updateStatus(task.id, "blocked");
         repo.addNote(task.id, `Worker error: ${(err as Error).message}`, "worker");
         emit(opts, "taskFail", { id: task.id, status: "error", message: (err as Error).message });
