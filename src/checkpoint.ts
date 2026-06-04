@@ -6,7 +6,7 @@
 // so a task's commit is never orphaned).
 import { unlinkSync, rmdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
-import { runGit, gitOut, repoRoot, headSha, refExists, listUntracked } from "./git.js";
+import { runGit, gitOut, repoRoot, headSha, refExists, listUntracked, snapshotWorktreeTree } from "./git.js";
 import * as repo from "./db.js";
 import type { TaskCheckpoint } from "./types.js";
 
@@ -83,10 +83,9 @@ export async function restoreCheckpoint(
     return { reverted: false, removed: [], note: `checkpoint snapshot is missing (gc'd or wrong repo) — refusing to revert` };
   }
 
-  // Pin the current state BEFORE we destroy it, so the discarded work is recoverable.
-  let recoveryRef: string | undefined;
-  const cur = (await gitOut(["stash", "create"], cwd)).trim();
-  if (cur && (await runGit(["update-ref", RECOVERY_REF(cur), cur], cwd)).ok) recoveryRef = RECOVERY_REF(cur);
+  // Pin the current state (tracked changes AND untracked files) BEFORE we destroy it, so the
+  // discarded work is recoverable — including a task whose only change is a brand-new file.
+  const recoveryRef = await pinRecoverySnapshot(cwd, head);
 
   // Restore tracked files to the snapshot tree WITHOUT moving HEAD (read-tree, not reset --hard,
   // so a commit the task made is never orphaned). Then unstage so the diff reads as pre-task.
@@ -164,6 +163,40 @@ export async function deleteTaskAndCheckpoint(
     await runGit(["update-ref", "-d", cp.ref], cp.root);
   }
   return r;
+}
+
+/**
+ * Pin the full current worktree state — tracked changes AND untracked (non-ignored) files — behind
+ * a recovery ref so a revert is reversible. `git stash create` captures tracked changes only and
+ * silently drops untracked files, so a task whose only change is a NEW file would be unrecoverable
+ * after revert; snapshotWorktreeTree() builds an untracked-aware tree instead. Returns the ref, or
+ * undefined when there's nothing to recover (worktree == HEAD's tree) or the snapshot can't be
+ * built. Best-effort: never throws.
+ */
+async function pinRecoverySnapshot(cwd: string, head: string | null): Promise<string | undefined> {
+  try {
+    const tree = await snapshotWorktreeTree(cwd);
+    if (!tree) return undefined;
+    // Nothing to recover if the snapshot matches HEAD's tree (no tracked or untracked change).
+    if (head && tree === (await gitOut(["rev-parse", `${head}^{tree}`], cwd)).trim()) return undefined;
+    // Commit the snapshot with a fixed identity so it works regardless of repo config, parented on
+    // HEAD (none on an unborn branch), and pin it so gc can't reclaim the discarded work.
+    const ident = {
+      GIT_AUTHOR_NAME: "bob-recovery",
+      GIT_AUTHOR_EMAIL: "bob@localhost",
+      GIT_COMMITTER_NAME: "bob-recovery",
+      GIT_COMMITTER_EMAIL: "bob@localhost",
+    };
+    const parent = head ? ["-p", head] : [];
+    const commit = (
+      await gitOut(["commit-tree", tree, ...parent, "-m", "bob pre-revert recovery snapshot"], cwd, undefined, ident)
+    ).trim();
+    if (!commit) return undefined;
+    const ref = RECOVERY_REF(commit);
+    return (await runGit(["update-ref", ref, commit], cwd)).ok ? ref : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Remove now-empty directories upward from a removed file, stopping at the repo cwd. */
