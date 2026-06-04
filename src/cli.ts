@@ -100,6 +100,8 @@ Commands:
   route <id>                               show which mode the auto-router would pick
   next                                     show the next pending task the worker would pull, and its routed mode
   note <id> <text> [--author <name>]
+  questions                                list open questions awaiting a human answer
+  answer <id> <question_id> <text>         answer a worker's board question (resumes the worker)
   result <id> <text> [--open]
   delete <id> [--force] [--cleanup]        refuses if the task recorded artifacts; --force deletes anyway, --cleanup also removes files
   disarm [reason...]                       pause dispatch (no worker pulls until armed)
@@ -209,7 +211,13 @@ function main(): void {
       const task = repo.getTask(id);
       if (!task) die(`task ${id} not found`);
       // Always JSON; --json just controls indentation.
-      console.log(JSON.stringify({ ...task, notes: repo.getNotes(id) }, null, flags.json === true ? 0 : 2));
+      console.log(
+        JSON.stringify(
+          { ...task, notes: repo.getNotes(id), pending_question: repo.getOpenQuestion(id) },
+          null,
+          flags.json === true ? 0 : 2,
+        ),
+      );
       break;
     }
 
@@ -307,6 +315,34 @@ function main(): void {
       const note = repo.addNote(id, text, str(flags.author) ?? "me");
       if (!note) die(`task ${id} not found`);
       console.log(`noted on #${id}: ${text}`);
+      break;
+    }
+
+    case "questions": {
+      const open = repo.listOpenQuestions();
+      if (!open.length) {
+        console.log("(no open questions)");
+        break;
+      }
+      for (const q of open) {
+        const opts = q.options.length ? `  options: ${q.options.join(" | ")}` : "";
+        console.log(`#${q.task_id} [${q.question_id}] ${q.text}${opts}`);
+      }
+      break;
+    }
+
+    case "answer": {
+      const id = requireId(positional);
+      const questionId = positional[1];
+      const text = positional[2];
+      if (!questionId || !text) die("answer requires <task_id> <question_id> <text>");
+      const res = repo.answerQuestion(id, questionId, text);
+      if (!res.ok) die(res.error);
+      console.log(
+        res.alreadyAnswered
+          ? `question [${questionId}] was already answered`
+          : `answered [${questionId}] on #${id} — waiting worker resumes`,
+      );
       break;
     }
 

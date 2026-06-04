@@ -16,6 +16,7 @@ interface AuditCounts {
 
 // Status groups in display order: most actionable first.
 const GROUP_ORDER: TaskStatus[] = [
+  "needs_input",
   "in_progress",
   "blocked",
   "pending",
@@ -29,6 +30,7 @@ const LABELS: Record<TaskStatus, string> = {
   staged: "Staged (not released)",
   pending: "Pending",
   in_progress: "In progress",
+  needs_input: "❓ Awaiting answer",
   blocked: "Blocked",
   analysis_done: "Analysis done (no verified code)",
   done: "Done",

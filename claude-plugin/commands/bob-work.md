@@ -52,7 +52,22 @@ Repeat until the queue is empty, `--max` is hit, or only unsuitable tasks remain
    notes in the task `result`/notes — do **not** scatter `*_PLAN.md` / `*_DESIGN.md` files at
    arbitrary repo paths. If you genuinely need scratch files, keep them under a gitignored
    scratch dir, and `record_artifact` each one you write.
-7. **Finish:**
+7. **Need a value you don't have? Ask the board — never guess.** If you hit a fact or
+   decision you can't determine yourself (a config value, a deploy timeline, a stakeholder
+   choice — anything you'd otherwise have to assume), do **not** fabricate it and do **not**
+   mark the task done:
+   - `ask_question` with `task_id`, `text` (and `options` if multiple-choice). This parks the
+     task `needs_input` and writes the question to the board, where an orchestrator or human
+     can see it (`get_task` / `board_report`) and answer it (`answer_task_question`, or
+     `bob answer`).
+   - Then loop `await_answer(task_id, question_id)` until it returns `status:"answered"` —
+     use that answer and continue. Each call blocks ~25s server-side; while it returns
+     `status:"waiting"`, just call it again.
+   - If it returns `status:"timed_out"`, **STOP**: the task is already parked `blocked` (the
+     question went unanswered). Report it; never invent an answer to keep going.
+   Inventing a value (e.g. guessing a DB pool size or a "safe" worker count) is exactly the
+   failure this prevents — when in doubt, ask the board and wait.
+8. **Finish:**
    - **Implementation success →** `submit_result` with a concise `result` AND **`evidence`**
      (the `files` you changed, and a `test`/`commit` if you have one). Evidence is what lets
      an implementation task reach `done`; without it the task lands in `analysis_done`
@@ -65,7 +80,7 @@ Repeat until the queue is empty, `--max` is hit, or only unsuitable tasks remain
      `update_task_status` → `blocked` **and** `add_task_note` (`author: "claude"`) saying
      exactly what's blocking it and what's needed. Never leave a task dangling in
      `in_progress`, and never force a risky action — surface it to the user instead.
-8. **Serial only:** fully finish one task before claiming the next, so the board stays
+9. **Serial only:** fully finish one task before claiming the next, so the board stays
    consistent and you're not fanning out edits across tasks.
 
 ## Report

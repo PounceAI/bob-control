@@ -9,12 +9,22 @@ import { buildReport } from "./report.js";
 
 const WORKER_ACTIVE_WINDOW_MS = 5 * 60 * 1000;
 
-/** Heuristic: a drainer looks active if any task is in_progress with a recent touch. */
+// await_answer blocks server-side in chunks so a single tool call stays under the MCP
+// transport timeout while the total human wait can be minutes (the worker re-calls).
+const AWAIT_CHUNK_DEFAULT_MS = 25_000;
+const AWAIT_CHUNK_MAX_MS = 55_000;
+const AWAIT_POLL_INTERVAL_MS = 700;
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Heuristic: a drainer looks active if a task is in_progress — or parked needs_input, where
+ *  a worker is blocked in await_answer — with a recent touch. */
 function workerLikelyActive(): boolean {
   const now = Date.now();
-  return repo
-    .listTasks({ status: "in_progress" })
-    .some((t) => now - Date.parse(t.updated_at) < WORKER_ACTIVE_WINDOW_MS);
+  const recent = (t: { updated_at: string }) => now - Date.parse(t.updated_at) < WORKER_ACTIVE_WINDOW_MS;
+  return (
+    repo.listTasks({ status: "in_progress" }).some(recent) ||
+    repo.listTasks({ status: "needs_input" }).some(recent)
+  );
 }
 
 // Bob Control MCP server. Bob connects and gets tools to pull, claim,
@@ -132,7 +142,12 @@ server.registerTool(
   async ({ id }) => {
     const task = repo.getTask(id);
     if (!task) return fail(`Task ${id} not found`);
-    return json({ ...task, notes: repo.getNotes(id) });
+    return json({
+      ...task,
+      notes: repo.getNotes(id),
+      // Surface an open human-input question so any board client can read/answer it.
+      pending_question: repo.getOpenQuestion(id),
+    });
   },
 );
 
@@ -276,6 +291,95 @@ server.registerTool(
         ? "implementation with evidence → done"
         : "implementation without evidence → analysis_done (record evidence to reach done)";
     return json({ ...task, gate });
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Human-input round-trip (ask on the board, answer through the board)
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "ask_question",
+  {
+    title: "Ask a Question (needs human input)",
+    description:
+      "Raise a question for a human when you lack a value you need — NEVER guess or fabricate. " +
+      "Parks the task as 'needs_input' and writes the question to the board (visible via get_task " +
+      "and board_report). Returns a question_id; then call await_answer to wait for the reply.",
+    inputSchema: {
+      task_id: z.number().int(),
+      text: z.string().min(1).describe("The question to ask the human"),
+      options: z.array(z.string()).optional().describe("Optional multiple-choice answers"),
+      timeout_ms: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("How long to wait before the question times out and the task parks blocked (default 30m)"),
+    },
+  },
+  async ({ task_id, text, options, timeout_ms }) => {
+    const q = repo.askQuestion(task_id, text, options, timeout_ms);
+    if (!q) return fail(`Task ${task_id} not found`);
+    return json({ question_id: q.question_id, task_id, status: q.status, deadline_at: q.deadline_at });
+  },
+);
+
+server.registerTool(
+  "answer_task_question",
+  {
+    title: "Answer a Task's Question",
+    description:
+      "Answer a question a worker raised (see needs_input tasks / board_report). Matched by " +
+      "question_id so a stale answer can't apply to a new question. Records the answer and resumes " +
+      "the waiting worker (task returns to in_progress).",
+    inputSchema: {
+      task_id: z.number().int(),
+      question_id: z.string().describe("The question_id from get_task.pending_question / board_report"),
+      answer: z.string().min(1),
+    },
+  },
+  async ({ task_id, question_id, answer }) => {
+    const res = repo.answerQuestion(task_id, question_id, answer);
+    if (!res.ok) return fail(res.error);
+    return json({ task_id, question_id, recorded: true, alreadyAnswered: res.alreadyAnswered });
+  },
+);
+
+server.registerTool(
+  "await_answer",
+  {
+    title: "Await an Answer (worker blocks here)",
+    description:
+      "Block until the question is answered, or report back so you can call again. Returns " +
+      "{status:'answered', answer} when answered, {status:'timed_out'} once past the deadline " +
+      "(the task is then parked blocked — do NOT proceed or guess), or {status:'waiting'} after " +
+      "the poll window (call await_answer again). The worker's wait loop after ask_question.",
+    inputSchema: {
+      task_id: z.number().int(),
+      question_id: z.string(),
+      wait_ms: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(`Per-call poll window (default ${AWAIT_CHUNK_DEFAULT_MS}ms, capped ${AWAIT_CHUNK_MAX_MS}ms)`),
+    },
+  },
+  async ({ task_id, question_id, wait_ms }) => {
+    const window = Math.min(wait_ms ?? AWAIT_CHUNK_DEFAULT_MS, AWAIT_CHUNK_MAX_MS);
+    const deadline = Date.now() + window;
+    // Poll the shared DB: the answer arrives from ANOTHER client's answer_task_question.
+    for (;;) {
+      const st = repo.questionState(question_id);
+      if (st.status === "unknown") return fail(`no question '${question_id}'`);
+      if (st.status === "answered") return json({ status: "answered", answer: st.answer ?? "" });
+      if (st.status === "timed_out") {
+        return json({ status: "timed_out", note: "question timed out — task parked blocked; do not fabricate an answer" });
+      }
+      if (Date.now() >= deadline) return json({ status: "waiting", note: "no answer yet — call await_answer again" });
+      await sleep(AWAIT_POLL_INTERVAL_MS);
+    }
   },
 );
 
