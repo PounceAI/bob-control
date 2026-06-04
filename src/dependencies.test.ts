@@ -1,7 +1,19 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { unlinkSync } from "node:fs";
-import { getDb, createTask, getTask, setDependencies, updateStatus, listTasks, blockingDependencies } from "./db.js";
+import {
+  getDb,
+  createTask,
+  getTask,
+  setDependencies,
+  updateStatus,
+  listTasks,
+  blockingDependencies,
+  nextTask,
+  claimTask,
+  claimBlockReason,
+  setBoardArmed,
+} from "./db.js";
 
 const TEST_DB = "./test-deps.db";
 
@@ -249,6 +261,34 @@ describe("Task Dependencies", () => {
       updateStatus(dep.id, st);
       assert.match(blockingDependencies(getTask(task.id)!)!, new RegExp(`\\[${st}\\]`));
     }
+  });
+
+  it("nextTask skips a dependency-blocked task and returns it once the dep is satisfied", () => {
+    setBoardArmed(true);
+    const tag = "nexttask-dep"; // tag-scope so prior tests' pending tasks don't shadow this check
+    const a = createTask({ title: "dep root A", tags: [tag] });
+    // B is urgent: without dependency enforcement nextTask would hand it back first.
+    const b = createTask({ title: "dep child B (urgent)", priority: "urgent", depends_on: [a.id], tags: [tag] });
+
+    assert.equal(nextTask({ tag })?.id, a.id, "urgent-but-blocked B skipped; eligible A returned despite lower priority");
+
+    updateStatus(a.id, "done");
+    assert.equal(nextTask({ tag })?.id, b.id, "B becomes the next pull once A is done");
+  });
+
+  it("claimTask / claimBlockReason refuse a dependency-blocked task, then allow it once satisfied", () => {
+    setBoardArmed(true);
+    const a = createTask({ title: "claim dep root" });
+    const b = createTask({ title: "claim dep child", depends_on: [a.id] });
+
+    assert.match(claimBlockReason(b.id)!, /blocked on unfinished dependencies/i);
+    assert.equal(claimTask(b.id, "bob"), null, "claim refused while the dep is pending");
+    assert.equal(getTask(b.id)?.status, "pending", "left pending — not claimed out of order");
+
+    // analysis_done satisfies (analyze→implement must not deadlock), matching blockingDependencies.
+    updateStatus(a.id, "analysis_done");
+    assert.equal(claimBlockReason(b.id), null, "no longer blocked once the dep reaches analysis_done");
+    assert.equal(claimTask(b.id, "bob")?.status, "in_progress", "claimable once the dep is satisfied");
   });
 });
 
