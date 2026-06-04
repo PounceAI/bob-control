@@ -19,6 +19,8 @@ import { CLAIMABLE_STATUS, isCompleted, TASK_STATUSES } from "./types.js";
 
 /** Default time a board question waits for a human answer before the worker parks blocked. */
 const DEFAULT_QUESTION_TIMEOUT_MS = 30 * 60 * 1000;
+/** Upper bound so `now + timeoutMs` can't overflow the max Date (toISOString would throw). */
+const MAX_QUESTION_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 // Required lazily in getDb so the warning suppressor runs before node:sqlite loads.
 const requireModule = createRequire(import.meta.url);
@@ -796,10 +798,19 @@ export function askQuestion(
   options: string[] = [],
   timeoutMs: number = DEFAULT_QUESTION_TIMEOUT_MS,
 ): TaskQuestion | null {
-  if (!getTask(taskId)) return null;
+  const task = getTask(taskId);
+  if (!task) return null;
+  // Only a task actively being worked can raise a question — prevents a stale/duplicate ask
+  // from resurrecting a finished/unclaimed task into needs_input. (needs_input allows a re-ask.)
+  if (task.status !== "in_progress" && task.status !== "needs_input") return null;
+  // One open question per task: supersede any prior open one so the answer/timeout correlation
+  // by question_id is unambiguous (getOpenQuestion can't shadow a second open row).
+  getDb()
+    .prepare("UPDATE task_questions SET status = 'timed_out' WHERE task_id = ? AND status = 'open'")
+    .run(taskId);
   const now = Date.now();
   const asked = nowIso();
-  const deadline = new Date(now + timeoutMs).toISOString();
+  const deadline = new Date(now + Math.min(timeoutMs, MAX_QUESTION_TIMEOUT_MS)).toISOString();
   const id = randomUUID();
   getDb()
     .prepare(
@@ -820,10 +831,13 @@ export function getQuestion(questionId: string): TaskQuestion | null {
   return row ? rowToQuestion(row) : null;
 }
 
-/** The task's current open question (most recent), or null. Powers get_task. */
+/** The task's current open question, or null. (askQuestion keeps at most one open per task;
+ *  rowid breaks any asked_at tie deterministically.) Powers get_task. */
 export function getOpenQuestion(taskId: number): TaskQuestion | null {
   const row = getDb()
-    .prepare("SELECT * FROM task_questions WHERE task_id = ? AND status = 'open' ORDER BY asked_at DESC LIMIT 1")
+    .prepare(
+      "SELECT * FROM task_questions WHERE task_id = ? AND status = 'open' ORDER BY asked_at DESC, rowid DESC LIMIT 1",
+    )
     .get(taskId) as Record<string, unknown> | undefined;
   return row ? rowToQuestion(row) : null;
 }
@@ -852,46 +866,80 @@ export function answerQuestion(taskId: number, questionId: string, answer: strin
   if (!q || q.task_id !== taskId) {
     return { ok: false, error: `no question '${questionId}' on task #${taskId}` };
   }
-  if (q.status === "answered") {
-    return { ok: true, alreadyAnswered: true }; // idempotent
-  }
+  if (q.status === "answered") return { ok: true, alreadyAnswered: true }; // idempotent
   if (q.status === "timed_out") {
     return { ok: false, error: `question '${questionId}' timed out; re-ask before answering` };
   }
-  const now = nowIso();
-  getDb()
-    .prepare("UPDATE task_questions SET status = 'answered', answer = ?, answered_at = ? WHERE question_id = ?")
-    .run(answer, now, questionId);
-  // Resume the worker only if the task is still parked on this question.
+  // Conditional on still-open so a concurrent timeout (another process) can't be clobbered:
+  // exactly one of answer/timeout wins (SQLite serializes the writes). changes===0 => lost.
+  const info = getDb()
+    .prepare(
+      "UPDATE task_questions SET status = 'answered', answer = ?, answered_at = ? WHERE question_id = ? AND status = 'open'",
+    )
+    .run(answer, nowIso(), questionId);
+  if (Number(info.changes) === 0) {
+    const fresh = getQuestion(questionId);
+    if (fresh?.status === "answered") return { ok: true, alreadyAnswered: true };
+    return { ok: false, error: `question '${questionId}' is now '${fresh?.status ?? "gone"}' — cannot answer` };
+  }
+  // Resume the waiting worker (only if still parked on this question).
   if (getTask(taskId)?.status === "needs_input") updateStatus(taskId, "in_progress");
   addNote(taskId, `✅ Answered [${questionId}]: ${answer}`, "human");
   return { ok: true, alreadyAnswered: false };
 }
 
 /**
- * Poll state for await_answer. If the question is open but past its deadline, time it out
- * and park the task `blocked` (fail-safe: a worker must never fabricate an answer). `nowMs`
- * is injectable for tests.
+ * Poll state for await_answer. Reads only the columns the poll needs (no options parse on the
+ * hot path). If the question is open but past its deadline, time it out and park the task
+ * `blocked` (fail-safe: never fabricate an answer) — conditional on still-open so it can't
+ * clobber a concurrent answer. `nowMs` injectable for tests.
  */
 export function questionState(
   questionId: string,
   nowMs: number = Date.now(),
 ): { status: QuestionState | "unknown"; answer?: string } {
-  const q = getQuestion(questionId);
-  if (!q) return { status: "unknown" };
-  if (q.status === "open" && nowMs > Date.parse(q.deadline_at)) {
-    getDb()
-      .prepare("UPDATE task_questions SET status = 'timed_out' WHERE question_id = ?")
+  const row = getDb()
+    .prepare("SELECT task_id, status, answer, deadline_at FROM task_questions WHERE question_id = ?")
+    .get(questionId) as { task_id: number; status: QuestionState; answer: string | null; deadline_at: string } | undefined;
+  if (!row) return { status: "unknown" };
+  if (row.status === "answered") return { status: "answered", answer: row.answer ?? "" };
+  if (row.status === "open" && nowMs > Date.parse(row.deadline_at)) {
+    const info = getDb()
+      .prepare("UPDATE task_questions SET status = 'timed_out' WHERE question_id = ? AND status = 'open'")
       .run(questionId);
-    if (getTask(q.task_id)?.status === "needs_input") updateStatus(q.task_id, "blocked");
+    if (Number(info.changes) === 0) {
+      // Lost the race to an answer — report the real outcome, don't park blocked.
+      const fresh = getQuestion(questionId);
+      return fresh?.status === "answered"
+        ? { status: "answered", answer: fresh.answer ?? "" }
+        : { status: (fresh?.status as QuestionState) ?? "unknown" };
+    }
+    if (getTask(Number(row.task_id))?.status === "needs_input") updateStatus(Number(row.task_id), "blocked");
     addNote(
-      q.task_id,
+      Number(row.task_id),
       `⏰ Question [${questionId}] unanswered past timeout — parked blocked (no answer fabricated).`,
       "worker",
     );
     return { status: "timed_out" };
   }
-  return q.status === "answered" ? { status: "answered", answer: q.answer ?? "" } : { status: q.status };
+  return { status: row.status };
+}
+
+/**
+ * Sweep: time out every open question past its deadline (parking its task blocked), so the
+ * fail-safe fires even if the worker that asked never polls again (it died / stopped looping).
+ * Call from board activity (board_status / get_next_task) and the worker loop. Returns the count.
+ */
+export function expireOverdueQuestions(nowMs: number = Date.now()): number {
+  const cutoff = new Date(nowMs).toISOString();
+  const overdue = getDb()
+    .prepare("SELECT question_id FROM task_questions WHERE status = 'open' AND deadline_at < ?")
+    .all(cutoff) as { question_id: string }[];
+  let n = 0;
+  for (const r of overdue) {
+    if (questionState(r.question_id, nowMs).status === "timed_out") n++;
+  }
+  return n;
 }
 
 /** Increment the retry_attempts counter for a task. Returns the updated task. */

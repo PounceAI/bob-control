@@ -44,6 +44,8 @@ export interface ReportOptions {
   stalledMs?: number;
   /** Cap the number of tasks shown per TERMINAL group (done, cancelled). */
   limit?: number;
+  /** Open question per task id, so needs_input rows show the actual question (not the last note). */
+  openQuestions?: Map<number, { text: string; options: string[] }>;
 }
 
 /**
@@ -156,7 +158,7 @@ export function buildReport(
       boardAudit.answererAnswer += audit.answererAnswer;
       boardAudit.answererEscalate += audit.answererEscalate;
       boardAudit.humanAnswer += audit.humanAnswer;
-      out.push(taskLine(t, notes, now, stalledMs, audit));
+      out.push(taskLine(t, notes, now, stalledMs, audit, opts.openQuestions?.get(t.id)));
     }
     if (cap) out.push(`_… and ${inGroup.length - cap} more_`);
     out.push("");
@@ -183,14 +185,29 @@ export function buildReport(
   return out.join("\n");
 }
 
-function taskLine(t: Task, notes: TaskNote[], now: number, stalledMs: number, audit?: AuditCounts): string {
+function taskLine(
+  t: Task,
+  notes: TaskNote[],
+  now: number,
+  stalledMs: number,
+  audit?: AuditCounts,
+  openQuestion?: { text: string; options: string[] },
+): string {
   const meta = [t.priority, t.assignee && `@${t.assignee}`, t.mode && `{${t.mode}}`].filter(Boolean).join(" ");
   const idleMs = now - Date.parse(t.updated_at);
   const stalled = t.status === "in_progress" && idleMs >= stalledMs ? " ⚠ stalled" : "";
-  const last = notes.at(-1);
-  const note = last ? ` — ${last.author ? `${last.author}: ` : ""}${oneLine(last.note)}` : "";
+  // For an awaiting-answer task show the actual open question (authoritative) rather than
+  // whatever note happens to be last; fall back to the last note otherwise.
+  let tail: string;
+  if (openQuestion) {
+    const opts = openQuestion.options.length ? ` [${openQuestion.options.join(" | ")}]` : "";
+    tail = ` — ❓ ${oneLine(openQuestion.text)}${opts}`;
+  } else {
+    const last = notes.at(-1);
+    tail = last ? ` — ${last.author ? `${last.author}: ` : ""}${oneLine(last.note)}` : "";
+  }
   const auditSummary = audit ? formatAuditSummary(audit) : "";
-  return `- **#${t.id}** ${t.title} (${meta}) · age ${humanize(now - Date.parse(t.created_at))} · idle ${humanize(idleMs)}${stalled}${auditSummary}${note}`;
+  return `- **#${t.id}** ${t.title} (${meta}) · age ${humanize(now - Date.parse(t.created_at))} · idle ${humanize(idleMs)}${stalled}${auditSummary}${tail}`;
 }
 
 /** Coarse duration: seconds, minutes, hours, or days. Clamps negatives/NaN to 0. */

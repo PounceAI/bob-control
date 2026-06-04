@@ -235,9 +235,10 @@ function main(): void {
       if (!status || !TASK_STATUSES.includes(status as never)) {
         die(`status must be one of ${TASK_STATUSES.join(", ")}`);
       }
-      // 'staged' isn't an arbitrary transition (would resurrect the pull race) — use create/release.
-      if (status === "staged") {
-        die("cannot move a task to 'staged' via status; create with --staged, or use 'release' to unstage");
+      // 'staged'/'needs_input' aren't arbitrary transitions: staged would resurrect the pull
+      // race; needs_input must carry a real question (only ask_question sets it).
+      if (status === "staged" || status === "needs_input") {
+        die(`cannot move a task to '${status}' via status; ${status === "staged" ? "create with --staged / use 'release'" : "questions are raised by a worker, not set here"}`);
       }
       if (!repo.getTask(id)) die(`task ${id} not found`);
       const task = repo.updateStatus(id, status as Task["status"]);
@@ -334,7 +335,9 @@ function main(): void {
     case "answer": {
       const id = requireId(positional);
       const questionId = positional[1];
-      const text = positional[2];
+      // Join the rest so a multi-word answer isn't truncated to its first token (an answer
+      // is almost always multi-word, and a corrupted answer is exactly what we must avoid).
+      const text = positional.slice(2).join(" ");
       if (!questionId || !text) die("answer requires <task_id> <question_id> <text>");
       const res = repo.answerQuestion(id, questionId, text);
       if (!res.ok) die(res.error);
@@ -432,9 +435,13 @@ function main(): void {
       }
       const tasks = repo.listTasks({});
       const notes = new Map(tasks.map((t) => [t.id, repo.getNotes(t.id)]));
+      const openQuestions = new Map(
+        repo.listOpenQuestions().map((q) => [q.task_id, { text: q.text, options: q.options }]),
+      );
       const md = buildReport(tasks, notes, Date.now(), {
         status: status as TaskStatus | undefined,
         limit,
+        openQuestions,
       });
       const out = str(flags.out);
       if (out) {

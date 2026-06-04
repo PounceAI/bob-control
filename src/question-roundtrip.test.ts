@@ -6,14 +6,18 @@ import { join } from "node:path";
 import {
   getDb,
   createTask,
+  claimTask,
+  updateStatus,
   getTask,
   getNotes,
+  addNote,
   askQuestion,
   getOpenQuestion,
   listOpenQuestions,
   answerQuestion,
   getQuestion,
   questionState,
+  expireOverdueQuestions,
 } from "./db.js";
 import { buildReport } from "./report.js";
 
@@ -28,6 +32,13 @@ function clean(): void {
   }
 }
 
+/** A task in the state a worker raises a question from: claimed → in_progress. */
+function workedTask(title: string): number {
+  const t = createTask({ title });
+  claimTask(t.id, "worker");
+  return t.id;
+}
+
 describe("board question round-trip (needs_input)", () => {
   before(() => {
     process.env.BOB_TASKS_DB = DB;
@@ -37,89 +48,131 @@ describe("board question round-trip (needs_input)", () => {
   after(clean);
 
   it("ask_question parks the task needs_input and exposes the question (text + options + id)", () => {
-    const t = createTask({ title: "scale the service" });
-    const q = askQuestion(t.id, "Which gunicorn worker count?", ["2", "4", "8"]);
+    const id = workedTask("scale the service");
+    const q = askQuestion(id, "Which gunicorn worker count?", ["2", "4", "8"]);
     assert.ok(q);
-    assert.equal(getTask(t.id)?.status, "needs_input");
+    assert.equal(getTask(id)?.status, "needs_input");
 
-    const open = getOpenQuestion(t.id);
+    const open = getOpenQuestion(id);
     assert.equal(open?.question_id, q!.question_id);
     assert.equal(open?.text, "Which gunicorn worker count?");
     assert.deepEqual(open?.options, ["2", "4", "8"]);
-    // The question text is on the board as a note, too.
-    assert.ok(getNotes(t.id).some((n) => /Which gunicorn worker count/.test(n.note)));
+    assert.ok(getNotes(id).some((n) => /Which gunicorn worker count/.test(n.note)));
   });
 
-  it("board_report lists the task under '❓ Awaiting answer' with the question and a wait time", () => {
-    const t = createTask({ title: "needs a decision" });
-    askQuestion(t.id, "Deploy timeline?");
-    const task = getTask(t.id)!;
-    const notes = new Map([[t.id, getNotes(t.id)]]);
-    const md = buildReport([task], notes, Date.parse(task.updated_at) + 5000);
+  it("askQuestion REQUIRES a task being worked (rejects pending/terminal)", () => {
+    const pending = createTask({ title: "not claimed" });
+    assert.equal(askQuestion(pending.id, "q?"), null); // pending → refused
+    const fin = createTask({ title: "finished" });
+    updateStatus(fin.id, "done");
+    assert.equal(askQuestion(fin.id, "q?"), null); // done → refused
+  });
+
+  it("board_report shows the OPEN QUESTION (not just the last note) with wait time", () => {
+    const id = workedTask("needs a decision");
+    askQuestion(id, "Deploy timeline?");
+    addNote(id, "checking with ops", "claude"); // a later note must NOT hide the question
+    const task = getTask(id)!;
+    const notes = new Map([[id, getNotes(id)]]);
+    const open = getOpenQuestion(id)!;
+    const openQuestions = new Map([[id, { text: open.text, options: open.options }]]);
+    const md = buildReport([task], notes, Date.parse(task.updated_at) + 5000, { openQuestions });
     assert.match(md, /Awaiting answer \(1\)/);
-    assert.match(md, /Deploy timeline\?/);
-    assert.match(md, /idle 5s/); // wait time surfaced
+    assert.match(md, /Deploy timeline\?/); // the question, surfaced
+    assert.doesNotMatch(md, /checking with ops/); // the later note did NOT shadow it
+    assert.match(md, /idle 5s/);
   });
 
   it("answer_task_question records the answer, matched by id, and resumes the worker (in_progress)", () => {
-    const t = createTask({ title: "ask then answer" });
-    const q = askQuestion(t.id, "max_connections / pool size?")!;
-    const res = answerQuestion(t.id, q.question_id, "pool=20 (from PG max_connections=70)");
+    const id = workedTask("ask then answer");
+    const q = askQuestion(id, "max_connections / pool size?")!;
+    const res = answerQuestion(id, q.question_id, "pool=20 (from PG max_connections=70)");
     assert.ok(res.ok);
-    assert.equal(getTask(t.id)?.status, "in_progress"); // worker resumes
+    assert.equal(getTask(id)?.status, "in_progress");
     assert.equal(getQuestion(q.question_id)?.status, "answered");
     assert.equal(getQuestion(q.question_id)?.answer, "pool=20 (from PG max_connections=70)");
-    assert.equal(getOpenQuestion(t.id), null); // no longer open
-    assert.ok(getNotes(t.id).some((n) => n.author === "human" && /Answered/.test(n.note)));
+    assert.equal(getOpenQuestion(id), null);
+    assert.ok(getNotes(id).some((n) => n.author === "human" && /Answered/.test(n.note)));
   });
 
-  it("await_answer's poll signal: state goes open → answered", () => {
-    const t = createTask({ title: "poll" });
-    const q = askQuestion(t.id, "go?")!;
+  it("await_answer poll signal: state goes open → answered", () => {
+    const id = workedTask("poll");
+    const q = askQuestion(id, "go?")!;
     assert.equal(questionState(q.question_id).status, "open");
-    answerQuestion(t.id, q.question_id, "go");
+    answerQuestion(id, q.question_id, "go");
     assert.deepEqual(questionState(q.question_id), { status: "answered", answer: "go" });
   });
 
   it("a mismatched / unknown question_id is rejected (stale answer can't apply)", () => {
-    const t = createTask({ title: "correlation" });
-    const q = askQuestion(t.id, "real question?")!;
-    assert.equal(answerQuestion(t.id, "not-the-id", "x").ok, false);
-    // right id but wrong task is rejected too
-    const other = createTask({ title: "other" });
-    assert.equal(answerQuestion(other.id, q.question_id, "x").ok, false);
-    // the real question is still open and unanswered
-    assert.equal(getOpenQuestion(t.id)?.question_id, q.question_id);
+    const id = workedTask("correlation");
+    const q = askQuestion(id, "real question?")!;
+    assert.equal(answerQuestion(id, "not-the-id", "x").ok, false);
+    const other = workedTask("other");
+    assert.equal(answerQuestion(other, q.question_id, "x").ok, false); // right id, wrong task
+    assert.equal(getOpenQuestion(id)?.question_id, q.question_id); // still open
   });
 
-  it("answering twice is idempotent (no error, no double-apply)", () => {
-    const t = createTask({ title: "idempotent" });
-    const q = askQuestion(t.id, "once?")!;
-    assert.ok(answerQuestion(t.id, q.question_id, "first").ok);
-    const again = answerQuestion(t.id, q.question_id, "second");
-    assert.ok(again.ok);
-    assert.equal(getQuestion(q.question_id)?.answer, "first"); // first answer stands
+  it("answering twice is idempotent (first answer stands)", () => {
+    const id = workedTask("idempotent");
+    const q = askQuestion(id, "once?")!;
+    assert.ok(answerQuestion(id, q.question_id, "first").ok);
+    assert.ok(answerQuestion(id, q.question_id, "second").ok);
+    assert.equal(getQuestion(q.question_id)?.answer, "first");
   });
 
-  it("an unanswered question past its deadline times out and FAILS SAFE (task blocked, no answer)", () => {
-    const t = createTask({ title: "timeout" });
-    const q = askQuestion(t.id, "stakeholders?", [], 60_000)!;
-    // Poll with a clock past the deadline.
+  it("asking again SUPERSEDES the prior open question (one open per task)", () => {
+    const id = workedTask("supersede");
+    const q1 = askQuestion(id, "Q1?")!;
+    const q2 = askQuestion(id, "Q2?")!;
+    assert.notEqual(q1.question_id, q2.question_id);
+    assert.equal(getQuestion(q1.question_id)?.status, "timed_out"); // closed
+    assert.equal(getOpenQuestion(id)?.question_id, q2.question_id); // only Q2 open
+    assert.equal(listOpenQuestions().filter((q) => q.task_id === id).length, 1);
+  });
+
+  it("race: an ANSWER beats a late timeout poll (answer wins, task not blocked)", () => {
+    const id = workedTask("answer-wins");
+    const q = askQuestion(id, "race?", [], 60_000)!;
+    answerQuestion(id, q.question_id, "done"); // answered while still open
+    // A poll past the deadline must NOT overwrite the recorded answer.
+    const st = questionState(q.question_id, Date.parse(q.deadline_at) + 1);
+    assert.deepEqual(st, { status: "answered", answer: "done" });
+    assert.equal(getTask(id)?.status, "in_progress"); // not blocked
+  });
+
+  it("race: a TIMEOUT closes the question; a late answer is then rejected (fail-safe)", () => {
+    const id = workedTask("timeout-wins");
+    const q = askQuestion(id, "stakeholders?", [], 60_000)!;
     const st = questionState(q.question_id, Date.parse(q.deadline_at) + 1);
     assert.equal(st.status, "timed_out");
-    assert.equal(getTask(t.id)?.status, "blocked"); // parked, NOT done
+    assert.equal(getTask(id)?.status, "blocked"); // parked, NOT done
     assert.equal(getQuestion(q.question_id)?.answer, null); // never fabricated
-    assert.ok(getNotes(t.id).some((n) => /unanswered past timeout/i.test(n.note)));
-    // A late answer to a timed-out question is rejected.
-    assert.equal(answerQuestion(t.id, q.question_id, "too late").ok, false);
+    assert.equal(answerQuestion(id, q.question_id, "too late").ok, false);
+    assert.ok(getNotes(id).some((n) => /unanswered past timeout/i.test(n.note)));
+  });
+
+  it("the sweeper expires overdue questions even if nobody polls them", () => {
+    const id = workedTask("sweep");
+    const q = askQuestion(id, "deadline?", [], 1)!; // ~1ms deadline
+    const n = expireOverdueQuestions(Date.parse(q.deadline_at) + 1000);
+    assert.ok(n >= 1);
+    assert.equal(getQuestion(q.question_id)?.status, "timed_out");
+    assert.equal(getTask(id)?.status, "blocked"); // fail-safe fired without any await_answer poll
+  });
+
+  it("a huge timeout_ms is clamped, not allowed to overflow the Date (no throw)", () => {
+    const id = workedTask("clamp");
+    const q = askQuestion(id, "x", [], Number.MAX_SAFE_INTEGER);
+    assert.ok(q);
+    assert.ok(Number.isFinite(Date.parse(q!.deadline_at))); // valid ISO, not Invalid Date
   });
 
   it("listOpenQuestions surfaces only still-open questions", () => {
     const before = listOpenQuestions().length;
-    const t = createTask({ title: "list" });
-    const q = askQuestion(t.id, "open one?")!;
+    const id = workedTask("list");
+    const q = askQuestion(id, "open one?")!;
     assert.equal(listOpenQuestions().length, before + 1);
-    answerQuestion(t.id, q.question_id, "done");
+    answerQuestion(id, q.question_id, "done");
     assert.equal(listOpenQuestions().length, before);
   });
 });

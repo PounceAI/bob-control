@@ -65,6 +65,9 @@ Repeat until the queue is empty, `--max` is hit, or only unsuitable tasks remain
      `status:"waiting"`, just call it again.
    - If it returns `status:"timed_out"`, **STOP**: the task is already parked `blocked` (the
      question went unanswered). Report it; never invent an answer to keep going.
+   - If `await_answer` instead **errors** (e.g. "no question …" — the task or question was
+     deleted out from under you) or returns anything you don't recognize, also **STOP** that
+     task and move on — do not retry-loop the failing call, and never fabricate an answer.
    Inventing a value (e.g. guessing a DB pool size or a "safe" worker count) is exactly the
    failure this prevents — when in doubt, ask the board and wait.
 8. **Finish:**
