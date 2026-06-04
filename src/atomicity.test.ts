@@ -1,6 +1,8 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   createTask,
   getTask,
@@ -9,12 +11,13 @@ import {
   setBoardArmed,
   claimTask,
   incrementRetryAttempts,
+  reclaimStaleInProgress,
   askQuestion,
   getOpenQuestion,
   getQuestion,
 } from "./db.js";
 
-const TEST_DB = "./test-atomicity.db";
+const TEST_DB = join(tmpdir(), "bob-test-atomicity.db");
 const wipe = () => {
   for (const f of [TEST_DB, `${TEST_DB}-wal`, `${TEST_DB}-shm`, `${TEST_DB}-journal`]) {
     try {
@@ -72,6 +75,20 @@ describe("board atomicity & transactions", () => {
     assert.deepEqual(getTask(a.id)?.depends_on, []);
     // A genuinely acyclic edge (A -> C) still commits.
     assert.deepEqual(setDependencies(a.id, [c.id])?.depends_on, [c.id]);
+  });
+
+  it("reclaimStaleInProgress re-queues only this assignee's stranded in_progress tasks", () => {
+    const a = createTask({ title: "stranded" });
+    claimTask(a.id, "bob"); // in_progress @bob
+    const b = createTask({ title: "other-owner" });
+    claimTask(b.id, "alice"); // in_progress @alice
+    const c = createTask({ title: "still-pending" }); // pending, never claimed
+
+    const n = reclaimStaleInProgress("bob");
+    assert.equal(n, 1, "only bob's in_progress task is reclaimed");
+    assert.equal(getTask(a.id)?.status, "pending", "stranded task re-queued");
+    assert.equal(getTask(b.id)?.status, "in_progress", "another assignee's task is untouched");
+    assert.equal(getTask(c.id)?.status, "pending", "an already-pending task is untouched");
   });
 
   it("askQuestion is atomic: supersede + insert + park needs_input happen together", () => {
