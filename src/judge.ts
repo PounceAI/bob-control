@@ -3,6 +3,7 @@
 // Designed to be testable: the LLM call is injected, and the verdict parsing is pure.
 import { callModel, type LlmDeps } from "./llm.js";
 import { spawn } from "node:child_process";
+import { resolve as resolvePath } from "node:path";
 
 export interface JudgeVerdict {
   pass: boolean;
@@ -228,6 +229,45 @@ export async function captureGitDiff(
   } finally {
     if (newFiles.length) await runGit(["reset", "--quiet", "--", ...newFiles], cwd);
   }
+}
+
+export interface ChangedFiles {
+  /** Absolute paths of all files this task created or modified (created ∪ modified). */
+  files: string[];
+  /** Absolute paths of files the task CREATED (new untracked) — safe to remove on cleanup. */
+  created: string[];
+  /** Absolute paths of pre-existing tracked files the task MODIFIED — NOT safe to delete. */
+  modified: string[];
+  /** Human-readable `git diff --stat` summary (tracked changes). */
+  diffstat: string;
+  /** Total distinct files changed (created + modified). */
+  count: number;
+  /** False when cwd is not a git work tree — so callers can avoid mismarking work as unbuilt. */
+  gitAvailable: boolean;
+}
+
+/**
+ * Files this task changed vs a pre-task baseline, split CREATED (new untracked, minus prior)
+ * vs MODIFIED (tracked changes vs `ref`), as absolute paths. gitAvailable:false when cwd isn't
+ * a git work tree, so callers don't read "no changes" as "did no work".
+ */
+export async function captureChangedFiles(cwd: string, baseline?: GitBaseline): Promise<ChangedFiles> {
+  const empty: ChangedFiles = { files: [], created: [], modified: [], diffstat: "", count: 0, gitAvailable: false };
+  if ((await runGit(["rev-parse", "--is-inside-work-tree"], cwd)).trim() !== "true") return empty;
+
+  const ref = baseline?.ref ?? "HEAD";
+  const prior = new Set(baseline?.untracked ?? []);
+  const [trackedRaw, untrackedRaw, diffstatRaw] = await Promise.all([
+    runGit(["diff", "--name-only", ref], cwd),
+    runGit(["ls-files", "--others", "--exclude-standard"], cwd),
+    runGit(["diff", "--stat", ref], cwd, 2000),
+  ]);
+  const modified = splitLines(trackedRaw).map((f) => resolvePath(cwd, f));
+  const created = splitLines(untrackedRaw)
+    .filter((f) => !prior.has(f))
+    .map((f) => resolvePath(cwd, f));
+  const files = Array.from(new Set([...created, ...modified]));
+  return { files, created, modified, diffstat: diffstatRaw.trim(), count: files.length, gitAvailable: true };
 }
 
 /**

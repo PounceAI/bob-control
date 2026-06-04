@@ -15,12 +15,22 @@ interface AuditCounts {
 }
 
 // Status groups in display order: most actionable first.
-const GROUP_ORDER: TaskStatus[] = ["in_progress", "blocked", "pending", "done", "cancelled"];
+const GROUP_ORDER: TaskStatus[] = [
+  "in_progress",
+  "blocked",
+  "pending",
+  "staged",
+  "analysis_done",
+  "done",
+  "cancelled",
+];
 
 const LABELS: Record<TaskStatus, string> = {
+  staged: "Staged (not released)",
   pending: "Pending",
   in_progress: "In progress",
   blocked: "Blocked",
+  analysis_done: "Analysis done (no verified code)",
   done: "Done",
   cancelled: "Cancelled",
 };
@@ -131,6 +141,7 @@ export function buildReport(
     }
     // Cap only the terminal groups (done, cancelled) so a long history doesn't bury
     // active work; in_progress/blocked/pending are never truncated.
+    // Cap only true history (done/cancelled); analysis_done is actionable backlog, don't truncate it.
     const isTerminal = status === "done" || status === "cancelled";
     const cap = isTerminal && opts.limit && inGroup.length > opts.limit ? opts.limit : undefined;
     const shown = cap ? inGroup.slice(0, cap) : inGroup;

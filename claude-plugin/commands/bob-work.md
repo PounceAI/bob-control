@@ -20,9 +20,11 @@ can actually do here. Claiming a task marks it `in_progress`, and Bob only pulls
 
 Repeat until the queue is empty, `--max` is hit, or only unsuitable tasks remain:
 
-1. **Survey.** `list_tasks` with `status: "pending"` (and the tag filter if given). The list
-   is already in pull order (priority, then oldest). Never touch tasks that are already
-   `in_progress` — someone (maybe Bob) owns them.
+1. **Survey.** First call `board_status`. **If `armed` is false, STOP** — dispatch is paused
+   (a curator is triaging); report that the board is disarmed and do nothing. Otherwise
+   `list_tasks` with `status: "pending"` (and the tag filter if given). The list is already
+   in pull order (priority, then oldest). `staged` tasks are deliberately NOT pullable and
+   won't appear; never try to claim one. Never touch `in_progress` tasks — someone owns them.
 2. **Pick the highest-priority task you can actually do here.** Skip — do **not** claim:
    - **Bob's domain:** IBM i / RPG work — tags like `rpg`, `rpgle`, `cl`, `cobol`, `db2`,
      `ibm-i`, `iseries`; or descriptions mentioning RPG, source members, `*LIBL`, DDS,
@@ -38,17 +40,26 @@ Repeat until the queue is empty, `--max` is hit, or only unsuitable tasks remain
    "Claimed by Claude Code; starting."
 5. **Resolve the mode and respect its risk** (same rules as `/bob-route`): explicit `mode`
    › a tag naming a mode › keyword router › `code`. Then:
-   - **`ask` (read-only):** investigate and report only. Do **not** edit, write, or run
-     mutating commands. Your `result` is the findings.
+   - **`ask` / `plan` / `review` (read-only):** investigate and report only. Do **not** edit,
+     write, or run mutating commands. Your `result` is the findings. These finish as
+     `analysis_done` (the board's distinct "analysis, not built/verified" state) — that is
+     the correct, honest outcome, NOT a failure.
    - **`code` / `orchestrator`:** implement the change — edit, build, run, verify.
    - **`advanced`:** proceed only if you have the capability it needs. If you don't, there
      is no unclaim action, so set `update_task_status` → `blocked` with a note saying what's missing.
 6. **Do the work**, leaving a brief `add_task_note` (`author: "claude"`) at meaningful
-   milestones — not after every step.
+   milestones — not after every step. **Output discipline:** put analysis, plans, and design
+   notes in the task `result`/notes — do **not** scatter `*_PLAN.md` / `*_DESIGN.md` files at
+   arbitrary repo paths. If you genuinely need scratch files, keep them under a gitignored
+   scratch dir, and `record_artifact` each one you write.
 7. **Finish:**
-   - **Success →** `submit_result` with `id` and a concise `result`: what you changed (name
-     the files), how you verified it, and anything the reviewer should know. This marks it
-     done.
+   - **Implementation success →** `submit_result` with a concise `result` AND **`evidence`**
+     (the `files` you changed, and a `test`/`commit` if you have one). Evidence is what lets
+     an implementation task reach `done`; without it the task lands in `analysis_done`
+     ("you described it but didn't build/verify it"). Don't claim done for a task you only
+     analyzed — that's the false-done the gate exists to prevent.
+   - **Analysis success (read-only modes) →** `submit_result` with your findings as `result`
+     (no evidence needed); it completes as `analysis_done`.
    - **Can't complete** (missing info, environment can't do it, repeated errors, or it
      would require a destructive/irreversible action you shouldn't take unattended) →
      `update_task_status` → `blocked` **and** `add_task_note` (`author: "claude"`) saying

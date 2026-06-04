@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import "./suppress-warnings.js";
 import * as repo from "./db.js";
-import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, MODE_PROFILES, classifierReachable, policyHasGrayZone, producesReviewFindings, judgeAppliesToMode, type Risk } from "./modes.js";
+import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, MODE_PROFILES, classifierReachable, policyHasGrayZone, producesReviewFindings, judgeAppliesToMode, isReadOnlyMode, type Risk } from "./modes.js";
 import { createCommandGate } from "./command-gate.js";
 import { createFollowupGate } from "./followup-gate.js";
 import { handleStdinAnswer } from "./worker-answer.js";
@@ -11,8 +11,9 @@ import { createPollLoop, defaultVerify, defaultCaptureSnapshot, type VerifyResul
 import { ExternalActivity } from "./defer.js";
 import { notify } from "./notify.js";
 import { shouldRetry, executeRetry } from "./retry-policy.js";
-import { judgeCompletion, captureGitDiff, captureGitBaseline, type JudgeContext, type GitBaseline } from "./judge.js";
+import { judgeCompletion, captureGitDiff, captureGitBaseline, captureChangedFiles, type JudgeContext, type GitBaseline } from "./judge.js";
 import type { Task } from "./types.js";
+import { isCompleted } from "./types.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -173,19 +174,9 @@ function parseOpts(argv: string[]): Opts {
  * Returns null if satisfied, or a description of blocking dependencies if not.
  */
 function checkDependencies(task: Task): string | null {
-  if (!task.depends_on.length) return null;
-
-  const blocking: string[] = [];
-  for (const depId of task.depends_on) {
-    const dep = repo.getTask(depId);
-    if (!dep) {
-      blocking.push(`#${depId}[missing]`);
-    } else if (dep.status !== "done") {
-      blocking.push(`#${depId}[${dep.status}]`);
-    }
-  }
-
-  return blocking.length ? blocking.join(", ") : null;
+  // Delegate to the shared classifier so 'analysis_done' counts as satisfied (an analysis
+  // prerequisite legitimately finishes there; strict 'done' would deadlock analyze→implement).
+  return repo.blockingDependencies(task);
 }
 
 /**
@@ -433,11 +424,12 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     ? await defaultCaptureSnapshot(process.cwd())
     : undefined;
 
-  // Snapshot the pre-task tree so the judge sees only THIS task's changes (not
-  // pre-existing dirt). Captured before dispatch; read by the verifier after.
-  // Only when the judge will actually run (judgeOn), so no-diff modes don't pay
-  // for an unused `git stash create`.
-  if (judgeOn) judgeBaseline = await captureGitBaseline(process.cwd());
+  // One pre-task git snapshot, reused by the judge (when on) AND by the completion
+  // gate to compute execution evidence / record file artifacts. The judge needs it
+  // only for code modes, but completion evidence + delete-safety want it for every
+  // task (a read-only task that wrote a file must still be recorded — incident B).
+  const evidenceBaseline = await captureGitBaseline(process.cwd());
+  if (judgeOn) judgeBaseline = evidenceBaseline;
 
   // Initial dispatch.
   const initialRes = await doDispatch(buildPrompt(task));
@@ -473,7 +465,25 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   const captured = res.result.trim();
   if (!verifyGaveUp && (res.status === "completed" || captured)) {
     const result = captured || "(completed; no completion_result text captured)";
-    repo.setResult(task.id, result, true);
+
+    // Record what changed, then let completeTask pick the terminal status. created/modified
+    // count as evidence; read-only writes are tagged 'side-effect' so they don't (and aren't
+    // cleanup-removable). Artifacts are recorded for every completion so delete can warn.
+    const ranReadOnly = isReadOnlyMode(mode);
+    const changed = await captureChangedFiles(process.cwd(), evidenceBaseline);
+    for (const f of changed.created) {
+      repo.recordArtifact(task.id, { kind: "file", path: f, detail: ranReadOnly ? "side-effect" : "created" });
+    }
+    for (const f of changed.modified) {
+      repo.recordArtifact(task.id, { kind: "file", path: f, detail: ranReadOnly ? "side-effect" : "modified" });
+    }
+    if (changed.diffstat) {
+      repo.addNote(task.id, `Changed ${changed.count} file(s) (evidence):\n${changed.diffstat}`, "worker");
+    }
+    // !gitAvailable → don't demote a real implementation just because we couldn't read the diff.
+    const completed = repo.completeTask(task.id, { result, ranReadOnly, evidenceReliable: changed.gitAvailable });
+    const finalStatus = completed?.status ?? "done";
+
     // Reset retry attempts on success so a future failure starts fresh.
     if (task.retry_attempts > 0) {
       repo.resetRetryAttempts(task.id);
@@ -482,9 +492,13 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
       repo.addNote(task.id, `Captured completion_result despite terminal '${res.status}' event.`, "worker");
     }
     const tail = res.status === "completed" ? "" : ` (Bob signalled '${res.status}' after completing)`;
-    console.log(`  ✓ done — result captured (${result.length} chars)${tail}`);
-    emit(opts, "taskDone", { id: task.id, title: task.title, chars: result.length });
-    if (opts.notify) notify(`Bob finished #${task.id}`, `${task.title} — ${result}`);
+    if (finalStatus === "done") {
+      console.log(`  ✓ done — ${changed.count} file(s) changed, result captured (${result.length} chars)${tail}`);
+    } else {
+      console.log(`  ◑ ${finalStatus} — analysis captured (${result.length} chars), no verified code change${tail}`);
+    }
+    emit(opts, "taskDone", { id: task.id, title: task.title, chars: result.length, status: finalStatus, filesChanged: changed.count });
+    if (opts.notify) notify(`Bob finished #${task.id} (${finalStatus})`, `${task.title} — ${result}`);
   } else if (verifyGaveUp) {
     repo.updateStatus(task.id, "blocked");
     repo.addNote(task.id, `Blocked: result never passed verification after ${opts.maxContinues} continue(s).`, "worker");
@@ -663,7 +677,31 @@ async function main(): Promise<void> {
   }
   let idled = false;
   let deferring = false;
+  let disarmed = false;
   while (!stopping) {
+    // Board-level dispatch gate: while the board is disarmed, pull nothing — the curator
+    // is bulk-creating/triaging and will arm when ready (anti-race, incident A). Checked
+    // first so a disarm halts dispatch even mid-drain.
+    if (!opts.dryRun && !repo.isBoardArmed()) {
+      if (opts.once) {
+        // --once must terminate; don't spin forever waiting for an arm that may never come.
+        console.log("bob-worker: board disarmed — nothing to dispatch (--once); exiting.");
+        break;
+      }
+      if (!disarmed) {
+        console.log("bob-worker: board disarmed — dispatch paused (arm the board to resume).");
+        emit(opts, "idle", { disarmed: true });
+        disarmed = true;
+      }
+      await sleep(opts.pollMs);
+      continue;
+    }
+    if (disarmed) {
+      console.log("bob-worker: board armed — resuming.");
+      disarmed = false;
+      idled = false;
+    }
+
     // Defer while the user is chatting with Bob, checked before any dispatch so a
     // live conversation is never aborted by our same-tab StartNewTask.
     if (opts.defer && !opts.dryRun && external.shouldDefer(opts.deferIdleMs)) {
@@ -708,9 +746,10 @@ async function main(): Promise<void> {
       await runOne(client, task, opts);
     } catch (err) {
       console.error(`  ! error on #${task.id}: ${(err as Error).message}`);
-      // Don't clobber a task that already completed (e.g. error thrown after the
-      // result was captured); only park genuinely unfinished work.
-      if (repo.getTask(task.id)?.status !== "done") {
+      // Only park genuinely unfinished work — don't clobber a task that already completed
+      // (done OR analysis_done) when the error is thrown after completion.
+      const cur = repo.getTask(task.id)?.status;
+      if (!cur || !isCompleted(cur)) {
         repo.updateStatus(task.id, "blocked");
         repo.addNote(task.id, `Worker error: ${(err as Error).message}`, "worker");
         emit(opts, "taskFail", { id: task.id, status: "error", message: (err as Error).message });

@@ -46,3 +46,4 @@ test-deps.db
 # SQLite WAL/SHM sidecars (transient; created by test/board runs)
 *.db-shm
 *.db-wal
+*.db-journal

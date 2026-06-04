@@ -2,7 +2,7 @@
 import "./suppress-warnings.js";
 import { writeFileSync } from "node:fs";
 import * as repo from "./db.js";
-import { TASK_PRIORITIES, TASK_STATUSES, type Task, type TaskStatus } from "./types.js";
+import { TASK_PRIORITIES, TASK_STATUSES, isCompleted, type Task, type TaskStatus } from "./types.js";
 import { BUILT_IN_MODES, isBuiltInMode, resolveMode } from "./modes.js";
 import { TEMPLATES, getTemplate } from "./templates.js";
 import { buildReport } from "./report.js";
@@ -62,7 +62,8 @@ function fmtTask(t: Task, showBlocked = false): string {
     const blockingDeps: number[] = [];
     for (const depId of t.depends_on) {
       const dep = repo.getTask(depId);
-      if (!dep || dep.status !== "done") {
+      // satisfied = isCompleted (done OR analysis_done), mirroring repo.blockingDependencies.
+      if (!dep || !isCompleted(dep.status)) {
         blockingDeps.push(depId);
       }
     }
@@ -88,7 +89,7 @@ function requireId(positional: string[]): number {
 const HELP = `bob-tasks — provision tasks for IBM Bob
 
 Commands:
-  create <title> [--desc <text>] [--priority low|medium|high|urgent] [--tags a,b,c] [--mode <slug>] [--template <name>] [--depends-on <id,id,...>]
+  create <title> [--desc <text>] [--priority low|medium|high|urgent] [--tags a,b,c] [--mode <slug>] [--template <name>] [--depends-on <id,id,...>] [--staged]
   templates                                list available task templates
   list [--status <status>] [--tag <tag>] [--limit <n>]
   show <id>
@@ -100,7 +101,11 @@ Commands:
   next                                     show the next pending task the worker would pull, and its routed mode
   note <id> <text> [--author <name>]
   result <id> <text> [--open]
-  delete <id>
+  delete <id> [--force] [--cleanup]        refuses if the task recorded artifacts; --force deletes anyway, --cleanup also removes files
+  disarm [reason...]                       pause dispatch (no worker pulls until armed)
+  arm                                      resume dispatch
+  release [ids...] [--tag <tag>]           move staged tasks to pending (all if no filter)
+  board                                    show dispatch state (armed?) and status counts
   stats
   report [--status <status>] [--out <file>] [--limit <n>]   markdown standup/audit of the board
   help
@@ -157,6 +162,7 @@ function main(): void {
           tags,
           mode: mode ?? null,
           depends_on,
+          staged: flags.staged === true,
         });
         console.log(`created ${fmtTask(task)}`);
       } catch (err) {
@@ -221,9 +227,18 @@ function main(): void {
       if (!status || !TASK_STATUSES.includes(status as never)) {
         die(`status must be one of ${TASK_STATUSES.join(", ")}`);
       }
+      // 'staged' isn't an arbitrary transition (would resurrect the pull race) — use create/release.
+      if (status === "staged") {
+        die("cannot move a task to 'staged' via status; create with --staged, or use 'release' to unstage");
+      }
+      if (!repo.getTask(id)) die(`task ${id} not found`);
       const task = repo.updateStatus(id, status as Task["status"]);
-      if (!task) die(`task ${id} not found`);
-      console.log(`updated ${fmtTask(task)}`);
+      if (status === "done" && !repo.hasEvidence(id)) {
+        console.error(
+          "warning: marked done without recorded execution evidence (unverified); prefer 'result' with evidence, or use 'analysis_done'",
+        );
+      }
+      console.log(`updated ${fmtTask(task!)}`);
       break;
     }
 
@@ -274,9 +289,10 @@ function main(): void {
     }
 
     case "next": {
-      const [task] = repo.listTasks({ status: "pending", limit: 1 });
+      // Armed-aware pull: matches what the worker would actually pull (nothing while disarmed).
+      const task = repo.nextTask();
       if (!task) {
-        console.log("(no pending tasks)");
+        console.log(repo.isBoardArmed() ? "(no pending tasks)" : "(board disarmed — dispatch paused)");
         break;
       }
       const { mode } = resolveMode(task);
@@ -298,27 +314,64 @@ function main(): void {
       const id = requireId(positional);
       const text = positional[1];
       if (!text) die("result requires text");
-      const task = repo.setResult(id, text, flags.open !== true);
+      const markDone = flags.open !== true;
+      const task = repo.setResult(id, text, markDone);
       if (!task) die(`task ${id} not found`);
+      if (markDone && !repo.hasEvidence(id)) {
+        console.error(
+          "warning: marked done without recorded execution evidence (unverified); use --open to keep it open, or record evidence",
+        );
+      }
       console.log(`result saved for ${fmtTask(task)}`);
       break;
     }
 
     case "delete": {
       const id = requireId(positional);
-      console.log(repo.deleteTask(id) ? `deleted #${id}` : `task ${id} not found`);
+      const r = repo.deleteTaskSafe(id, { force: flags.force === true, cleanup: flags.cleanup === true });
+      if (!r.deleted) {
+        die(r.warning ?? `task ${id} not found`);
+      }
+      const cleaned = r.cleaned?.length ? ` (removed ${r.cleaned.length} file(s))` : "";
+      console.log(`deleted #${id}${cleaned}`);
+      break;
+    }
+
+    case "disarm": {
+      repo.setBoardArmed(false, positional.join(" ") || undefined);
+      console.log("board disarmed — dispatch paused (run 'arm' to resume)");
+      break;
+    }
+
+    case "arm": {
+      repo.setBoardArmed(true);
+      console.log("board armed — dispatch resumed");
+      break;
+    }
+
+    case "release": {
+      const ids = positional.length
+        ? positional.map((s) => {
+            const n = Number(s);
+            if (!Number.isInteger(n)) die(`invalid task id '${s}'`);
+            return n;
+          })
+        : undefined;
+      const n = repo.releaseTasks({ ids, tag: str(flags.tag) });
+      console.log(`released ${n} staged task(s) to pending`);
+      break;
+    }
+
+    case "board": {
+      const counts = repo.countByStatus(repo.listTasks({}));
+      console.log(`armed: ${repo.isBoardArmed()}`);
+      for (const s of TASK_STATUSES) if (counts[s]) console.log(`  ${s}: ${counts[s]}`);
       break;
     }
 
     case "stats": {
       const allTasks = repo.listTasks({});
-      const counts: Record<string, number> = {};
-      for (const status of TASK_STATUSES) {
-        counts[status] = 0;
-      }
-      for (const task of allTasks) {
-        counts[task.status]++;
-      }
+      const counts = repo.countByStatus(allTasks);
       if (flags.json === true) {
         console.log(JSON.stringify({ ...counts, total: allTasks.length }));
         break;

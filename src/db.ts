@@ -1,10 +1,18 @@
 import type { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Task, TaskNote, TaskStatus, TaskPriority } from "./types.js";
+import type {
+  Task,
+  TaskNote,
+  TaskStatus,
+  TaskPriority,
+  TaskArtifact,
+  ArtifactKind,
+} from "./types.js";
+import { CLAIMABLE_STATUS, isCompleted, TASK_STATUSES } from "./types.js";
 
 // Required lazily in getDb so the warning suppressor runs before node:sqlite loads.
 const requireModule = createRequire(import.meta.url);
@@ -29,6 +37,9 @@ let db: DatabaseSync | null = null;
 export function getDb(path = defaultDbPath()): DatabaseSync {
   if (db) return db;
   mkdirSync(dirname(path), { recursive: true });
+  // The board is per-project state, never source: keep it out of the consuming repo's
+  // git status so it can't land as untracked tasks.db* at a repo root (incident D).
+  ensureGitignore(path);
   const { DatabaseSync } = requireModule("node:sqlite") as typeof import("node:sqlite");
   db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL;");
@@ -67,12 +78,68 @@ function migrate(d: DatabaseSync): void {
 
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
     CREATE INDEX IF NOT EXISTS idx_notes_task ON task_notes(task_id);
+
+    -- Board-level flags (e.g. the armed/disarmed dispatch gate). Generic key/value.
+    CREATE TABLE IF NOT EXISTS board_state (
+      key        TEXT PRIMARY KEY,
+      value      TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    -- Execution artifacts a worker recorded per task: files written, commits, test
+    -- results. Serves both delete-safety (warn on orphaned side effects) and the
+    -- done-integrity gate (a task is only 'done' with evidence here).
+    CREATE TABLE IF NOT EXISTS task_artifacts (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      kind       TEXT NOT NULL,
+      path       TEXT,
+      detail     TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_artifacts_task ON task_artifacts(task_id);
   `);
 
   // node:sqlite has no "ADD COLUMN IF NOT EXISTS", so probe and add what's missing.
   addColumnIfMissing(d, "tasks", "mode", "TEXT");
   addColumnIfMissing(d, "tasks", "depends_on", "TEXT");
   addColumnIfMissing(d, "tasks", "retry_attempts", "INTEGER DEFAULT 0");
+}
+
+/**
+ * Write a .gitignore next to the board DB so its files never appear as untracked
+ * state in a consuming repo. Idempotent and best-effort (a read-only dir is fine).
+ */
+function ensureGitignore(dbPath: string): void {
+  try {
+    const dir = dirname(dbPath);
+    const base = basename(dbPath);
+    const wanted = [base, `${base}-wal`, `${base}-shm`, `${base}-journal`];
+    const giPath = join(dir, ".gitignore");
+    let existing = "";
+    try {
+      existing = readFileSync(giPath, "utf8");
+    } catch {
+      /* no .gitignore yet */
+    }
+    // Respect existing patterns (incl. simple globs like *.db / *.db-wal / tasks.db*)
+    // so we don't append redundant lines on every open in a repo that already ignores them.
+    const patterns = existing.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const covered = (t: string): boolean =>
+      patterns.some(
+        (p) =>
+          p === t ||
+          p === "*" ||
+          (p.startsWith("*") && t.endsWith(p.slice(1))) ||
+          (p.endsWith("*") && t.startsWith(p.slice(0, -1))),
+      );
+    const missing = wanted.filter((w) => !covered(w));
+    if (missing.length === 0) return;
+    const prefix = existing && !existing.endsWith("\n") ? "\n" : "";
+    writeFileSync(giPath, existing + prefix + missing.join("\n") + "\n");
+  } catch {
+    /* best-effort: never block board open on a gitignore write */
+  }
 }
 
 function addColumnIfMissing(
@@ -218,6 +285,8 @@ export interface CreateTaskInput {
   mode?: string | null;
   /** Task IDs this task depends on. */
   depends_on?: number[];
+  /** Create non-pullable ('staged'). Release to 'pending' deliberately with releaseTasks. */
+  staged?: boolean;
 }
 
 export function createTask(input: CreateTaskInput): Task {
@@ -232,14 +301,16 @@ export function createTask(input: CreateTaskInput): Task {
   }
 
   const now = nowIso();
+  const status: TaskStatus = input.staged ? "staged" : "pending";
   const info = d
     .prepare(
       `INSERT INTO tasks (title, description, status, priority, tags, mode, depends_on, created_at, updated_at)
-       VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       input.title,
       input.description ?? null,
+      status,
       input.priority ?? "medium",
       JSON.stringify(input.tags ?? []),
       input.mode ?? null,
@@ -333,18 +404,99 @@ export function listTasks(opts: ListTasksOptions = {}): Task[] {
   return rows;
 }
 
-/** Highest-priority pending task (optionally tag-filtered), or null. */
+// ---------------------------------------------------------------------------
+// Board-level dispatch gate (armed/disarmed). When disarmed, NO task is pullable —
+// the curator pauses dispatch while bulk-creating/triaging, then re-arms. Default is
+// ARMED (no row) so existing boards keep draining; disarm is an explicit opt-in.
+// ---------------------------------------------------------------------------
+const ARMED_KEY = "armed";
+
+export function isBoardArmed(): boolean {
+  const row = getDb().prepare("SELECT value FROM board_state WHERE key = ?").get(ARMED_KEY) as
+    | { value?: string }
+    | undefined;
+  return !row || row.value !== "0";
+}
+
+export function setBoardArmed(armed: boolean, reason?: string): void {
+  const now = nowIso();
+  const upsert = (key: string, value: string) =>
+    getDb()
+      .prepare(
+        `INSERT INTO board_state (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(key, value, now);
+  upsert(ARMED_KEY, armed ? "1" : "0");
+  if (reason !== undefined) upsert("armed_reason", reason);
+}
+
+/** Release staged tasks to pending (optionally filtered by ids and/or tag). Returns the count released. */
+export function releaseTasks(opts: { ids?: number[]; tag?: string } = {}): number {
+  // Empty ids = no filter (release all / by tag), not "release none".
+  const ids = opts.ids && opts.ids.length ? new Set(opts.ids) : null;
+  let released = 0;
+  for (const t of listTasks({ status: "staged" })) {
+    if (ids && !ids.has(t.id)) continue;
+    if (opts.tag && !t.tags.includes(opts.tag)) continue;
+    updateStatus(t.id, "pending");
+    released++;
+  }
+  return released;
+}
+
+/** Highest-priority pending task (optionally tag-filtered), or null. Returns null while
+ *  the board is disarmed so pollers idle instead of pulling mid-curation. */
 export function nextTask(opts: { tag?: string } = {}): Task | null {
+  if (!isBoardArmed()) return null;
   const tasks = listTasks({ status: "pending", tag: opts.tag, limit: 1 });
   return tasks[0] ?? null;
 }
 
+/**
+ * Why a claim would be refused, or null if claimable. Lets callers give a precise
+ * message; claimTask itself re-checks atomically.
+ */
+export function claimBlockReason(id: number): string | null {
+  const task = getTask(id);
+  if (!task) return `task #${id} not found`;
+  if (!isBoardArmed()) return "board is disarmed — dispatch paused; arm the board to claim";
+  if (task.status !== CLAIMABLE_STATUS)
+    return `task #${id} is '${task.status}', not ${CLAIMABLE_STATUS} — only ${CLAIMABLE_STATUS} tasks can be claimed`;
+  return null;
+}
+
+/** Claim a task (pending -> in_progress). Refuses staged/non-pending tasks and refuses
+ *  while the board is disarmed: this is the single chokepoint both drainers pass through. */
 export function claimTask(id: number, assignee: string): Task | null {
-  if (!getTask(id)) return null;
+  const task = getTask(id);
+  if (!task) return null;
+  if (!isBoardArmed()) return null;
+  if (task.status !== CLAIMABLE_STATUS) return null;
   getDb()
     .prepare("UPDATE tasks SET status = 'in_progress', assignee = ?, updated_at = ? WHERE id = ?")
     .run(assignee, nowIso(), id);
   return getTask(id);
+}
+
+/** Unsatisfied dependencies (not yet isCompleted), or null if all are. Shared by the worker
+ *  and CLI so analysis_done deps don't deadlock the analyze→implement pattern. */
+export function blockingDependencies(task: Task): string | null {
+  if (!task.depends_on.length) return null;
+  const blocking: string[] = [];
+  for (const depId of task.depends_on) {
+    const dep = getTask(depId);
+    if (!dep) blocking.push(`#${depId}[missing]`);
+    else if (!isCompleted(dep.status)) blocking.push(`#${depId}[${dep.status}]`);
+  }
+  return blocking.length ? blocking.join(", ") : null;
+}
+
+/** Count tasks by status, zero-filled for every known status. Shared by board_status / CLI. */
+export function countByStatus(tasks: Task[]): Record<TaskStatus, number> {
+  const counts = Object.fromEntries(TASK_STATUSES.map((s) => [s, 0])) as Record<TaskStatus, number>;
+  for (const t of tasks) counts[t.status]++;
+  return counts;
 }
 
 export function updateStatus(id: number, status: TaskStatus): Task | null {
@@ -355,18 +507,103 @@ export function updateStatus(id: number, status: TaskStatus): Task | null {
   return getTask(id);
 }
 
-export function setResult(id: number, result: string, markDone = true): Task | null {
-  if (!getTask(id)) return null;
+/** Write a result, optionally moving to a target status. Shared by setResult/completeTask. */
+function writeResult(id: number, result: string, status?: TaskStatus): void {
   const now = nowIso();
-  if (markDone) {
+  if (status) {
     getDb()
-      .prepare("UPDATE tasks SET result = ?, status = 'done', updated_at = ? WHERE id = ?")
-      .run(result, now, id);
+      .prepare("UPDATE tasks SET result = ?, status = ?, updated_at = ? WHERE id = ?")
+      .run(result, status, now, id);
   } else {
     getDb()
       .prepare("UPDATE tasks SET result = ?, updated_at = ? WHERE id = ?")
       .run(result, now, id);
   }
+}
+
+export function setResult(id: number, result: string, markDone = true): Task | null {
+  if (!getTask(id)) return null;
+  writeResult(id, result, markDone ? "done" : undefined);
+  return getTask(id);
+}
+
+/** Evidence that a task actually executed (vs. produced only analysis). */
+export interface Evidence {
+  /** Number of files changed (0 = no code written). */
+  files_changed?: number;
+  /** Paths changed — recorded as 'file' artifacts (absolute where possible, for cleanup). */
+  files?: string[];
+  /** Commit sha produced by the run. */
+  commit?: string;
+  /** Verification summary, e.g. "vitest: 42 passed". */
+  test?: string;
+  /** Human-readable diffstat. */
+  diffstat?: string;
+}
+
+function evidenceHasChanges(e?: Evidence): boolean {
+  if (!e) return false;
+  return Boolean(
+    (e.files_changed && e.files_changed > 0) ||
+      (e.files && e.files.length > 0) ||
+      (e.commit && e.commit.trim()) ||
+      (e.test && e.test.trim()),
+  );
+}
+
+function recordEvidenceArtifacts(taskId: number, e: Evidence): void {
+  for (const f of e.files ?? []) recordArtifact(taskId, { kind: "file", path: f });
+  if (e.commit && e.commit.trim()) recordArtifact(taskId, { kind: "commit", detail: e.commit.trim() });
+  if (e.test && e.test.trim()) recordArtifact(taskId, { kind: "test", detail: e.test.trim() });
+  // diffstat-only evidence stays a caller note, not a pathless 'file' artifact (would block delete).
+}
+
+export interface CompleteOptions {
+  result: string;
+  /** True when the resolved mode was read-only (ask/plan/review): never reaches done. */
+  ranReadOnly: boolean;
+  evidence?: Evidence;
+  /** False when changes couldn't be checked (cwd not a git repo): impl-with-no-evidence is
+   *  then marked done-UNVERIFIED, not demoted to analysis_done. Default true. */
+  evidenceReliable?: boolean;
+}
+
+/**
+ * Gated completion (worker + submit_result): read-only → analysis_done; impl+evidence → done;
+ * impl+no-evidence → analysis_done, or done-UNVERIFIED when evidence wasn't checkable.
+ */
+export function completeTask(id: number, opts: CompleteOptions): Task | null {
+  const task = getTask(id);
+  if (!task) return null;
+  if (opts.evidence) recordEvidenceArtifacts(id, opts.evidence);
+
+  // Read-only is a mode fact, reliable regardless of cwd.
+  if (opts.ranReadOnly) {
+    writeResult(id, opts.result, "analysis_done");
+    return getTask(id);
+  }
+
+  const hasEv = evidenceHasChanges(opts.evidence) || hasEvidence(id);
+  if (hasEv) {
+    writeResult(id, opts.result, "done");
+    return getTask(id);
+  }
+  if (opts.evidenceReliable === false) {
+    // Couldn't verify changes — trust the completion, flag it, don't mismark as analysis_done.
+    writeResult(id, opts.result, "done");
+    addNote(
+      id,
+      "Completed; execution evidence could not be captured (working dir is not a git repo, or not the workspace that was edited) — marked done UNVERIFIED.",
+      "worker",
+    );
+    return getTask(id);
+  }
+  writeResult(id, opts.result, "analysis_done");
+  addNote(
+    id,
+    "Completed without execution evidence (no diff/commit/test recorded) — left as analysis_done; needs implementation/verification.",
+    "worker",
+  );
   return getTask(id);
 }
 
@@ -397,6 +634,114 @@ export function getNotes(taskId: number): TaskNote[] {
 export function deleteTask(id: number): boolean {
   const info = getDb().prepare("DELETE FROM tasks WHERE id = ?").run(id);
   return Number(info.changes) > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Artifact tracking (delete-safety + done-evidence)
+// ---------------------------------------------------------------------------
+function rowToArtifact(r: Record<string, unknown>): TaskArtifact {
+  return {
+    id: Number(r.id),
+    task_id: Number(r.task_id),
+    kind: r.kind as ArtifactKind,
+    path: (r.path as string) ?? null,
+    detail: (r.detail as string) ?? null,
+    created_at: String(r.created_at),
+  };
+}
+
+export function recordArtifact(
+  taskId: number,
+  a: { kind: ArtifactKind; path?: string | null; detail?: string | null },
+): TaskArtifact | null {
+  if (!getTask(taskId)) return null;
+  const now = nowIso();
+  const info = getDb()
+    .prepare("INSERT INTO task_artifacts (task_id, kind, path, detail, created_at) VALUES (?, ?, ?, ?, ?)")
+    .run(taskId, a.kind, a.path ?? null, a.detail ?? null, now);
+  return {
+    id: Number(info.lastInsertRowid),
+    task_id: taskId,
+    kind: a.kind,
+    path: a.path ?? null,
+    detail: a.detail ?? null,
+    created_at: now,
+  };
+}
+
+export function getArtifacts(taskId: number): TaskArtifact[] {
+  return (
+    getDb()
+      .prepare("SELECT * FROM task_artifacts WHERE task_id = ? ORDER BY created_at ASC")
+      .all(taskId) as Record<string, unknown>[]
+  ).map(rowToArtifact);
+}
+
+/** True if the task has execution evidence (excludes read-only 'side-effect' file artifacts). */
+export function hasEvidence(taskId: number): boolean {
+  const row = getDb()
+    .prepare(
+      "SELECT COUNT(*) AS c FROM task_artifacts WHERE task_id = ? AND (detail IS NULL OR detail != 'side-effect')",
+    )
+    .get(taskId) as { c: number };
+  return Number(row.c) > 0;
+}
+
+export interface DeleteSafeResult {
+  deleted: boolean;
+  /** Reason it was refused, or a note about what happened. */
+  warning?: string;
+  /** Artifacts the (now-or-not) deleted task had recorded. */
+  artifacts?: TaskArtifact[];
+  /** File paths removed when cleanup was requested. */
+  cleaned?: string[];
+}
+
+/**
+ * Delete a task, but make "delete is not undo" explicit (incident B): if the task has
+ * recorded artifacts (files written, commits, tests), refuse unless `force`, and with
+ * `cleanup` also unlink the orphaned files. Tasks with no side effects delete as before.
+ */
+export function deleteTaskSafe(
+  id: number,
+  opts: { force?: boolean; cleanup?: boolean } = {},
+): DeleteSafeResult {
+  const task = getTask(id);
+  if (!task) return { deleted: false, warning: `task #${id} not found` };
+  const artifacts = getArtifacts(id);
+
+  // Only CREATED files are safe to unlink on cleanup; 'modified' files are live source.
+  const created = artifacts.filter((a) => a.kind === "file" && a.path && a.detail === "created");
+  const touched = artifacts.filter((a) => a.kind === "file" && a.path);
+
+  if (artifacts.length > 0 && !opts.force && !opts.cleanup) {
+    const paths = touched.map((a) => a.path).join(", ");
+    const detail = touched.length ? ` Files touched: ${paths}.` : "";
+    const cleanupNote = created.length
+      ? ` cleanup:true removes the ${created.length} file(s) it created (edited files are left intact).`
+      : "";
+    return {
+      deleted: false,
+      artifacts,
+      warning:
+        `task #${id} has ${artifacts.length} recorded artifact(s); deleting the record will NOT undo them.${detail} ` +
+        `Re-run with force:true to delete the record anyway, or cleanup:true to remove created files.${cleanupNote}`,
+    };
+  }
+
+  const cleaned: string[] = [];
+  if (opts.cleanup) {
+    for (const a of created) {
+      try {
+        unlinkSync(a.path!);
+        cleaned.push(a.path!);
+      } catch {
+        /* already gone / not removable */
+      }
+    }
+  }
+  const deleted = deleteTask(id); // FK ON DELETE CASCADE removes notes + artifacts
+  return { deleted, artifacts, cleaned: cleaned.length ? cleaned : undefined };
 }
 
 /** Increment the retry_attempts counter for a task. Returns the updated task. */
