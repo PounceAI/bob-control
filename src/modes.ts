@@ -2,7 +2,16 @@ import type { Task } from "./types.js";
 
 // Bob's built-in modes. `mode` is stored as a free string so custom Roo
 // .roomodes slugs work too; setting configuration.mode on dispatch switches Bob.
-export const BUILT_IN_MODES = ["code", "advanced", "ask", "orchestrator", "plan", "review", "refactor", "devsecops"] as const;
+export const BUILT_IN_MODES = [
+  "code",
+  "advanced",
+  "ask",
+  "orchestrator",
+  "plan",
+  "review",
+  "refactor",
+  "devsecops",
+] as const;
 export type BuiltInMode = (typeof BUILT_IN_MODES)[number];
 
 export const DEFAULT_MODE: BuiltInMode = "code";
@@ -20,18 +29,39 @@ const RULES: { mode: BuiltInMode; re: RegExp; readOnly?: boolean }[] = [
   // matching read-only mode, not the write-capable `code` fallback — otherwise a review/plan task
   // gets write auto-approve it shouldn't have.
   // Review of an actual code artifact (not "review the concept/approach", which is ask).
-  { mode: "review", readOnly: true, re: /\breview\w*\b[\s\S]{0,40}\b(diff|code|changes?|pull[- ]?request|\bpr\b|implementation|patch|commit)\b/i },
+  {
+    mode: "review",
+    readOnly: true,
+    re: /\breview\w*\b[\s\S]{0,40}\b(diff|code|changes?|pull[- ]?request|\bpr\b|implementation|patch|commit)\b/i,
+  },
   // Plan/design an approach (read-only). The noun anchor keeps it from matching bare "plan".
-  { mode: "plan", readOnly: true, re: /\b(plan|design|outline|propose)\w*\b[\s\S]{0,30}\b(approach|strateg\w*|rollout|architecture|roadmap|migration|design|plan)\b/i },
+  {
+    mode: "plan",
+    readOnly: true,
+    re: /\b(plan|design|outline|propose)\w*\b[\s\S]{0,30}\b(approach|strateg\w*|rollout|architecture|roadmap|migration|design|plan)\b/i,
+  },
   // Security work — devsecops reads, scans, AND edits code to remediate (standard risk, write-capable).
-  { mode: "devsecops", re: /\b(security\s+(scan\w*|review|audit|assessment)|vulnerabilit\w*|\bcve\b|secrets?\s+scan\w*|threat\s+model\w*|owasp|pen[- ]?test\w*)\b/i },
+  {
+    mode: "devsecops",
+    re: /\b(security\s+(scan\w*|review|audit|assessment)|vulnerabilit\w*|\bcve\b|secrets?\s+scan\w*|threat\s+model\w*|owasp|pen[- ]?test\w*)\b/i,
+  },
   // Needs MCP/Browser tools, which plain code mode lacks; must win over the generic fallbacks.
   // `https?` so an https URL matches too (bare `http` before \b misses "https").
-  { mode: "advanced", re: /\b(browser|web ?page|website|url|scrape|crawl|navigate|screenshot|mcp tool|fetch the|https?)\b/i },
+  {
+    mode: "advanced",
+    re: /\b(browser|web ?page|website|url|scrape|crawl|navigate|screenshot|mcp tool|fetch the|https?)\b/i,
+  },
   // `orchestrat\w*` so the stem matches orchestrate / orchestrator / orchestration
   // (a bare `orchestrat` before the trailing \b never matches the full word).
-  { mode: "orchestrator", re: /\b(orchestrat\w*|coordinate|multi[- ]step|break (it |this )?down|sub-?tasks?|workflow|epic|several steps)\b/i },
-  { mode: "ask", readOnly: true, re: /\b(explain|describe|document|docs|summari[sz]e|analy[sz]e|research|investigate|what is|what are|how does|how do|why does|why is|question|clarify|review (the )?(concept|approach|design)|understand)\b/i },
+  {
+    mode: "orchestrator",
+    re: /\b(orchestrat\w*|coordinate|multi[- ]step|break (it |this )?down|sub-?tasks?|workflow|epic|several steps)\b/i,
+  },
+  {
+    mode: "ask",
+    readOnly: true,
+    re: /\b(explain|describe|document|docs|summari[sz]e|analy[sz]e|research|investigate|what is|what are|how does|how do|why does|why is|question|clarify|review (the )?(concept|approach|design)|understand)\b/i,
+  },
 ];
 
 // Implementation verbs. A task carrying these wants code WRITTEN, so it must NOT be
@@ -96,9 +126,26 @@ export interface ModeProfile {
 // (`cd <workspace> && npm test`); since a chained command auto-runs only if EVERY part
 // matches, allowing `cd ` doesn't enable a dangerous tail (`cd x && rm -rf` still asks).
 export const SAFE_COMMANDS = [
-  "npm ", "npx ", "pnpm ", "yarn ", "node ", "tsc", "cd ",
-  "git ", "ls", "dir", "pwd", "cat ", "type ", "echo ",
-  "grep ", "rg ", "findstr ", "python ", "python3 ", "pip ",
+  "npm ",
+  "npx ",
+  "pnpm ",
+  "yarn ",
+  "node ",
+  "tsc",
+  "cd ",
+  "git ",
+  "ls",
+  "dir",
+  "pwd",
+  "cat ",
+  "type ",
+  "echo ",
+  "grep ",
+  "rg ",
+  "findstr ",
+  "python ",
+  "python3 ",
+  "pip ",
 ];
 
 const STANDARD: ModeProfile = {
@@ -227,9 +274,7 @@ export function policyHasGrayZone(policy: CommandPolicy): boolean {
  */
 export function classifierReachable(maxRisk: Risk): boolean {
   const max = RISK_RANK[maxRisk];
-  return Object.values(MODE_PROFILES).some(
-    (p) => policyHasGrayZone(p.commandPolicy) && RISK_RANK[p.risk] <= max,
-  );
+  return Object.values(MODE_PROFILES).some((p) => policyHasGrayZone(p.commandPolicy) && RISK_RANK[p.risk] <= max);
 }
 
 // Workflow auto-approve toggles forced on for every dispatch. These gate Bob's own
@@ -259,12 +304,12 @@ export function dispatchAutoApprove(
   profile: ModeProfile,
   extraCommands: string[] = [],
 ): ModeProfile["autoApprove"] & { allowedCommands: string[] } & typeof WORKFLOW_AUTO_APPROVE {
-  const baseCommands =
-    profile.commandPolicy === "auto" ? ["*"] : profile.commandPolicy === "none" ? [] : SAFE_COMMANDS;
+  const baseCommands = profile.commandPolicy === "auto" ? ["*"] : profile.commandPolicy === "none" ? [] : SAFE_COMMANDS;
   // Merge extra commands into the base allowlist (on top of SAFE_COMMANDS for allowlist/classifier policies)
-  const allowedCommands = profile.commandPolicy === "none" || profile.commandPolicy === "auto"
-    ? baseCommands
-    : [...baseCommands, ...extraCommands];
+  const allowedCommands =
+    profile.commandPolicy === "none" || profile.commandPolicy === "auto"
+      ? baseCommands
+      : [...baseCommands, ...extraCommands];
   return { ...profile.autoApprove, allowedCommands, ...WORKFLOW_AUTO_APPROVE };
 }
 

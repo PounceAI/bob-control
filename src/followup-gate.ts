@@ -95,7 +95,7 @@ export function classifyQuestion(question: string): "plan" | "mechanical" {
     /\bwhere (is|are|should i put)\b/,
     /\bfile (path|name|location)\b/,
     /\bflag (name|value)\b/,
-    /\b-[a-z] or -[a-z]\b/,  // e.g., "-x or -y"
+    /\b-[a-z] or -[a-z]\b/, // e.g., "-x or -y"
     /\boption [a-z] or option [a-z]\b/,
     /\b(should|shall) i use (single|double)( or (single|double))? quotes/,
     /\bwhat (format|extension) (should i use|to use|should)\b/,

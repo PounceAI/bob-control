@@ -260,6 +260,10 @@ test("api backend honors a model override", async () => {
     model = JSON.parse(init.body).model;
     return { ok: true, status: 200, json: async () => ({ content: [{ text: '{"decision":"deny","reason":"x"}' }] }) };
   }) as unknown as typeof fetch;
-  await classifyCommand("rm x", { task: "t", cwd: "/repo" }, { backend: "api", apiKey: "k", model: "claude-opus-4-8", fetchImpl });
+  await classifyCommand(
+    "rm x",
+    { task: "t", cwd: "/repo" },
+    { backend: "api", apiKey: "k", model: "claude-opus-4-8", fetchImpl },
+  );
   assert.equal(model, "claude-opus-4-8");
 });

@@ -4,7 +4,7 @@ import type { Task, TaskNote, TaskStatus } from "./types.js";
 const STALLED_MS = 30 * 60_000;
 
 // Estimated cost per classifier decision (approve/deny) in USD
-const CLASSIFIER_COST_PER_DECISION = 0.10;
+const CLASSIFIER_COST_PER_DECISION = 0.1;
 
 interface AuditCounts {
   classifierApprove: number;
@@ -166,11 +166,18 @@ export function buildReport(
 
   // Add board-level audit summary if there's any autonomous activity
   const totalDecisions = boardAudit.classifierApprove + boardAudit.classifierDeny;
-  if (totalDecisions > 0 || boardAudit.answererAnswer > 0 || boardAudit.answererEscalate > 0 || boardAudit.humanAnswer > 0) {
+  if (
+    totalDecisions > 0 ||
+    boardAudit.answererAnswer > 0 ||
+    boardAudit.answererEscalate > 0 ||
+    boardAudit.humanAnswer > 0
+  ) {
     out.push("## Autonomous Activity Summary", "");
     if (totalDecisions > 0) {
       const estimatedCost = (totalDecisions * CLASSIFIER_COST_PER_DECISION).toFixed(2);
-      out.push(`- **Classifier**: ${boardAudit.classifierApprove} approved, ${boardAudit.classifierDeny} denied (~$${estimatedCost} estimated)`);
+      out.push(
+        `- **Classifier**: ${boardAudit.classifierApprove} approved, ${boardAudit.classifierDeny} denied (~$${estimatedCost} estimated)`,
+      );
     }
     if (boardAudit.answererAnswer > 0 || boardAudit.answererEscalate > 0) {
       out.push(`- **Answerer**: ${boardAudit.answererAnswer} answered, ${boardAudit.answererEscalate} escalated`);

@@ -30,9 +30,7 @@ const SYSTEM = [
 ].join("\n");
 
 function userContent(question: string, options: string[], ctx: AnswerContext): string {
-  const opts = options.length
-    ? `\nOptions offered:\n${options.map((o, i) => `${i + 1}. ${o}`).join("\n")}`
-    : "";
+  const opts = options.length ? `\nOptions offered:\n${options.map((o, i) => `${i + 1}. ${o}`).join("\n")}` : "";
   return `Task: ${ctx.task}\nWorkspace: ${ctx.cwd}\nThe agent asks:\n${question}${opts}`;
 }
 

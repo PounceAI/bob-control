@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { parseVerdict, judgeCompletion, captureGitDiff, captureGitBaseline, type JudgeContext, type JudgeDeps } from "./judge.js";
+import {
+  parseVerdict,
+  judgeCompletion,
+  captureGitDiff,
+  captureGitBaseline,
+  type JudgeContext,
+  type JudgeDeps,
+} from "./judge.js";
 import type { LlmResult } from "./llm.js";
 
 // Mock LLM call for testing

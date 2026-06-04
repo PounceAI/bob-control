@@ -109,7 +109,9 @@ export function createCommandGate(deps: GateDeps): (ev: GateEvent) => Promise<vo
     // can't land on the next task's prompt. Still record the verdict.
     if (deps.isActive && !deps.isActive()) {
       const tag = fromCache ? "cached, stale, not pressed" : "stale, not pressed";
-      deps.log(`  ~ stale ${fromCache ? "cached " : ""}classifier ${decision} arrived after dispatch ended — not pressing (${reason})`);
+      deps.log(
+        `  ~ stale ${fromCache ? "cached " : ""}classifier ${decision} arrived after dispatch ended — not pressing (${reason})`,
+      );
       deps.addNote(deps.task.id, `Classifier ${decision} for \`${short}\` (${tag}): ${reason}`, "classifier");
       return;
     }
@@ -119,14 +121,22 @@ export function createCommandGate(deps: GateDeps): (ev: GateEvent) => Promise<vo
       deps.log(`  ✓ classifier approved (${reason})${fromCache ? " [cached]" : ""}`);
     } else {
       deps.client.reject();
-      deps.log(`  ⛔ classifier ${decision === "deny" ? "denied" : "deferred→rejected"} (${reason})${fromCache ? " [cached]" : ""}`);
+      deps.log(
+        `  ⛔ classifier ${decision === "deny" ? "denied" : "deferred→rejected"} (${reason})${fromCache ? " [cached]" : ""}`,
+      );
       // Surface a failing cli backend once, so reject-everything isn't read as caution.
       if (!fromCache && deps.backend === "cli" && !warnedCliFail && CLI_TRANSPORT_FAILURE.test(reason)) {
-        deps.log(`  ⚠ classifier cli backend is failing ("${reason}") — ALL gray-zone commands will be rejected. Check \`claude\` is installed and logged in.`);
+        deps.log(
+          `  ⚠ classifier cli backend is failing ("${reason}") — ALL gray-zone commands will be rejected. Check \`claude\` is installed and logged in.`,
+        );
         warnedCliFail = true;
       }
     }
-    deps.addNote(deps.task.id, `Classifier ${decision} for \`${short}\`${fromCache ? " (cached)" : ""}: ${reason}`, "classifier");
+    deps.addNote(
+      deps.task.id,
+      `Classifier ${decision} for \`${short}\`${fromCache ? " (cached)" : ""}: ${reason}`,
+      "classifier",
+    );
   }
 
   return function onCommandAsk(ev: GateEvent): Promise<void> {

@@ -1,0 +1,3 @@
+# Bulk reformat — skip in blame (git blame --ignore-revs-file .git-blame-ignore-revs)
+# style: apply Prettier (printWidth 120)
+8f8bdf297399c1db07db2502326a16eeaf46bb7c

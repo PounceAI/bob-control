@@ -69,7 +69,11 @@ export async function restoreCheckpoint(
   const root = await repoRoot(cwd);
   if (!root) return { reverted: false, removed: [], note: "not a git work tree — refusing to revert" };
   if (cp.root && root !== cp.root) {
-    return { reverted: false, removed: [], note: `checkpoint belongs to ${cp.root}, not ${root} — refusing (wrong repo)` };
+    return {
+      reverted: false,
+      removed: [],
+      note: `checkpoint belongs to ${cp.root}, not ${root} — refusing (wrong repo)`,
+    };
   }
   const head = await headSha(cwd);
   if (!opts.force && (head ?? null) !== (cp.head ?? null)) {
@@ -80,7 +84,11 @@ export async function restoreCheckpoint(
     };
   }
   if (cp.ref && !(await refExists(cp.ref, cwd))) {
-    return { reverted: false, removed: [], note: `checkpoint snapshot is missing (gc'd or wrong repo) — refusing to revert` };
+    return {
+      reverted: false,
+      removed: [],
+      note: `checkpoint snapshot is missing (gc'd or wrong repo) — refusing to revert`,
+    };
   }
 
   // Pin the current state (tracked changes AND untracked files) BEFORE we destroy it, so the

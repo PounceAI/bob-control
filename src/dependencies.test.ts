@@ -2,7 +2,6 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { unlinkSync } from "node:fs";
 import {
-  getDb,
   createTask,
   getTask,
   setDependencies,
@@ -58,20 +57,14 @@ describe("Task Dependencies", () => {
   it("should reject self-dependency", () => {
     const task = createTask({ title: "Task" });
 
-    assert.throws(
-      () => setDependencies(task.id, [task.id]),
-      /cannot depend on itself/i
-    );
+    assert.throws(() => setDependencies(task.id, [task.id]), /cannot depend on itself/i);
   });
 
   it("should detect direct cycle", () => {
     const task1 = createTask({ title: "Task 1" });
     const task2 = createTask({ title: "Task 2", depends_on: [task1.id] });
 
-    assert.throws(
-      () => setDependencies(task1.id, [task2.id]),
-      /cycle detected/i
-    );
+    assert.throws(() => setDependencies(task1.id, [task2.id]), /cycle detected/i);
   });
 
   it("should detect indirect cycle", () => {
@@ -79,10 +72,7 @@ describe("Task Dependencies", () => {
     const task2 = createTask({ title: "Task 2", depends_on: [task1.id] });
     const task3 = createTask({ title: "Task 3", depends_on: [task2.id] });
 
-    assert.throws(
-      () => setDependencies(task1.id, [task3.id]),
-      /cycle detected/i
-    );
+    assert.throws(() => setDependencies(task1.id, [task3.id]), /cycle detected/i);
   });
 
   it("should allow clearing dependencies", () => {
@@ -94,30 +84,24 @@ describe("Task Dependencies", () => {
   });
 
   it("should reject non-existent dependency", () => {
-    assert.throws(
-      () => createTask({ title: "Task", depends_on: [99999] }),
-      /dependency #99999 does not exist/i
-    );
+    assert.throws(() => createTask({ title: "Task", depends_on: [99999] }), /dependency #99999 does not exist/i);
   });
 
   it("should reject setting non-existent dependency", () => {
     const task = createTask({ title: "Task" });
 
-    assert.throws(
-      () => setDependencies(task.id, [99999]),
-      /task #99999 does not exist/i
-    );
+    assert.throws(() => setDependencies(task.id, [99999]), /task #99999 does not exist/i);
   });
 
   it("should block task until all dependencies are done", () => {
     const dep1 = createTask({ title: "Dep 1" });
     const dep2 = createTask({ title: "Dep 2" });
-    const task = createTask({ title: "Task", depends_on: [dep1.id, dep2.id] });
+    createTask({ title: "Task", depends_on: [dep1.id, dep2.id] });
 
     // Task should not be eligible yet
     const pending = listTasks({ status: "pending" });
-    assert.ok(pending.some(t => t.id === dep1.id));
-    assert.ok(pending.some(t => t.id === dep2.id));
+    assert.ok(pending.some((t) => t.id === dep1.id));
+    assert.ok(pending.some((t) => t.id === dep2.id));
 
     // Complete first dependency
     updateStatus(dep1.id, "done");
@@ -279,7 +263,11 @@ describe("Task Dependencies", () => {
     // B is urgent: without dependency enforcement nextTask would hand it back first.
     const b = createTask({ title: "dep child B (urgent)", priority: "urgent", depends_on: [a.id], tags: [tag] });
 
-    assert.equal(nextTask({ tag })?.id, a.id, "urgent-but-blocked B skipped; eligible A returned despite lower priority");
+    assert.equal(
+      nextTask({ tag })?.id,
+      a.id,
+      "urgent-but-blocked B skipped; eligible A returned despite lower priority",
+    );
 
     updateStatus(a.id, "done");
     assert.equal(nextTask({ tag })?.id, b.id, "B becomes the next pull once A is done");
@@ -300,4 +288,3 @@ describe("Task Dependencies", () => {
     assert.equal(claimTask(b.id, "bob")?.status, "in_progress", "claimable once the dep is satisfied");
   });
 });
-

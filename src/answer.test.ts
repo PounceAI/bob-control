@@ -37,9 +37,18 @@ test("answerFollowup returns the model's answer on success (api backend)", async
   let body: any;
   const fetchImpl = (async (_u: string, init: any) => {
     body = JSON.parse(init.body);
-    return { ok: true, status: 200, json: async () => ({ content: [{ text: '{"answer":"Create both","escalate":false,"reason":"x"}' }] }) };
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ content: [{ text: '{"answer":"Create both","escalate":false,"reason":"x"}' }] }),
+    };
   }) as unknown as typeof fetch;
-  const r = await answerFollowup("Wait or create?", ["Wait", "Create both"], { task: "t", cwd: "/repo" }, { backend: "api", apiKey: "k", fetchImpl });
+  const r = await answerFollowup(
+    "Wait or create?",
+    ["Wait", "Create both"],
+    { task: "t", cwd: "/repo" },
+    { backend: "api", apiKey: "k", fetchImpl },
+  );
   assert.equal(r.answer, "Create both");
   // The question and offered options are passed to the model.
   assert.match(body.messages[0].content, /Wait or create\?/);
@@ -61,7 +70,10 @@ test("answerFollowup escalates (null) with no API key on the api backend", async
 
 test("answerFollowup escalates an empty question without calling the model", async () => {
   let called = false;
-  const fetchImpl = (async () => { called = true; return { ok: true, status: 200, json: async () => ({}) }; }) as unknown as typeof fetch;
+  const fetchImpl = (async () => {
+    called = true;
+    return { ok: true, status: 200, json: async () => ({}) };
+  }) as unknown as typeof fetch;
   const r = await answerFollowup("   ", [], { task: "t", cwd: "/repo" }, { backend: "api", apiKey: "k", fetchImpl });
   assert.equal(r.answer, null);
   assert.equal(called, false);

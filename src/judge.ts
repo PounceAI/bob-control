@@ -135,10 +135,10 @@ export function parseVerdict(text: string): JudgeVerdict {
   const NEG = String.raw`(?:not|no|won't|will\s+not|does\s*n['’]?t|can\s*not|can['’]?t)`;
   const hasNegatedPass = new RegExp(String.raw`\b${NEG}\s+pass\b`, "i").test(text);
   const hasNegatedFail = new RegExp(String.raw`\b${NEG}\s+fail\b`, "i").test(text);
-  
+
   const failMatch = /\bFAIL\b/i.test(text);
   const passMatch = /\bPASS\b/i.test(text);
-  
+
   // If we have a negated pass ("will not pass"), treat as fail
   if (hasNegatedPass) {
     return { pass: false, reason: "judge verdict: FAIL" };

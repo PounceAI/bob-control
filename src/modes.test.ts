@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, classifierReachable, policyHasGrayZone, isReadOnlyMode, producesReviewFindings, judgeAppliesToMode } from "./modes.js";
+import {
+  resolveMode,
+  profileFor,
+  dispatchAutoApprove,
+  RISK_RANK,
+  classifierReachable,
+  policyHasGrayZone,
+  isReadOnlyMode,
+  producesReviewFindings,
+  judgeAppliesToMode,
+} from "./modes.js";
 
 // The dispatcher's routing is the source of truth for "what mode Bob runs a task
 // in". These tests pin that behavior; the plugin command docs must match it
@@ -168,8 +178,7 @@ test("every dispatched profile sends the autoApprovalEnabled master switch", () 
 
 // Mirror Bob's QMo: a command auto-runs only if some allowlist entry is a
 // case-insensitive prefix of it. Unmatched -> manual approval prompt.
-const isAllowed = (cmd: string, list: string[] = []) =>
-  list.some((p) => cmd.toLowerCase().startsWith(p.toLowerCase()));
+const isAllowed = (cmd: string, list: string[] = []) => list.some((p) => cmd.toLowerCase().startsWith(p.toLowerCase()));
 
 test("execute-capable profiles ship a curated allowlist that auto-runs safe commands but not destructive ones", () => {
   // Bob auto-approves a command only when alwaysAllowExecute AND it matches an
@@ -253,10 +262,7 @@ test("commandPolicy drives the derived allowedCommands", () => {
   assert.equal(profileFor("advanced").commandPolicy, "classifier");
   // none -> empty, auto -> ["*"], allowlist & classifier -> the curated list.
   assert.deepEqual(dispatchAutoApprove({ ...profileFor("ask") }).allowedCommands, []);
-  assert.deepEqual(
-    dispatchAutoApprove({ ...profileFor("code"), commandPolicy: "auto" }).allowedCommands,
-    ["*"],
-  );
+  assert.deepEqual(dispatchAutoApprove({ ...profileFor("code"), commandPolicy: "auto" }).allowedCommands, ["*"]);
   assert.ok(dispatchAutoApprove(profileFor("advanced")).allowedCommands.includes("npm "));
 });
 

@@ -36,7 +36,10 @@ export interface DispatchOptions {
    * when Bob is *blocking for approval* rather than just narrating (`say`); the
    * classifier keys off `ask === "command"` to approve/deny a pending command.
    */
-  onEvent?: (name: string, detail: { say?: string; ask?: string; text?: string; partial?: boolean; ts?: number }) => void;
+  onEvent?: (
+    name: string,
+    detail: { say?: string; ask?: string; text?: string; partial?: boolean; ts?: number },
+  ) => void;
 }
 
 export interface ReviewIssue {
@@ -174,11 +177,7 @@ export class BobClient {
       const payload = ev.payload ?? ev.data ?? ev;
       const taskId =
         payload?.taskId ??
-        (Array.isArray(payload)
-          ? typeof payload[0] === "string"
-            ? payload[0]
-            : payload[0]?.taskId
-          : undefined);
+        (Array.isArray(payload) ? (typeof payload[0] === "string" ? payload[0] : payload[0]?.taskId) : undefined);
 
       // Active-dispatch handling: bind id, capture result, settle on terminal.
       if (this.active) {
@@ -194,7 +193,7 @@ export class BobClient {
           const text: string = String(cline.text ?? "");
           if (say === "completion_result" && text.trim()) this.active.lastCompletion = text;
           else if (text.trim()) this.active.lastText = text;
-          
+
           // Capture submit_review_findings tool calls (review mode)
           if (say === "tool" && text && !cline.partial) {
             try {
@@ -209,7 +208,7 @@ export class BobClient {
               // Ignore parse errors; text may be incomplete or not JSON
             }
           }
-          
+
           // `ts` is the message's unique timestamp — the gates dedup on it so a
           // re-emitted ask is handled once while a genuine re-run (new ts) is handled again.
           const ts: number | undefined = typeof cline.ts === "number" ? cline.ts : undefined;
