@@ -1,5 +1,7 @@
 # Bob Control
 
+[![CI](https://github.com/Joshua-Gilbert/bob-control/actions/workflows/ci.yml/badge.svg)](https://github.com/Joshua-Gilbert/bob-control/actions/workflows/ci.yml)
+
 **What it adds to your stack — and why you should care.** An AI coding agent on its own is a
 chat window: you drive it one prompt at a time and babysit every approval. This library turns
 it into an **unattended queue worker** — fill a board and each task gets dispatched, auto-approved
@@ -230,6 +232,10 @@ re-dispatches a transient failure (timeout/abort) up to N times before parking i
 `--detect-plan-stop` catches a "completion" that wrote no code (Bob just presented a plan)
 and continues it instead of marking it done.
 
+The worker is resilient across Bob restarts: if the IPC pipe drops it reconnects on the next
+dispatch (instead of wedging), and on startup it re-queues any task a previous run left
+`in_progress` when it died mid-dispatch, so nothing is stranded.
+
 Each mode has a risk level, and the worker only dispatches tasks at or below
 `--max-risk` (default `standard`); higher-risk ones stay pending for manual
 dispatch. On finish the worker pops a tray toast (`--no-notify` to silence; the
@@ -448,18 +454,34 @@ Status lifecycle: `staged` (created non-pullable) → `pending` → `in_progress
 `needs_input` (awaiting a human answer) → back to `in_progress`, or a terminal
 `analysis_done` (read-only / no verified code) · `done` · `blocked` · `cancelled`.
 
+## Development
+
+```powershell
+npm run build         # tsc -> dist/ + the plugin bundle
+npm test              # node:test suite (board logic, gates, parsers, checkpoint, …)
+npm run lint          # ESLint 9 (flat config, typescript-eslint)
+npm run format        # Prettier --write   (format:check to verify)
+```
+
+CI (GitHub Actions, `windows-latest`, Node 22 + 24) runs lint → format-check → build →
+test-with-coverage on every push/PR; a red check blocks merge. Before opening a PR, run
+`npm run lint && npm run format:check && npm test`.
+
 ## Layout
 
 ```
 src/
   types.ts        task types and enums
-  db.ts           SQLite store and repository
+  db.ts           SQLite store + repository (connection, tasks, deps, artifacts, checkpoints)
+  questions.ts    board-native ask/answer/timeout round-trip (extracted from db.ts)
+  completion.ts   done-integrity gate: completeTask + Evidence (extracted from db.ts)
   modes.ts        mode slugs, router, per-mode risk + auto-approve profiles
   templates.ts    task templates
   bob-ipc.ts      async IPC client (BobClient; approve/reject/sendMessage)
   bob-polls.ts    verify-and-continue poll loop (re-dispatch until it passes)
   llm.ts          shared Claude transport (api / cli backends)
-  classify.ts     command-safety classifier (gray-zone command asks)
+  classify.ts     command-safety classifier (gray-zone command asks) + hard deny-list
+  json-extract.ts balanced-brace JSON extraction shared by classify/answer/judge
   command-gate.ts gray-zone approve/reject gate (worker -> IPC)
   answer.ts       answerer for Bob's followup questions
   followup-gate.ts answer-or-escalate gate for followup asks (worker -> IPC)
