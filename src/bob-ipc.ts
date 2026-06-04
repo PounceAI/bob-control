@@ -17,6 +17,10 @@ import net from "node:net";
  */
 
 const DELIM = "\f";
+// Cap the receive buffer so a peer that never sends a frame delimiter can't grow it without bound.
+const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+// Cap accumulated review findings so a flood of submit_review_findings frames can't grow unbounded.
+const MAX_REVIEW_FINDINGS = 1000;
 
 export interface DispatchOptions {
   text: string;
@@ -202,6 +206,12 @@ export class BobClient {
 
   private onData(chunk: Buffer): void {
     this.buffer += chunk.toString("utf8");
+    // A peer that never sends a delimiter must not grow the buffer without bound: once past the cap,
+    // keep only the tail after the last delimiter (a partial frame), or drop it entirely.
+    if (this.buffer.length > MAX_BUFFER_BYTES) {
+      const lastDelim = this.buffer.lastIndexOf(DELIM);
+      this.buffer = lastDelim === -1 ? "" : this.buffer.slice(lastDelim + 1);
+    }
     let idx: number;
     while ((idx = this.buffer.indexOf(DELIM)) !== -1) {
       const raw = this.buffer.slice(0, idx);
@@ -233,9 +243,11 @@ export class BobClient {
       const ev = msg.data ?? {};
       const name: string = ev.eventName ?? ev.event ?? ev.type ?? "event";
       const payload = ev.payload ?? ev.data ?? ev;
-      const taskId =
+      const rawTaskId =
         payload?.taskId ??
         (Array.isArray(payload) ? (typeof payload[0] === "string" ? payload[0] : payload[0]?.taskId) : undefined);
+      // Only accept a string task id — a malformed/non-string id must not bind or settle a dispatch.
+      const taskId: string | undefined = typeof rawTaskId === "string" ? rawTaskId : undefined;
 
       // Active-dispatch handling: bind id, capture result, settle on terminal.
       if (this.active) {
@@ -259,8 +271,12 @@ export class BobClient {
               if (parsed.tool === "submit_review_findings" && Array.isArray(parsed.issues)) {
                 // Append, don't overwrite: Bob may emit findings across multiple
                 // submit_review_findings calls (e.g. high-severity then low) — last-wins
-                // assignment would silently drop the earlier batches.
-                this.active.reviewFindings = [...(this.active.reviewFindings ?? []), ...parsed.issues];
+                // assignment would silently drop the earlier batches. Capped so a flood can't grow
+                // the array without bound.
+                this.active.reviewFindings = [...(this.active.reviewFindings ?? []), ...parsed.issues].slice(
+                  0,
+                  MAX_REVIEW_FINDINGS,
+                );
               }
             } catch {
               // Ignore parse errors; text may be incomplete or not JSON

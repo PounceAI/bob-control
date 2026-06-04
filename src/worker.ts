@@ -220,16 +220,6 @@ async function revertIfEnabled(opts: Opts, taskId: number): Promise<void> {
 }
 
 /**
- * Check if a task's dependencies are all satisfied (all must be 'done').
- * Returns null if satisfied, or a description of blocking dependencies if not.
- */
-function checkDependencies(task: Task): string | null {
-  // Delegate to the shared classifier so 'analysis_done' counts as satisfied (an analysis
-  // prerequisite legitimately finishes there; strict 'done' would deadlock analyze→implement).
-  return repo.blockingDependencies(task);
-}
-
-/**
  * Highest-priority pending task whose mode's risk is at or below the gate
  * and whose dependencies are all satisfied.
  * Returns the task plus counts of tasks skipped due to risk gate or blocked dependencies.
@@ -242,8 +232,8 @@ function pickEligible(opts: Opts): { task: Task | null; gated: number; blocked: 
   let task: Task | null = null;
 
   for (const t of pending) {
-    // Check dependencies first
-    const depBlock = checkDependencies(t);
+    // Check dependencies first (shared predicate — see db.blockingDependencies)
+    const depBlock = repo.blockingDependencies(t);
     if (depBlock) {
       console.log(`  skipping #${t.id} (blocked on ${depBlock})`);
       blocked++;

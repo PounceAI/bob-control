@@ -3,7 +3,7 @@ import "./suppress-warnings.js";
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import * as repo from "./db.js";
-import { TASK_PRIORITIES, TASK_STATUSES, isCompleted, type Task, type TaskStatus } from "./types.js";
+import { TASK_PRIORITIES, TASK_STATUSES, type Task, type TaskStatus } from "./types.js";
 import { BUILT_IN_MODES, isBuiltInMode, resolveMode } from "./modes.js";
 import { revertTaskToCheckpoint, deleteTaskAndCheckpoint } from "./checkpoint.js";
 import { TEMPLATES, getTemplate } from "./templates.js";
@@ -60,15 +60,9 @@ function fmtTask(t: Task, showBlocked = false): string {
   let blocked = "";
 
   if (showBlocked && t.depends_on.length > 0) {
-    // Check which dependencies are blocking
-    const blockingDeps: number[] = [];
-    for (const depId of t.depends_on) {
-      const dep = repo.getTask(depId);
-      // satisfied = isCompleted (done OR analysis_done), mirroring repo.blockingDependencies.
-      if (!dep || !isCompleted(dep.status)) {
-        blockingDeps.push(depId);
-      }
-    }
+    // Use the shared predicate (not a hand-rolled copy) so the CLI's blocked-on display can't drift
+    // from the worker's actual eligibility logic.
+    const blockingDeps = repo.blockingDependencyIds(t);
     if (blockingDeps.length > 0) {
       blocked = ` (blocked on ${blockingDeps.map((id) => `#${id}`).join(", ")})`;
     }

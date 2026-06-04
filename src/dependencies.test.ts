@@ -8,6 +8,7 @@ import {
   updateStatus,
   listTasks,
   blockingDependencies,
+  blockingDependencyIds,
   nextTask,
   claimTask,
   claimBlockReason,
@@ -245,6 +246,16 @@ describe("Task Dependencies", () => {
     const d = createTask({ title: "task2", depends_on: [c.id] });
     updateStatus(c.id, "done");
     assert.equal(blockingDependencies(getTask(d.id)!), null);
+  });
+
+  it("blockingDependencyIds returns only the unsatisfied dependency ids (the shared predicate)", () => {
+    const a = createTask({ title: "depA" });
+    const b = createTask({ title: "depB" });
+    const t = createTask({ title: "task", depends_on: [a.id, b.id] });
+    updateStatus(a.id, "analysis_done"); // satisfied (isCompleted ⇒ not blocking)
+    assert.deepEqual(blockingDependencyIds(getTask(t.id)!), [b.id]);
+    updateStatus(b.id, "done");
+    assert.deepEqual(blockingDependencyIds(getTask(t.id)!), []);
   });
 
   it("blockingDependencies: blocked/cancelled/staged/missing deps still block", () => {

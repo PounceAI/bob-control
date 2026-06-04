@@ -543,17 +543,27 @@ export function claimTask(id: number, assignee: string): Task | null {
   return getTask(id);
 }
 
-/** Unsatisfied dependencies (not yet isCompleted), or null if all are. Shared by the worker
- *  and CLI so analysis_done deps don't deadlock the analyze→implement pattern. */
-export function blockingDependencies(task: Task): string | null {
-  if (!task.depends_on.length) return null;
-  const blocking: string[] = [];
-  for (const depId of task.depends_on) {
+/** IDs of a task's dependencies that aren't satisfied yet (missing, or not isCompleted — so
+ *  'analysis_done' counts as done, avoiding the analyze→implement deadlock). The single source of
+ *  truth for "what blocks this task", shared by the worker's pickEligible, the claim chokepoint,
+ *  and the CLI's blocked-on display. */
+export function blockingDependencyIds(task: Task): number[] {
+  return task.depends_on.filter((depId) => {
     const dep = getTask(depId);
-    if (!dep) blocking.push(`#${depId}[missing]`);
-    else if (!isCompleted(dep.status)) blocking.push(`#${depId}[${dep.status}]`);
-  }
-  return blocking.length ? blocking.join(", ") : null;
+    return !dep || !isCompleted(dep.status);
+  });
+}
+
+/** Unsatisfied dependencies as a human-readable `#id[status]` string, or null if all are satisfied. */
+export function blockingDependencies(task: Task): string | null {
+  const ids = blockingDependencyIds(task);
+  if (!ids.length) return null;
+  return ids
+    .map((id) => {
+      const dep = getTask(id);
+      return `#${id}[${dep ? dep.status : "missing"}]`;
+    })
+    .join(", ");
 }
 
 /** Count tasks by status, zero-filled for every known status. Shared by board_status / CLI. */
