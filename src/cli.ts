@@ -4,6 +4,7 @@ import { writeFileSync } from "node:fs";
 import * as repo from "./db.js";
 import { TASK_PRIORITIES, TASK_STATUSES, isCompleted, type Task, type TaskStatus } from "./types.js";
 import { BUILT_IN_MODES, isBuiltInMode, resolveMode } from "./modes.js";
+import { revertTaskToCheckpoint, deleteTaskAndCheckpoint } from "./checkpoint.js";
 import { TEMPLATES, getTemplate } from "./templates.js";
 import { buildReport } from "./report.js";
 
@@ -104,6 +105,7 @@ Commands:
   answer <id> <question_id> <text>         answer a worker's board question (resumes the worker)
   result <id> <text> [--open]
   delete <id> [--force] [--cleanup]        refuses if the task recorded artifacts; --force deletes anyway, --cleanup also removes files
+  revert <id> [--force]                    roll the working tree back to the task's pre-task checkpoint (needs --checkpoint run; --force if HEAD moved)
   disarm [reason...]                       pause dispatch (no worker pulls until armed)
   arm                                      resume dispatch
   release [ids...] [--tag <tag>]           move staged tasks to pending (all if no filter)
@@ -115,7 +117,7 @@ Commands:
 Modes: ${BUILT_IN_MODES.join(" | ")} (or any custom mode slug). Omit --mode to auto-route on dispatch.
 `;
 
-function main(): void {
+async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
   const { flags, positional } = parse(rest);
 
@@ -367,12 +369,23 @@ function main(): void {
 
     case "delete": {
       const id = requireId(positional);
-      const r = repo.deleteTaskSafe(id, { force: flags.force === true, cleanup: flags.cleanup === true });
+      const r = await deleteTaskAndCheckpoint(id, { force: flags.force === true, cleanup: flags.cleanup === true });
       if (!r.deleted) {
         die(r.warning ?? `task ${id} not found`);
       }
       const cleaned = r.cleaned?.length ? ` (removed ${r.cleaned.length} file(s))` : "";
       console.log(`deleted #${id}${cleaned}`);
+      break;
+    }
+
+    case "revert": {
+      const id = requireId(positional);
+      const r = await revertTaskToCheckpoint(process.cwd(), id, "me", { force: flags.force === true });
+      if (r === null) die(`task ${id} has no checkpoint (run the worker with --checkpoint to capture one)`);
+      if (!r.reverted) die(r.note);
+      const removed = r.removed.length ? `, removed ${r.removed.length} created file(s)` : "";
+      const recovery = r.recoveryRef ? ` (recovery snapshot: ${r.recoveryRef})` : "";
+      console.log(`reverted #${id} to its pre-task checkpoint${removed}${recovery}`);
       break;
     }
 
@@ -463,4 +476,7 @@ function main(): void {
   }
 }
 
-main();
+main().catch((err) => {
+  console.error(`error: ${(err as Error).message}`);
+  process.exit(1);
+});

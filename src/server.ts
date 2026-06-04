@@ -5,6 +5,7 @@ import { z } from "zod";
 import * as repo from "./db.js";
 import { TASK_STATUSES, TASK_PRIORITIES, ARTIFACT_KINDS } from "./types.js";
 import { resolveMode, isReadOnlyMode } from "./modes.js";
+import { revertTaskToCheckpoint, deleteTaskAndCheckpoint } from "./checkpoint.js";
 import { buildReport } from "./report.js";
 
 const WORKER_ACTIVE_WINDOW_MS = 5 * 60 * 1000;
@@ -456,7 +457,7 @@ server.registerTool(
       cleanup: z.boolean().optional().describe("Also unlink the files the task wrote, then delete"),
     },
   },
-  async ({ id, force, cleanup }) => json({ id, ...repo.deleteTaskSafe(id, { force, cleanup }) }),
+  async ({ id, force, cleanup }) => json({ id, ...(await deleteTaskAndCheckpoint(id, { force, cleanup })) }),
 );
 
 // ---------------------------------------------------------------------------
@@ -567,6 +568,29 @@ server.registerTool(
       repo.listOpenQuestions().map((q) => [q.task_id, { text: q.text, options: q.options }]),
     );
     return { content: [{ type: "text", text: buildReport(tasks, notes, Date.now(), { status, openQuestions }) }] };
+  },
+);
+
+server.registerTool(
+  "revert_task",
+  {
+    title: "Revert a Task (roll back to its checkpoint)",
+    description:
+      "Restore the working tree to the task's pre-task checkpoint — undo what the task changed. " +
+      "Requires a checkpoint (captured when the worker ran with --checkpoint). REFUSES if this " +
+      "server's repo isn't the one the task edited, or if HEAD moved since capture (pass force to " +
+      "override). The pre-revert state is pinned to a recovery ref. Restores tracked files (HEAD " +
+      "untouched) and removes files the task created.",
+    inputSchema: {
+      id: z.number().int(),
+      force: z.boolean().optional().describe("Revert even if HEAD moved since the checkpoint"),
+    },
+  },
+  async ({ id, force }) => {
+    const r = await revertTaskToCheckpoint(process.cwd(), id, "human", { force });
+    if (r === null) return fail(`Task ${id} has no checkpoint (run the worker with --checkpoint to capture one)`);
+    if (!r.reverted) return fail(r.note);
+    return json({ id, reverted: true, removed: r.removed, recoveryRef: r.recoveryRef ?? null, note: r.note });
   },
 );
 

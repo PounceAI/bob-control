@@ -14,6 +14,7 @@ import type {
   ArtifactKind,
   TaskQuestion,
   QuestionState,
+  TaskCheckpoint,
 } from "./types.js";
 import { CLAIMABLE_STATUS, isCompleted, TASK_STATUSES } from "./types.js";
 
@@ -130,6 +131,7 @@ function migrate(d: DatabaseSync): void {
   addColumnIfMissing(d, "tasks", "mode", "TEXT");
   addColumnIfMissing(d, "tasks", "depends_on", "TEXT");
   addColumnIfMissing(d, "tasks", "retry_attempts", "INTEGER DEFAULT 0");
+  addColumnIfMissing(d, "tasks", "checkpoint", "TEXT");
 }
 
 /**
@@ -940,6 +942,45 @@ export function expireOverdueQuestions(nowMs: number = Date.now()): number {
     if (questionState(r.question_id, nowMs).status === "timed_out") n++;
   }
   return n;
+}
+
+// ---------------------------------------------------------------------------
+// Per-task checkpoint (pre-task git state for rollback; see src/checkpoint.ts)
+// ---------------------------------------------------------------------------
+export function setCheckpoint(taskId: number, cp: TaskCheckpoint): void {
+  if (!getTask(taskId)) return;
+  getDb()
+    .prepare("UPDATE tasks SET checkpoint = ?, updated_at = ? WHERE id = ?")
+    .run(JSON.stringify(cp), nowIso(), taskId);
+}
+
+export function getCheckpoint(taskId: number): TaskCheckpoint | null {
+  const row = getDb().prepare("SELECT checkpoint FROM tasks WHERE id = ?").get(taskId) as
+    | { checkpoint?: string }
+    | undefined;
+  if (!row?.checkpoint) return null;
+  try {
+    const cp = JSON.parse(row.checkpoint);
+    if (
+      cp &&
+      typeof cp.root === "string" &&
+      typeof cp.ref === "string" &&
+      (cp.head === null || typeof cp.head === "string") &&
+      Array.isArray(cp.untracked) &&
+      // all strings: a non-string would make restore miss a real filename and delete it as task-created
+      cp.untracked.every((u: unknown) => typeof u === "string")
+    ) {
+      return cp as TaskCheckpoint;
+    }
+  } catch {
+    /* malformed */
+  }
+  return null;
+}
+
+/** Drop a task's checkpoint (after it's been consumed by a revert). */
+export function clearCheckpoint(taskId: number): void {
+  getDb().prepare("UPDATE tasks SET checkpoint = NULL, updated_at = ? WHERE id = ?").run(nowIso(), taskId);
 }
 
 /** Increment the retry_attempts counter for a task. Returns the updated task. */
