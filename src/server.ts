@@ -60,22 +60,12 @@ server.registerTool(
   "create_task",
   {
     title: "Create Task",
-    description:
-      "Provision a new task for Bob to work on. Returns the created task including its id.",
+    description: "Provision a new task for Bob to work on. Returns the created task including its id.",
     inputSchema: {
       title: z.string().min(1).describe("Short, action-oriented task title"),
-      description: z
-        .string()
-        .optional()
-        .describe("Detailed instructions, context, and acceptance criteria"),
-      priority: z
-        .enum(TASK_PRIORITIES)
-        .optional()
-        .describe("Priority bucket (default: medium)"),
-      tags: z
-        .array(z.string())
-        .optional()
-        .describe("Labels for filtering, e.g. ['rpg','refactor']"),
+      description: z.string().optional().describe("Detailed instructions, context, and acceptance criteria"),
+      priority: z.enum(TASK_PRIORITIES).optional().describe("Priority bucket (default: medium)"),
+      tags: z.array(z.string()).optional().describe("Labels for filtering, e.g. ['rpg','refactor']"),
       mode: z
         .string()
         .optional()
@@ -121,8 +111,7 @@ server.registerTool(
   "list_tasks",
   {
     title: "List Tasks",
-    description:
-      "List tasks, optionally filtered by status and/or tag. Ordered by priority, then oldest first.",
+    description: "List tasks, optionally filtered by status and/or tag. Ordered by priority, then oldest first.",
     inputSchema: {
       status: z.enum(TASK_STATUSES).optional(),
       tag: z.string().optional(),
@@ -159,10 +148,7 @@ server.registerTool(
       "Fetch the highest-priority pending task. Optionally filter by tag, and optionally claim it (mark in_progress + assign) in the same call.",
     inputSchema: {
       tag: z.string().optional(),
-      claim: z
-        .boolean()
-        .optional()
-        .describe("If true, immediately mark the task in_progress and assign it"),
+      claim: z.boolean().optional().describe("If true, immediately mark the task in_progress and assign it"),
       assignee: z.string().optional().describe("Who is taking the task (default: 'bob')"),
     },
   },
@@ -171,7 +157,8 @@ server.registerTool(
     const task = repo.nextTask({ tag });
     // null also means the board is disarmed — say so rather than look empty.
     if (!task) {
-      if (!repo.isBoardArmed()) return json({ task: null, board: "disarmed", note: "dispatch is paused; arm the board to pull" });
+      if (!repo.isBoardArmed())
+        return json({ task: null, board: "disarmed", note: "dispatch is paused; arm the board to pull" });
       return json(null);
     }
     if (claim) {
@@ -219,7 +206,9 @@ server.registerTool(
     // race, and 'needs_input' must carry a real question (only ask_question may set it, else the
     // task is an orphaned awaiting-answer with nothing to answer).
     if (status === "staged" || status === "needs_input") {
-      return fail(`cannot move a task to '${status}' via update_task_status; use ${status === "staged" ? "create staged:true / release_tasks" : "ask_question"}`);
+      return fail(
+        `cannot move a task to '${status}' via update_task_status; use ${status === "staged" ? "create staged:true / release_tasks" : "ask_question"}`,
+      );
     }
     const task = repo.updateStatus(id, status);
     // Manual done is allowed (backward-compatible), but flag it when there's no
@@ -328,7 +317,9 @@ server.registerTool(
     // A question can only be raised on a task being actively worked (claimed = in_progress),
     // so a stale/duplicate ask can't resurrect a finished/unclaimed task into needs_input.
     if (task.status !== "in_progress" && task.status !== "needs_input") {
-      return fail(`can only ask on a task being worked (status is '${task.status}', expected in_progress); claim it first`);
+      return fail(
+        `can only ask on a task being worked (status is '${task.status}', expected in_progress); claim it first`,
+      );
     }
     const q = repo.askQuestion(task_id, text, options, timeout_ms);
     if (!q) return fail(`Task ${task_id} not found`);
@@ -386,7 +377,10 @@ server.registerTool(
       if (st.status === "unknown") return fail(`no question '${question_id}'`);
       if (st.status === "answered") return json({ status: "answered", answer: st.answer ?? "" });
       if (st.status === "timed_out") {
-        return json({ status: "timed_out", note: "question timed out — task parked blocked; do not fabricate an answer" });
+        return json({
+          status: "timed_out",
+          note: "question timed out — task parked blocked; do not fabricate an answer",
+        });
       }
       if (Date.now() >= deadline) return json({ status: "waiting", note: "no answer yet — call await_answer again" });
       await sleep(AWAIT_POLL_INTERVAL_MS);
@@ -406,9 +400,7 @@ server.registerTool(
       "Set or clear a task's Bob mode slug. Pass an empty string to clear it and let the dispatcher auto-route.",
     inputSchema: {
       id: z.number().int(),
-      mode: z
-        .string()
-        .describe("Mode slug ('code' | 'advanced' | 'ask' | 'orchestrator' | custom), or '' to clear"),
+      mode: z.string().describe("Mode slug ('code' | 'advanced' | 'ask' | 'orchestrator' | custom), or '' to clear"),
     },
   },
   async ({ id, mode }) => {
@@ -426,9 +418,7 @@ server.registerTool(
       "Set or clear a task's dependencies. All dependencies must be 'done' before the task is eligible. Pass an empty array to clear dependencies.",
     inputSchema: {
       id: z.number().int().describe("Task id"),
-      depends_on: z
-        .array(z.number().int())
-        .describe("Task IDs this task depends on (empty array clears dependencies)"),
+      depends_on: z.array(z.number().int()).describe("Task IDs this task depends on (empty array clears dependencies)"),
     },
   },
   async ({ id, depends_on }) => {

@@ -19,9 +19,7 @@ test("formatReviewFindings skips malformed issue entries", () => {
 });
 
 test("formatReviewFindings tolerates a missing severity/category", () => {
-  const md = formatReviewFindings([
-    { title: "No sev", description: "d" } as unknown as ReviewIssue,
-  ]);
+  const md = formatReviewFindings([{ title: "No sev", description: "d" } as unknown as ReviewIssue]);
   assert.ok(md.includes("### INFO: No sev"));
   assert.ok(md.includes("**Category:** general"));
 });
@@ -77,11 +75,9 @@ test("parseReviewFindings handles a section with no severity prefix or fix", () 
 
 test("parseReviewFindings recovers an inline 'Severity:' heading suffix", () => {
   // The shape Bob emitted on a real run: severity in the heading, not leading.
-  const md = [
-    "### Critical Bug - Severity: HIGH",
-    "**Location:** sum.ts:2",
-    "Uninitialized variable causes NaN.",
-  ].join("\n");
+  const md = ["### Critical Bug - Severity: HIGH", "**Location:** sum.ts:2", "Uninitialized variable causes NaN."].join(
+    "\n",
+  );
   const [issue] = parseReviewFindings(md);
   assert.equal(issue.severity, "high");
   assert.equal(issue.title, "Critical Bug");

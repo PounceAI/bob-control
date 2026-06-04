@@ -50,8 +50,7 @@ export function parseDecision(text: string): Classification {
   } catch {
     return { decision: "ask", reason: "unparseable classifier output" };
   }
-  const decision: Decision =
-    obj?.decision === "approve" || obj?.decision === "deny" ? obj.decision : "ask";
+  const decision: Decision = obj?.decision === "approve" || obj?.decision === "deny" ? obj.decision : "ask";
   const reason = typeof obj?.reason === "string" && obj.reason.trim() ? obj.reason.trim() : "(no reason)";
   return { decision, reason };
 }

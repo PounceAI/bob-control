@@ -152,7 +152,10 @@ function ensureGitignore(dbPath: string): void {
     }
     // Respect existing patterns (incl. simple globs like *.db / *.db-wal / tasks.db*)
     // so we don't append redundant lines on every open in a repo that already ignores them.
-    const patterns = existing.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const patterns = existing
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
     const covered = (t: string): boolean =>
       patterns.some(
         (p) =>
@@ -170,12 +173,7 @@ function ensureGitignore(dbPath: string): void {
   }
 }
 
-function addColumnIfMissing(
-  d: DatabaseSync,
-  table: string,
-  column: string,
-  type: string,
-): void {
+function addColumnIfMissing(d: DatabaseSync, table: string, column: string, type: string): void {
   // Identifiers/types can't be bound as params, so they're interpolated. Only
   // call with hardcoded literals; the guard turns user input into a hard failure.
   const SAFE = /^[A-Za-z_][A-Za-z0-9_ ]*$/;
@@ -301,8 +299,7 @@ function rowToNote(r: Record<string, unknown>): TaskNote {
 }
 
 // Sort key: priority bucket first, then oldest-first within a bucket.
-const PRIORITY_SQL =
-  "CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END";
+const PRIORITY_SQL = "CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END";
 
 export interface CreateTaskInput {
   title: string;
@@ -380,8 +377,11 @@ export function setDependencies(id: number, depends_on: number[]): Task | null {
     throw new Error(cycleError);
   }
 
-  d.prepare("UPDATE tasks SET depends_on = ?, updated_at = ? WHERE id = ?")
-    .run(JSON.stringify(depends_on), nowIso(), id);
+  d.prepare("UPDATE tasks SET depends_on = ?, updated_at = ? WHERE id = ?").run(
+    JSON.stringify(depends_on),
+    nowIso(),
+    id,
+  );
 
   return getTask(id);
 }
@@ -389,16 +389,12 @@ export function setDependencies(id: number, depends_on: number[]): Task | null {
 /** Set (or clear) a task's mode slug. */
 export function setMode(id: number, mode: string | null): Task | null {
   if (!getTask(id)) return null;
-  getDb()
-    .prepare("UPDATE tasks SET mode = ?, updated_at = ? WHERE id = ?")
-    .run(mode, nowIso(), id);
+  getDb().prepare("UPDATE tasks SET mode = ?, updated_at = ? WHERE id = ?").run(mode, nowIso(), id);
   return getTask(id);
 }
 
 export function getTask(id: number): Task | null {
-  const row = getDb().prepare("SELECT * FROM tasks WHERE id = ?").get(id) as
-    | Record<string, unknown>
-    | undefined;
+  const row = getDb().prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Record<string, unknown> | undefined;
   return row ? rowToTask(row) : null;
 }
 
@@ -422,9 +418,11 @@ export function listTasks(opts: ListTasksOptions = {}): Task[] {
     sql += " LIMIT ?";
     params.push(opts.limit);
   }
-  let rows = (getDb().prepare(sql).all(...(params as any[])) as Record<string, unknown>[]).map(
-    rowToTask,
-  );
+  let rows = (
+    getDb()
+      .prepare(sql)
+      .all(...(params as any[])) as Record<string, unknown>[]
+  ).map(rowToTask);
   if (opts.tag) {
     rows = rows.filter((t) => t.tags.includes(opts.tag!));
     if (opts.limit) rows = rows.slice(0, opts.limit);
@@ -539,9 +537,7 @@ export function countByStatus(tasks: Task[]): Record<TaskStatus, number> {
 
 export function updateStatus(id: number, status: TaskStatus): Task | null {
   if (!getTask(id)) return null;
-  getDb()
-    .prepare("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?")
-    .run(status, nowIso(), id);
+  getDb().prepare("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?").run(status, nowIso(), id);
   return getTask(id);
 }
 
@@ -553,9 +549,7 @@ function writeResult(id: number, result: string, status?: TaskStatus): void {
       .prepare("UPDATE tasks SET result = ?, status = ?, updated_at = ? WHERE id = ?")
       .run(result, status, now, id);
   } else {
-    getDb()
-      .prepare("UPDATE tasks SET result = ?, updated_at = ? WHERE id = ?")
-      .run(result, now, id);
+    getDb().prepare("UPDATE tasks SET result = ?, updated_at = ? WHERE id = ?").run(result, now, id);
   }
 }
 
@@ -583,9 +577,9 @@ function evidenceHasChanges(e?: Evidence): boolean {
   if (!e) return false;
   return Boolean(
     (e.files_changed && e.files_changed > 0) ||
-      (e.files && e.files.length > 0) ||
-      (e.commit && e.commit.trim()) ||
-      (e.test && e.test.trim()),
+    (e.files && e.files.length > 0) ||
+    (e.commit && e.commit.trim()) ||
+    (e.test && e.test.trim()),
   );
 }
 
@@ -663,9 +657,10 @@ export function addNote(taskId: number, note: string, author?: string): TaskNote
 
 export function getNotes(taskId: number): TaskNote[] {
   return (
-    getDb()
-      .prepare("SELECT * FROM task_notes WHERE task_id = ? ORDER BY created_at ASC")
-      .all(taskId) as Record<string, unknown>[]
+    getDb().prepare("SELECT * FROM task_notes WHERE task_id = ? ORDER BY created_at ASC").all(taskId) as Record<
+      string,
+      unknown
+    >[]
   ).map(rowToNote);
 }
 
@@ -709,9 +704,10 @@ export function recordArtifact(
 
 export function getArtifacts(taskId: number): TaskArtifact[] {
   return (
-    getDb()
-      .prepare("SELECT * FROM task_artifacts WHERE task_id = ? ORDER BY created_at ASC")
-      .all(taskId) as Record<string, unknown>[]
+    getDb().prepare("SELECT * FROM task_artifacts WHERE task_id = ? ORDER BY created_at ASC").all(taskId) as Record<
+      string,
+      unknown
+    >[]
   ).map(rowToArtifact);
 }
 
@@ -740,10 +736,7 @@ export interface DeleteSafeResult {
  * recorded artifacts (files written, commits, tests), refuse unless `force`, and with
  * `cleanup` also unlink the orphaned files. Tasks with no side effects delete as before.
  */
-export function deleteTaskSafe(
-  id: number,
-  opts: { force?: boolean; cleanup?: boolean } = {},
-): DeleteSafeResult {
+export function deleteTaskSafe(id: number, opts: { force?: boolean; cleanup?: boolean } = {}): DeleteSafeResult {
   const task = getTask(id);
   if (!task) return { deleted: false, warning: `task #${id} not found` };
   const artifacts = getArtifacts(id);
@@ -817,9 +810,7 @@ export function askQuestion(
   if (task.status !== "in_progress" && task.status !== "needs_input") return null;
   // One open question per task: supersede any prior open one so the answer/timeout correlation
   // by question_id is unambiguous (getOpenQuestion can't shadow a second open row).
-  getDb()
-    .prepare("UPDATE task_questions SET status = 'timed_out' WHERE task_id = ? AND status = 'open'")
-    .run(taskId);
+  getDb().prepare("UPDATE task_questions SET status = 'timed_out' WHERE task_id = ? AND status = 'open'").run(taskId);
   const now = Date.now();
   const asked = nowIso();
   const deadline = new Date(now + Math.min(timeoutMs, MAX_QUESTION_TIMEOUT_MS)).toISOString();
@@ -837,9 +828,9 @@ export function askQuestion(
 }
 
 export function getQuestion(questionId: string): TaskQuestion | null {
-  const row = getDb()
-    .prepare("SELECT * FROM task_questions WHERE question_id = ?")
-    .get(questionId) as Record<string, unknown> | undefined;
+  const row = getDb().prepare("SELECT * FROM task_questions WHERE question_id = ?").get(questionId) as
+    | Record<string, unknown>
+    | undefined;
   return row ? rowToQuestion(row) : null;
 }
 
@@ -857,15 +848,14 @@ export function getOpenQuestion(taskId: number): TaskQuestion | null {
 /** All open questions across the board (for `bob questions`). */
 export function listOpenQuestions(): TaskQuestion[] {
   return (
-    getDb()
-      .prepare("SELECT * FROM task_questions WHERE status = 'open' ORDER BY asked_at ASC")
-      .all() as Record<string, unknown>[]
+    getDb().prepare("SELECT * FROM task_questions WHERE status = 'open' ORDER BY asked_at ASC").all() as Record<
+      string,
+      unknown
+    >[]
   ).map(rowToQuestion);
 }
 
-export type AnswerResult =
-  | { ok: true; alreadyAnswered: boolean }
-  | { ok: false; error: string };
+export type AnswerResult = { ok: true; alreadyAnswered: boolean } | { ok: false; error: string };
 
 /**
  * Answer a question, matched by its unique question_id (so a stale answer can't apply to a
@@ -912,7 +902,9 @@ export function questionState(
 ): { status: QuestionState | "unknown"; answer?: string } {
   const row = getDb()
     .prepare("SELECT task_id, status, answer, deadline_at FROM task_questions WHERE question_id = ?")
-    .get(questionId) as { task_id: number; status: QuestionState; answer: string | null; deadline_at: string } | undefined;
+    .get(questionId) as
+    | { task_id: number; status: QuestionState; answer: string | null; deadline_at: string }
+    | undefined;
   if (!row) return { status: "unknown" };
   if (row.status === "answered") return { status: "answered", answer: row.answer ?? "" };
   if (row.status === "open" && nowMs > Date.parse(row.deadline_at)) {
@@ -998,17 +990,13 @@ export function incrementRetryAttempts(id: number): Task | null {
   const task = getTask(id);
   if (!task) return null;
   const newCount = task.retry_attempts + 1;
-  getDb()
-    .prepare("UPDATE tasks SET retry_attempts = ?, updated_at = ? WHERE id = ?")
-    .run(newCount, nowIso(), id);
+  getDb().prepare("UPDATE tasks SET retry_attempts = ?, updated_at = ? WHERE id = ?").run(newCount, nowIso(), id);
   return getTask(id);
 }
 
 /** Reset retry_attempts to 0 for a task. Returns the updated task. */
 export function resetRetryAttempts(id: number): Task | null {
   if (!getTask(id)) return null;
-  getDb()
-    .prepare("UPDATE tasks SET retry_attempts = 0, updated_at = ? WHERE id = ?")
-    .run(nowIso(), id);
+  getDb().prepare("UPDATE tasks SET retry_attempts = 0, updated_at = ? WHERE id = ?").run(nowIso(), id);
   return getTask(id);
 }

@@ -39,11 +39,10 @@ export function notify(title: string, message: string, opts: NotifyOptions = {})
   const ps = lines.join(" ");
 
   try {
-    const child = spawn(
-      "powershell",
-      ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
-      { detached: true, stdio: "ignore" },
-    );
+    const child = spawn("powershell", ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps], {
+      detached: true,
+      stdio: "ignore",
+    });
     child.unref();
   } catch {
     /* best-effort */
@@ -51,5 +50,8 @@ export function notify(title: string, message: string, opts: NotifyOptions = {})
 }
 
 function sanitize(s: string): string {
-  return s.replace(/'/g, "''").replace(/[\r\n]+/g, " ").slice(0, 200);
+  return s
+    .replace(/'/g, "''")
+    .replace(/[\r\n]+/g, " ")
+    .slice(0, 200);
 }

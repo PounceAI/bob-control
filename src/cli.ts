@@ -154,15 +154,16 @@ async function main(): Promise<void> {
 
       const mode = str(flags.mode) ?? tpl?.mode;
       if (mode && !isBuiltInMode(mode)) {
-        console.error(`warning: '${mode}' is not a built-in mode (${BUILT_IN_MODES.join(", ")}); using it as a custom mode slug`);
+        console.error(
+          `warning: '${mode}' is not a built-in mode (${BUILT_IN_MODES.join(", ")}); using it as a custom mode slug`,
+        );
       }
       const tags = cliTags ?? tpl?.tags;
 
       try {
         const task = repo.createTask({
           title,
-          description:
-            str(flags.desc) ?? str(flags.description) ?? tpl?.scaffold(title) ?? null,
+          description: str(flags.desc) ?? str(flags.description) ?? tpl?.scaffold(title) ?? null,
           priority: (priority as Task["priority"] | undefined) ?? tpl?.priority,
           tags,
           mode: mode ?? null,
@@ -177,7 +178,7 @@ async function main(): Promise<void> {
     }
 
     case "templates": {
-      console.log("Task templates (use with: create \"<subject>\" --template <name>):\n");
+      console.log('Task templates (use with: create "<subject>" --template <name>):\n');
       for (const t of TEMPLATES) {
         console.log(`  ${t.name.padEnd(12)} {${t.mode}}/${t.priority}  ${t.about}`);
       }
@@ -241,7 +242,9 @@ async function main(): Promise<void> {
       // 'staged'/'needs_input' aren't arbitrary transitions: staged would resurrect the pull
       // race; needs_input must carry a real question (only ask_question sets it).
       if (status === "staged" || status === "needs_input") {
-        die(`cannot move a task to '${status}' via status; ${status === "staged" ? "create with --staged / use 'release'" : "questions are raised by a worker, not set here"}`);
+        die(
+          `cannot move a task to '${status}' via status; ${status === "staged" ? "create with --staged / use 'release'" : "questions are raised by a worker, not set here"}`,
+        );
       }
       if (!repo.getTask(id)) die(`task ${id} not found`);
       const task = repo.updateStatus(id, status as Task["status"]);
@@ -258,7 +261,9 @@ async function main(): Promise<void> {
       const id = requireId(positional);
       const slug = positional[1] ?? "";
       if (slug && !isBuiltInMode(slug)) {
-        console.error(`warning: '${slug}' is not a built-in mode (${BUILT_IN_MODES.join(", ")}); using it as a custom mode slug`);
+        console.error(
+          `warning: '${slug}' is not a built-in mode (${BUILT_IN_MODES.join(", ")}); using it as a custom mode slug`,
+        );
       }
       const task = repo.setMode(id, slug || null);
       if (!task) die(`task ${id} not found`);

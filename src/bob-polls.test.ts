@@ -5,10 +5,7 @@ import { createPollLoop, type PollDeps, type PollResult, type VerifyResult } fro
 // A recording harness: a poll loop wired to fakes that capture each continue
 // dispatch, log line, and note, plus a stub verifier the test controls. A continue
 // is a re-dispatch (with the full task + failure), so dispatchArgs counts continues.
-function harness(
-  over: Partial<PollDeps> = {},
-  verifyResults: VerifyResult[] = [{ passed: true, reason: "ok" }],
-) {
+function harness(over: Partial<PollDeps> = {}, verifyResults: VerifyResult[] = [{ passed: true, reason: "ok" }]) {
   const logs: string[] = [];
   const notes: Array<{ id: number; note: string; author?: string }> = [];
   const verifyArgs: any[] = [];
@@ -201,7 +198,10 @@ test("verify is called with the result text", async () => {
 });
 
 test("continue re-dispatches the full task plus the failure (context preserved)", async () => {
-  const h = harness({}, [{ passed: false, reason: "test failed" }, { passed: true, reason: "ok" }]);
+  const h = harness({}, [
+    { passed: false, reason: "test failed" },
+    { passed: true, reason: "ok" },
+  ]);
   await h.loop(initialResult());
   assert.equal(h.dispatchArgs.length, 1);
   assert.match(h.dispatchArgs[0], /Do the original task/, "carries the original task context");
@@ -500,9 +500,7 @@ test("plan-stop detection: combines with verify-and-continue correctly", async (
       checkDidWork: async (cwd, baseline) => {
         checkCount++;
         // First check: no work. After continue: work detected.
-        return checkCount === 1
-          ? { didWork: false, reason: "unchanged" }
-          : { didWork: true, reason: "changed" };
+        return checkCount === 1 ? { didWork: false, reason: "unchanged" } : { didWork: true, reason: "changed" };
       },
     },
     [

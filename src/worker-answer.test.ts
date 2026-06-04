@@ -11,7 +11,10 @@ function fakeGate(): AnswerableGate & { answers: string[] } {
 test("routes a valid answer to the matching task's gate only", () => {
   const g7 = fakeGate();
   const g9 = fakeGate();
-  const gates = new Map([[7, g7], [9, g9]]);
+  const gates = new Map([
+    [7, g7],
+    [9, g9],
+  ]);
   const logs: string[] = [];
   handleStdinAnswer(JSON.stringify({ taskId: 7, answer: "src/config.ts" }), gates, (m) => logs.push(m));
   assert.deepEqual(g7.answers, ["src/config.ts"]);

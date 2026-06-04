@@ -212,7 +212,6 @@ test("blocked (api, no key) warns exactly once and never classifies", async () =
   assert.equal(warnings.length, 1);
 });
 
-
 test("cache hit: repeated command uses cached verdict without re-classifying", async () => {
   const cache = new VerdictCache();
 

@@ -62,11 +62,7 @@ export interface PollDeps {
  * error handling"), so we conservatively PASS rather than trigger a spurious continue.
  * Exported so the composite verifier in worker.ts can reuse this logic.
  */
-export async function defaultVerify(
-  _result: string,
-  command: string | undefined,
-  cwd: string,
-): Promise<VerifyResult> {
+export async function defaultVerify(_result: string, command: string | undefined, cwd: string): Promise<VerifyResult> {
   if (!command) return { passed: true, reason: "no verify command — not checked" };
   // Run the verify command; exit code 0 = pass, non-zero = fail.
   return new Promise<VerifyResult>((resolve) => {
@@ -225,9 +221,7 @@ export function createPollLoop(deps: PollDeps): (initial: PollResult, baseline?:
         if (!didWork) {
           // No work detected: treat as a verification failure and continue.
           if (continueCount >= deps.maxContinues) {
-            deps.log(
-              `  [bob-polls] ✗ plan-stop detected after ${deps.maxContinues} continue(s) — giving up`,
-            );
+            deps.log(`  [bob-polls] ✗ plan-stop detected after ${deps.maxContinues} continue(s) — giving up`);
             deps.addNote(
               deps.task.id,
               `Plan-stop: Bob completed with no code changes after ${deps.maxContinues} continue(s). ${workReason}`,
@@ -272,11 +266,7 @@ export function createPollLoop(deps: PollDeps): (initial: PollResult, baseline?:
           deps.addNote(deps.task.id, `Verified on first try: ${reason}`, "bob-polls");
         } else {
           deps.log(`  [bob-polls] ✓ verified after ${continueCount} continue(s) (${reason})`);
-          deps.addNote(
-            deps.task.id,
-            `Verified after ${continueCount} continue(s): ${reason}`,
-            "bob-polls",
-          );
+          deps.addNote(deps.task.id, `Verified after ${continueCount} continue(s): ${reason}`, "bob-polls");
         }
         return current;
       }
@@ -284,9 +274,7 @@ export function createPollLoop(deps: PollDeps): (initial: PollResult, baseline?:
       // Verification failed.
       if (continueCount >= deps.maxContinues) {
         // Hit the cap: give up and return the last result as a failure.
-        deps.log(
-          `  [bob-polls] ✗ verification failed after ${deps.maxContinues} continue(s) — giving up`,
-        );
+        deps.log(`  [bob-polls] ✗ verification failed after ${deps.maxContinues} continue(s) — giving up`);
         deps.addNote(
           deps.task.id,
           `Verification failed after ${deps.maxContinues} continue(s). Last failure: ${reason}`,
@@ -312,11 +300,7 @@ export function createPollLoop(deps: PollDeps): (initial: PollResult, baseline?:
       // If Bob aborted/timed out on the continue, stop looping.
       if (!current.result.trim()) {
         deps.log(`  [bob-polls] continue #${continueCount} produced no result — stopping`);
-        deps.addNote(
-          deps.task.id,
-          `Continue #${continueCount} produced no result (${current.status})`,
-          "bob-polls",
-        );
+        deps.addNote(deps.task.id, `Continue #${continueCount} produced no result (${current.status})`, "bob-polls");
         return current;
       }
 

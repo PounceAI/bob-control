@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import { createFollowupGate, parseFollowup, type FollowupGateDeps, type FollowupEvent } from "./followup-gate.js";
 import type { FollowupAnswer } from "./answer.js";
 
-function harness(over: Partial<FollowupGateDeps> = {}, result: FollowupAnswer = { answer: "Create both", reason: "ok" }) {
+function harness(
+  over: Partial<FollowupGateDeps> = {},
+  result: FollowupAnswer = { answer: "Create both", reason: "ok" },
+) {
   const sent: string[] = [];
   const escalations: Array<{ question: string; options: string[] }> = [];
   const logs: string[] = [];
@@ -27,7 +30,16 @@ function harness(over: Partial<FollowupGateDeps> = {}, result: FollowupAnswer = 
     }) as FollowupGateDeps["answer"],
     ...over,
   });
-  return { gate: gateObj.gate, answerHuman: gateObj.answerHuman, getPending: gateObj.getPending, sent, escalations, logs, notes, answerArgs };
+  return {
+    gate: gateObj.gate,
+    answerHuman: gateObj.answerHuman,
+    getPending: gateObj.getPending,
+    sent,
+    escalations,
+    logs,
+    notes,
+    answerArgs,
+  };
 }
 
 const followup = (question: string, suggest: string[] = []): FollowupEvent => ({
@@ -38,7 +50,9 @@ const followup = (question: string, suggest: string[] = []): FollowupEvent => ({
 // --- parseFollowup ---
 
 test("parseFollowup extracts question + suggested option text", () => {
-  const p = parseFollowup(JSON.stringify({ question: "Wait or create?", suggest: [{ answer: "Wait" }, { answer: "Create" }] }));
+  const p = parseFollowup(
+    JSON.stringify({ question: "Wait or create?", suggest: [{ answer: "Wait" }, { answer: "Create" }] }),
+  );
   assert.deepEqual(p, { question: "Wait or create?", options: ["Wait", "Create"] });
 });
 
@@ -213,7 +227,16 @@ test("reviewPlans mode: plan questions escalate, mechanical ones auto-answer", a
       return question.includes("file") ? mechanicalResult : planResult;
     }) as FollowupGateDeps["answer"],
   });
-  const h = { gate: gateObj.gate, answerHuman: gateObj.answerHuman, getPending: gateObj.getPending, sent, escalations, logs, notes, answerArgs };
+  const h = {
+    gate: gateObj.gate,
+    answerHuman: gateObj.answerHuman,
+    getPending: gateObj.getPending,
+    sent,
+    escalations,
+    logs,
+    notes,
+    answerArgs,
+  };
 
   // Plan question should escalate
   await h.gate(followup("Should I proceed with this refactor?"));

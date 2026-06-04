@@ -229,4 +229,3 @@ test("currentAttempts is less than maxAttempts minus 1: retry allowed", () => {
   const decision = shouldRetry(result("timeout"), h.deps);
   assert.equal(decision.shouldRetry, true);
 });
-

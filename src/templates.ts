@@ -78,11 +78,7 @@ export const TEMPLATES: Template[] = [
     priority: "low",
     tags: ["docs"],
     scaffold: (s) =>
-      [
-        `Document: ${s}`,
-        "",
-        "Produce clear, accurate documentation with examples where useful.",
-      ].join("\n"),
+      [`Document: ${s}`, "", "Produce clear, accurate documentation with examples where useful."].join("\n"),
   },
   {
     name: "refactor",

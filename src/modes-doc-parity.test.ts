@@ -36,12 +36,7 @@ const REQUIRED = [
 // Files that enumerate the keyword router, with their path under claude-plugin/.
 // (bob-board/bob-triage/bob-work don't list keywords — bob-work defers to
 // /bob-route — so they're excluded.)
-const ROUTING_DOCS = [
-  "commands/bob-new.md",
-  "commands/bob-route.md",
-  "commands/bob-next.md",
-  "agents/bob-foreman.md",
-];
+const ROUTING_DOCS = ["commands/bob-new.md", "commands/bob-route.md", "commands/bob-next.md", "agents/bob-foreman.md"];
 
 for (const file of ROUTING_DOCS) {
   test(`${file} documents the full dispatcher keyword set`, () => {

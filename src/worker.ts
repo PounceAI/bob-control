@@ -1,7 +1,19 @@
 #!/usr/bin/env node
 import "./suppress-warnings.js";
 import * as repo from "./db.js";
-import { resolveMode, profileFor, dispatchAutoApprove, RISK_RANK, MODE_PROFILES, classifierReachable, policyHasGrayZone, producesReviewFindings, judgeAppliesToMode, isReadOnlyMode, type Risk } from "./modes.js";
+import {
+  resolveMode,
+  profileFor,
+  dispatchAutoApprove,
+  RISK_RANK,
+  MODE_PROFILES,
+  classifierReachable,
+  policyHasGrayZone,
+  producesReviewFindings,
+  judgeAppliesToMode,
+  isReadOnlyMode,
+  type Risk,
+} from "./modes.js";
 import { createCommandGate } from "./command-gate.js";
 import { createFollowupGate } from "./followup-gate.js";
 import { handleStdinAnswer } from "./worker-answer.js";
@@ -11,7 +23,14 @@ import { createPollLoop, defaultVerify, defaultCaptureSnapshot, type VerifyResul
 import { ExternalActivity } from "./defer.js";
 import { notify } from "./notify.js";
 import { shouldRetry, executeRetry } from "./retry-policy.js";
-import { judgeCompletion, captureGitDiff, captureGitBaseline, captureChangedFiles, type JudgeContext, type GitBaseline } from "./judge.js";
+import {
+  judgeCompletion,
+  captureGitDiff,
+  captureGitBaseline,
+  captureChangedFiles,
+  type JudgeContext,
+  type GitBaseline,
+} from "./judge.js";
 import { captureCheckpoint, revertTaskToCheckpoint } from "./checkpoint.js";
 import type { Task } from "./types.js";
 import { isCompleted } from "./types.js";
@@ -27,7 +46,14 @@ function buttonPatchPresent(): boolean | null {
   try {
     const target = join(
       process.env.LOCALAPPDATA ?? join(process.env.USERPROFILE ?? "", "AppData", "Local"),
-      "Programs", "IBM Bob", "resources", "app", "extensions", "bob-code", "dist", "extension.js",
+      "Programs",
+      "IBM Bob",
+      "resources",
+      "app",
+      "extensions",
+      "bob-code",
+      "dist",
+      "extension.js",
     );
     return readFileSync(target, "utf8").includes('"PressPrimaryButton"');
   } catch {
@@ -137,7 +163,10 @@ function parseOpts(argv: string[]): Opts {
   // Parse --allow-commands: comma-separated prefixes to extend the allowlist.
   const allowCommandsStr = val("--allow-commands");
   const allowCommands = allowCommandsStr
-    ? allowCommandsStr.split(",").map((s) => s.trim()).filter((s) => s.length > 0)
+    ? allowCommandsStr
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
     : [];
   return {
     once: has("--once"),
@@ -440,9 +469,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   // This allows detecting changes even when the tree is already dirty from prior tasks.
   // Reuses the poll loop's own snapshot fn so the baseline string-matches the snapshot
   // taken after a continue (the comparison in checkDidWork is exact-string).
-  const baseline: string | undefined = opts.detectPlanStop
-    ? await defaultCaptureSnapshot(process.cwd())
-    : undefined;
+  const baseline: string | undefined = opts.detectPlanStop ? await defaultCaptureSnapshot(process.cwd()) : undefined;
 
   // One pre-task git snapshot, reused by the judge (when on) AND by the completion
   // gate to compute execution evidence / record file artifacts. The judge needs it
@@ -536,11 +563,21 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     } else {
       console.log(`  ◑ ${finalStatus} — analysis captured (${result.length} chars), no verified code change${tail}`);
     }
-    emit(opts, "taskDone", { id: task.id, title: task.title, chars: result.length, status: finalStatus, filesChanged: changed.count });
+    emit(opts, "taskDone", {
+      id: task.id,
+      title: task.title,
+      chars: result.length,
+      status: finalStatus,
+      filesChanged: changed.count,
+    });
     if (opts.notify) notify(`Bob finished #${task.id} (${finalStatus})`, `${task.title} — ${result}`);
   } else if (verifyGaveUp) {
     repo.updateStatus(task.id, "blocked");
-    repo.addNote(task.id, `Blocked: result never passed verification after ${opts.maxContinues} continue(s).`, "worker");
+    repo.addNote(
+      task.id,
+      `Blocked: result never passed verification after ${opts.maxContinues} continue(s).`,
+      "worker",
+    );
     await revertIfEnabled(opts, task.id);
     console.log(`  ✗ verification never passed — task marked blocked`);
     emit(opts, "taskFail", { id: task.id, title: task.title, status: "verify-failed" });
@@ -586,7 +623,11 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
       const lastNote = lastText ? ` Last activity: ${lastText}` : "";
       const askNote = lastAsk ? ` Last pending ask: '${lastAsk}'.` : "";
       const retryNote = task.retry_attempts > 0 ? ` After ${task.retry_attempts} retry attempt(s).` : "";
-      repo.addNote(task.id, `Dispatch ended as '${res.status}' with no completion_result.${askNote}${lastNote}${retryNote}`, "worker");
+      repo.addNote(
+        task.id,
+        `Dispatch ended as '${res.status}' with no completion_result.${askNote}${lastNote}${retryNote}`,
+        "worker",
+      );
       await revertIfEnabled(opts, task.id);
       console.log(`  ✗ ${res.status} — task marked blocked (${retryDecision.reason})`);
       emit(opts, "taskFail", { id: task.id, title: task.title, status: res.status });
@@ -651,7 +692,9 @@ async function main(): Promise<void> {
     process.stdin.resume();
   }
 
-  console.log(`bob-worker: risk gate = --max-risk ${opts.maxRisk}; defer=${opts.defer ? `on(${opts.deferIdleMs}ms)` : "off"}.`);
+  console.log(
+    `bob-worker: risk gate = --max-risk ${opts.maxRisk}; defer=${opts.defer ? `on(${opts.deferIdleMs}ms)` : "off"}.`,
+  );
   if (opts.commandClassifier) {
     const be = opts.classifierBackend;
     const dflt = be === "cli" ? "claude-sonnet-4-6" : "claude-haiku-4-5";
@@ -689,32 +732,38 @@ async function main(): Promise<void> {
       : opts.escalateAll
         ? " — ESCALATE-ALL: all questions go to you for review"
         : "";
-    console.log(`bob-worker: followup answering = on, backend=${opts.classifierBackend} (Claude answers Bob's questions, escalates when unsure${auth}${escalateMode}).`);
+    console.log(
+      `bob-worker: followup answering = on, backend=${opts.classifierBackend} (Claude answers Bob's questions, escalates when unsure${auth}${escalateMode}).`,
+    );
   }
   if (opts.verifyAndContinue) {
     const cmd = opts.verifyCommand ? `command="${opts.verifyCommand}"` : "built-in heuristics";
     const judgeNote = opts.verifyJudge ? " + LLM judge" : "";
-    console.log(`bob-worker: verify-and-continue = on (${cmd}${judgeNote}, max ${opts.maxContinues} continue${opts.maxContinues === 1 ? "" : "s"}).`);
+    console.log(
+      `bob-worker: verify-and-continue = on (${cmd}${judgeNote}, max ${opts.maxContinues} continue${opts.maxContinues === 1 ? "" : "s"}).`,
+    );
     // Warn when judge is enabled but API key is missing (fail-open behavior)
     if (opts.verifyJudge && opts.classifierBackend === "api" && !process.env.ANTHROPIC_API_KEY) {
       console.log(
         "bob-worker: ⚠ LLM judge enabled but ANTHROPIC_API_KEY not set — " +
-        "judge will FAIL OPEN (pass all tasks) when it can't reach the LLM. " +
-        "Set ANTHROPIC_API_KEY or use --classifier-backend cli to enable judge verdicts."
+          "judge will FAIL OPEN (pass all tasks) when it can't reach the LLM. " +
+          "Set ANTHROPIC_API_KEY or use --classifier-backend cli to enable judge verdicts.",
       );
     }
   } else if (opts.verifyJudge) {
     // Warn when --verify-judge is set without --verify-and-continue (silent no-op)
     console.log(
       "bob-worker: ⚠ --verify-judge is set but --verify-and-continue is OFF — " +
-      "the judge will NOT run. Enable --verify-and-continue to use the judge."
+        "the judge will NOT run. Enable --verify-and-continue to use the judge.",
     );
   }
   if (opts.detectPlanStop) {
     console.log(`bob-worker: plan-stop detection = on (checks git working-tree for changes, auto-continues if clean).`);
   }
   if (opts.retry) {
-    console.log(`bob-worker: auto-retry = on (transient failures retry up to ${opts.maxRetryAttempts} total attempt${opts.maxRetryAttempts === 1 ? "" : "s"} with exponential backoff).`);
+    console.log(
+      `bob-worker: auto-retry = on (transient failures retry up to ${opts.maxRetryAttempts} total attempt${opts.maxRetryAttempts === 1 ? "" : "s"} with exponential backoff).`,
+    );
   }
   let idled = false;
   let deferring = false;
@@ -769,15 +818,15 @@ async function main(): Promise<void> {
           ? ` (${gated} pending task${gated > 1 ? "s" : ""} gated above --max-risk ${opts.maxRisk} — dispatch manually)`
           : "";
       const blockedMsg =
-        blocked > 0
-          ? ` (${blocked} pending task${blocked > 1 ? "s" : ""} blocked on dependencies)`
-          : "";
+        blocked > 0 ? ` (${blocked} pending task${blocked > 1 ? "s" : ""} blocked on dependencies)` : "";
       if (opts.once) {
         console.log(`bob-worker: no eligible pending tasks — exiting (--once)${gatedMsg}${blockedMsg}.`);
         break;
       }
       if (!idled) {
-        console.log(`bob-worker: no eligible tasks — idle-polling every ${opts.pollMs}ms${gatedMsg}${blockedMsg}. (Ctrl-C to stop)`);
+        console.log(
+          `bob-worker: no eligible tasks — idle-polling every ${opts.pollMs}ms${gatedMsg}${blockedMsg}. (Ctrl-C to stop)`,
+        );
         emit(opts, "idle", { gated, blocked });
         idled = true;
       }

@@ -112,7 +112,9 @@ export function parseReviewFindings(markdown: string): ReviewIssue[] {
     let title = heading;
     const sep = heading.indexOf(":");
     const leading = sep !== -1 ? heading.slice(0, sep).trim().toLowerCase() : "";
-    const inline = heading.match(/^(.*?)[\s\-–(]*severity:?\s*(critical|high|medium|low|info|warning|minor|major)\b\)?\s*$/i);
+    const inline = heading.match(
+      /^(.*?)[\s\-–(]*severity:?\s*(critical|high|medium|low|info|warning|minor|major)\b\)?\s*$/i,
+    );
     if (sep !== -1 && SEVERITIES.has(leading)) {
       severity = leading;
       title = heading.slice(sep + 1).trim();

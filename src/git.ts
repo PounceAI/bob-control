@@ -54,7 +54,10 @@ export async function gitOut(args: string[], cwd: string, maxChars?: number, env
 }
 
 export function splitLines(s: string): string[] {
-  return s.split("\n").map((l) => l.trim()).filter(Boolean);
+  return s
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
 }
 
 export async function isInsideWorkTree(cwd: string): Promise<boolean> {
@@ -86,7 +89,10 @@ export async function refExists(ref: string, cwd: string): Promise<boolean> {
  */
 export async function listUntracked(cwd: string): Promise<string[]> {
   const r = await runGit(["ls-files", "--others", "--exclude-standard", "-z"], cwd);
-  return r.stdout.split("\0").map((s) => s.trim()).filter(Boolean);
+  return r.stdout
+    .split("\0")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 // Per-call counter so two temp-index snapshots in one process never share a path (pid+ms alone can
