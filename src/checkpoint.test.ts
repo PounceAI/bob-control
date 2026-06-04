@@ -1,10 +1,11 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureCheckpoint, restoreCheckpoint, revertTaskToCheckpoint, deleteTaskAndCheckpoint } from "./checkpoint.js";
+import { snapshotWorktreeTree } from "./git.js";
 import { getDb, createTask, setCheckpoint, getCheckpoint, clearCheckpoint, getNotes, recordArtifact } from "./db.js";
 
 function git(dir: string, ...args: string[]): string {
@@ -150,6 +151,48 @@ describe("checkpoint capture + restore (real git)", () => {
     assert.ok(r.recoveryRef && /^refs\/bob\/recovery\//.test(r.recoveryRef), "recovery ref recorded");
     // The discarded work is recoverable from that ref.
     assert.equal(git(dir, "show", `${r.recoveryRef}:f.txt`), "v2-broken-but-wanted");
+    rm(dir);
+  });
+
+  it("recovery ref captures an UNTRACKED created file (stash create would have dropped it)", async () => {
+    const dir = makeRepo();
+    commit(dir, "f.txt", "v1");
+    const cp = (await captureCheckpoint(dir, 1))!;
+    // The task's ONLY change is a brand-new untracked file — the regression case: `git stash
+    // create` ignores untracked files, so the pre-fix recovery ref captured nothing here.
+    mkdirSync(join(dir, "created"));
+    writeFileSync(join(dir, "created", "work.txt"), "valuable new work");
+
+    const r = await restoreCheckpoint(dir, cp);
+    assert.equal(r.reverted, true);
+    assert.equal(existsSync(join(dir, "created", "work.txt")), false, "created file removed by revert");
+    assert.ok(
+      r.recoveryRef && /^refs\/bob\/recovery\//.test(r.recoveryRef),
+      "recovery ref recorded even for an untracked-only change",
+    );
+    // The discarded new file is fully recoverable from that ref.
+    assert.equal(git(dir, "show", `${r.recoveryRef}:created/work.txt`), "valuable new work");
+    rm(dir);
+  });
+
+  it("snapshotWorktreeTree captures untracked + tracked changes without touching the real index", async () => {
+    const dir = makeRepo();
+    commit(dir, "tracked.txt", "v1"); // index now matches HEAD at v1
+    writeFileSync(join(dir, "tracked.txt"), "v2"); // tracked modification (unstaged)
+    writeFileSync(join(dir, "untracked.txt"), "new"); // untracked addition
+
+    const tree = await snapshotWorktreeTree(dir);
+    assert.ok(tree && /^[0-9a-f]{40}$/.test(tree), "returns a tree sha");
+    assert.equal(git(dir, "show", `${tree}:tracked.txt`), "v2", "tracked modification captured");
+    assert.equal(git(dir, "show", `${tree}:untracked.txt`), "new", "untracked file captured");
+    // The real index is untouched — tracked.txt is still staged at v1, not the worktree's v2.
+    assert.equal(git(dir, "show", ":tracked.txt"), "v1", "real index not modified by the temp-index snapshot");
+    // The throwaway temp index (and its lock) is cleaned up, not leaked into the git dir.
+    assert.equal(
+      readdirSync(join(dir, ".git")).filter((f) => f.startsWith("bob-tmp-index")).length,
+      0,
+      "no temp index/lock leaked",
+    );
     rm(dir);
   });
 });
