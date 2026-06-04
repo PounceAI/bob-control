@@ -7,6 +7,7 @@
 // any transport error, or an unparseable reply all yield answer:null, which the
 // caller treats as "escalate to a human" — it never guesses on a risky question.
 import { callModel, type LlmDeps } from "./llm.js";
+import { parseFirstJsonObject } from "./json-extract.js";
 
 export interface AnswerContext {
   task: string;
@@ -39,17 +40,13 @@ function userContent(question: string, options: string[], ctx: AnswerContext): s
  * (answer:null) whenever the reply isn't a confident, non-empty answer.
  */
 export function parseAnswer(text: string): FollowupAnswer {
-  const m = text.match(/\{[\s\S]*\}/);
-  if (!m) return { answer: null, reason: "no JSON in answerer output" };
-  let obj: any;
-  try {
-    obj = JSON.parse(m[0]);
-  } catch {
-    return { answer: null, reason: "unparseable answerer output" };
-  }
-  const reason = typeof obj?.reason === "string" && obj.reason.trim() ? obj.reason.trim() : "(no reason)";
-  if (obj?.escalate === true) return { answer: null, reason };
-  const answer = typeof obj?.answer === "string" ? obj.answer.trim() : "";
+  // Balanced-object extraction (not a greedy /\{[\s\S]*\}/) so trailing prose after the JSON doesn't
+  // turn a confident answer into a spurious escalation.
+  const obj = parseFirstJsonObject(text) as { answer?: unknown; reason?: unknown; escalate?: unknown } | null;
+  if (!obj) return { answer: null, reason: "no parseable JSON in answerer output" };
+  const reason = typeof obj.reason === "string" && obj.reason.trim() ? obj.reason.trim() : "(no reason)";
+  if (obj.escalate === true) return { answer: null, reason };
+  const answer = typeof obj.answer === "string" ? obj.answer.trim() : "";
   if (!answer) return { answer: null, reason: reason === "(no reason)" ? "empty answer" : reason };
   return { answer, reason };
 }

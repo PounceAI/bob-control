@@ -181,6 +181,25 @@ test("shows per-task audit summary for classifier approvals and denials", () => 
   assert.match(line, /\[classifier: 2✓\/1✗\]/);
 });
 
+test("classifier audit reads the decision from the note PREFIX, not anywhere in the reason", () => {
+  const notes = new Map([
+    [
+      1,
+      [
+        // A deny whose REASON mentions "approve" must count as a deny, not an approval.
+        note("Classifier deny for `rm -rf /`: would approve in CI but unsafe here", "classifier"),
+        // A deferred ('ask') command is counted as deferred, not invisible.
+        note("Classifier ask for `curl x`: cli timeout", "classifier"),
+        note("Classifier approve for `npm test`: safe", "classifier"),
+      ],
+    ],
+  ]);
+  const md = buildReport([task({ id: 1, status: "in_progress" })], notes, NOW);
+  const line = md.split("\n").find((l) => l.includes("#1"))!;
+  assert.match(line, /\[classifier: 1✓\/1✗\/1\?\]/);
+  assert.match(md, /\*\*Classifier\*\*: 1 approved, 1 denied, 1 deferred \(~\$0\.30 estimated\)/);
+});
+
 test("shows per-task audit summary for answerer answers and escalations", () => {
   const notes = new Map([
     [

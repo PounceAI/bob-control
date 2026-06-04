@@ -7,6 +7,7 @@
 // command-safety prompt and the fail-safe parse: any error, timeout, or unparseable
 // answer yields "ask" (treated as "do not auto-approve" by the caller), never "approve".
 import { callModel, type LlmDeps } from "./llm.js";
+import { parseFirstJsonObject } from "./json-extract.js";
 
 export type Decision = "approve" | "deny" | "ask";
 export interface Classification {
@@ -77,16 +78,12 @@ export function hardDeny(command: string): string | null {
  * defaults to a safe "ask" when the output isn't a clear decision.
  */
 export function parseDecision(text: string): Classification {
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) return { decision: "ask", reason: "no JSON in classifier output" };
-  let obj: any;
-  try {
-    obj = JSON.parse(match[0]);
-  } catch {
-    return { decision: "ask", reason: "unparseable classifier output" };
-  }
-  const decision: Decision = obj?.decision === "approve" || obj?.decision === "deny" ? obj.decision : "ask";
-  const reason = typeof obj?.reason === "string" && obj.reason.trim() ? obj.reason.trim() : "(no reason)";
+  // Balanced-object extraction (not a greedy /\{[\s\S]*\}/): trailing prose or a stray brace after
+  // the JSON must not turn a clear approve/deny into a fail-safe "ask".
+  const obj = parseFirstJsonObject(text) as { decision?: unknown; reason?: unknown } | null;
+  if (!obj) return { decision: "ask", reason: "no parseable JSON in classifier output" };
+  const decision: Decision = obj.decision === "approve" || obj.decision === "deny" ? obj.decision : "ask";
+  const reason = typeof obj.reason === "string" && obj.reason.trim() ? obj.reason.trim() : "(no reason)";
   return { decision, reason };
 }
 

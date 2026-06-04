@@ -39,6 +39,11 @@ test("parseDecision tolerates surrounding prose and extracts the JSON", () => {
   assert.equal(parseDecision('Sure! {"decision":"approve","reason":"npm test"} hope that helps').decision, "approve");
 });
 
+test("parseDecision survives trailing prose that contains a brace (the greedy-regex bug)", () => {
+  // A greedy /\{[\s\S]*\}/ spans to the LAST brace and fails to parse → a clear approve became "ask".
+  assert.equal(parseDecision('{"decision":"approve","reason":"npm test"}\nNote: ${VAR} usage').decision, "approve");
+});
+
 test("parseDecision fails safe to 'ask' on garbage or unknown decisions", () => {
   assert.equal(parseDecision("not json at all").decision, "ask");
   assert.equal(parseDecision('{"decision":"maybe"}').decision, "ask");

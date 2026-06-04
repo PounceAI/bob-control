@@ -9,6 +9,8 @@ const CLASSIFIER_COST_PER_DECISION = 0.1;
 interface AuditCounts {
   classifierApprove: number;
   classifierDeny: number;
+  /** Commands the classifier deferred ('ask' → rejected) — neither approved nor denied. */
+  classifierAsk: number;
   answererAnswer: number;
   answererEscalate: number;
   humanAnswer: number;
@@ -57,6 +59,7 @@ function countAuditActivity(notes: TaskNote[]): AuditCounts {
   const counts: AuditCounts = {
     classifierApprove: 0,
     classifierDeny: 0,
+    classifierAsk: 0,
     answererAnswer: 0,
     answererEscalate: 0,
     humanAnswer: 0,
@@ -64,11 +67,15 @@ function countAuditActivity(notes: TaskNote[]): AuditCounts {
 
   for (const note of notes) {
     if (note.author === "classifier") {
-      // Classifier notes contain "approve" or "deny" in the text
-      if (/\bapprove\b/i.test(note.note)) {
-        counts.classifierApprove++;
-      } else if (/\bdeny\b/i.test(note.note)) {
-        counts.classifierDeny++;
+      // Notes are formatted "Classifier <decision> for `cmd`: <reason>". Read the decision from the
+      // fixed PREFIX, not anywhere in the body — a deny whose reason mentions "approve" must not be
+      // miscounted as an approval, and a deferred ('ask') command must not be invisible.
+      const m = /^Classifier (approve|deny|ask)\b/i.exec(note.note);
+      if (m) {
+        const decision = m[1].toLowerCase();
+        if (decision === "approve") counts.classifierApprove++;
+        else if (decision === "deny") counts.classifierDeny++;
+        else counts.classifierAsk++;
       }
     } else if (note.author === "answerer") {
       // Answerer notes: "Answered" = auto-answer, "escalated" = escalation
@@ -93,8 +100,9 @@ function countAuditActivity(notes: TaskNote[]): AuditCounts {
 function formatAuditSummary(counts: AuditCounts): string {
   const parts: string[] = [];
 
-  if (counts.classifierApprove > 0 || counts.classifierDeny > 0) {
-    parts.push(`classifier: ${counts.classifierApprove}✓/${counts.classifierDeny}✗`);
+  if (counts.classifierApprove > 0 || counts.classifierDeny > 0 || counts.classifierAsk > 0) {
+    const ask = counts.classifierAsk > 0 ? `/${counts.classifierAsk}?` : "";
+    parts.push(`classifier: ${counts.classifierApprove}✓/${counts.classifierDeny}✗${ask}`);
   }
 
   if (counts.answererAnswer > 0 || counts.answererEscalate > 0) {
@@ -130,6 +138,7 @@ export function buildReport(
   const boardAudit: AuditCounts = {
     classifierApprove: 0,
     classifierDeny: 0,
+    classifierAsk: 0,
     answererAnswer: 0,
     answererEscalate: 0,
     humanAnswer: 0,
@@ -155,6 +164,7 @@ export function buildReport(
       // Accumulate into board totals
       boardAudit.classifierApprove += audit.classifierApprove;
       boardAudit.classifierDeny += audit.classifierDeny;
+      boardAudit.classifierAsk += audit.classifierAsk;
       boardAudit.answererAnswer += audit.answererAnswer;
       boardAudit.answererEscalate += audit.answererEscalate;
       boardAudit.humanAnswer += audit.humanAnswer;
@@ -165,7 +175,7 @@ export function buildReport(
   }
 
   // Add board-level audit summary if there's any autonomous activity
-  const totalDecisions = boardAudit.classifierApprove + boardAudit.classifierDeny;
+  const totalDecisions = boardAudit.classifierApprove + boardAudit.classifierDeny + boardAudit.classifierAsk;
   if (
     totalDecisions > 0 ||
     boardAudit.answererAnswer > 0 ||
@@ -176,7 +186,8 @@ export function buildReport(
     if (totalDecisions > 0) {
       const estimatedCost = (totalDecisions * CLASSIFIER_COST_PER_DECISION).toFixed(2);
       out.push(
-        `- **Classifier**: ${boardAudit.classifierApprove} approved, ${boardAudit.classifierDeny} denied (~$${estimatedCost} estimated)`,
+        `- **Classifier**: ${boardAudit.classifierApprove} approved, ${boardAudit.classifierDeny} denied` +
+          `${boardAudit.classifierAsk > 0 ? `, ${boardAudit.classifierAsk} deferred` : ""} (~$${estimatedCost} estimated)`,
       );
     }
     if (boardAudit.answererAnswer > 0 || boardAudit.answererEscalate > 0) {
