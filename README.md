@@ -35,8 +35,11 @@ npm run smoke      # optional self-test
 ```
 
 Needs Node 22.5+ (uses the built-in `node:sqlite`, so there's no native build step).
-The board lives at `data/tasks.db`; override with `BOB_TASKS_DB`, or set
-`BOB_TASKS_PORTABLE=1` for a shared `~/.bob-tasks/tasks.db` (see the plugin below).
+Board path resolution: `BOB_TASKS_DB` (explicit) › `BOB_TASKS_PORTABLE=1` (a shared
+`~/.bob-tasks/tasks.db`) › repo-local `data/tasks.db`. The plugin points each project at
+**its own** board (see [Boards are per project](#boards-are-per-project)). On first open the
+store also writes a `.gitignore` beside itself, so the board never lands as untracked state
+in a consuming repo.
 
 ## Connecting Bob
 
@@ -88,35 +91,47 @@ npm install && npm run build      # build also bundles claude-plugin/server/serv
 | `bob-foreman` subagent | Split a large request into several correctly-routed, ordered tasks |
 | **Skills** (model-invoked) | Ask for IBM Bob by name to dispatch its specialty modes: **bob-review** (`review`), **bob-plan** (`plan`), **bob-refactor** (`refactor`), **bob-security** (`devsecops`) |
 
-### Shared board
+### Boards are per project
 
-The plugin sets `BOB_TASKS_PORTABLE=1`, which puts the board at a fixed
-`~/.bob-tasks/tasks.db` (Windows: `%USERPROFILE%\.bob-tasks\tasks.db`) regardless of which
-repo you're in. Set the **same flag** in Bob's `.bob/mcp.json` (`"env": { "BOB_TASKS_PORTABLE":
-"1" }`) and both tools share one queue. `/bob-work` claims tasks as `claude` and leaves
-IBM-i/RPG work for Bob, so the two never double-work a task. The server logs the resolved
-board path on startup. (`BOB_TASKS_DB` still overrides with an explicit path; without either
-flag the board stays repo-local at `data/tasks.db`.)
+The plugin's MCP server points at **the open project's own** board —
+`${CLAUDE_PROJECT_DIR}/data/tasks.db` — so every repo has its own queue. For Bob to share a
+project's queue, its `.bob/mcp.json` must set the **same** `BOB_TASKS_DB` for that project;
+[`tools/init-project-board.mjs <dir>`](tools/init-project-board.mjs) scaffolds a correct
+per-project `.bob/mcp.json` (pointing at the shared connector's `dist/server.js`, with
+`BOB_TASKS_DB`/`cwd` set, and creates `data/`). `/bob-work` claims tasks as `claude` and
+leaves IBM-i/RPG work for Bob, so the two never double-work a task.
+
+Prefer one queue across **every** repo instead? Set `BOB_TASKS_PORTABLE=1` on both the plugin
+and Bob to share a fixed `~/.bob-tasks/tasks.db`. Either way the server logs the resolved
+board path on startup, so you can confirm both tools agree.
 
 ## Tools
 
 | Tool | Purpose |
 | ---- | ------- |
-| `create_task` | Add a task |
+| `create_task` | Add a task (`staged:true` = created non-pullable, for bulk curation) |
 | `list_tasks` | List tasks, filter by status/tag |
-| `get_task` | One task plus its notes |
-| `get_next_task` | Highest-priority pending task; optionally claim it |
-| `claim_task` | Mark in_progress and assign |
-| `update_task_status` | pending / in_progress / blocked / done / cancelled |
+| `get_task` | One task plus its notes and any open `pending_question` |
+| `get_next_task` | Highest-priority pending task; optionally claim it (null while disarmed) |
+| `claim_task` | Mark in_progress and assign (only `pending`, only while armed) |
+| `update_task_status` | Set status (pending / in_progress / blocked / analysis_done / done / cancelled; `staged` & `needs_input` are set by their own tools) |
 | `add_task_note` | Append a progress note |
-| `submit_result` | Attach a result and mark done |
+| `submit_result` | Complete a task: read-only run → `analysis_done`; implementation reaches `done` only with `evidence` |
 | `set_task_mode` | Set or clear a task's mode slug |
-| `set_task_dependencies` | Set/clear the task IDs this one waits on (all must be `done`); rejects cycles |
-| `delete_task` | Permanently delete a task and its notes |
+| `set_task_dependencies` | Set/clear the task IDs this one waits on (all must be done/analysis_done); rejects cycles |
+| `record_artifact` | Record a file/commit/test a worker produced (delete-safety + done-evidence) |
+| `delete_task` | Delete a task; warns/refuses if it recorded artifacts unless `force`, with optional `cleanup` |
 | `board_report` | Markdown standup/audit of the board, grouped by status |
+| `board_status` | Dispatch state: armed?, worker-active heuristic, counts by status |
+| `arm_board` / `disarm_board` | Resume / pause all dispatch (curation gate) |
+| `release_tasks` | Move staged tasks → pending (release after curation) |
+| `ask_question` | Raise a question for a human; parks the task `needs_input` (never guess) |
+| `answer_task_question` | Answer a worker's question (by `question_id`); resumes the worker |
+| `await_answer` | The worker's blocking wait for an answer (poll of the shared board) |
 
-A typical Bob loop: `get_next_task {claim:true}` then `add_task_note` while
-working, then `submit_result`.
+A typical Bob loop: `get_next_task {claim:true}` then `add_task_note` while working,
+then `submit_result`. If it needs a value it can't determine, `ask_question` → `await_answer`
+rather than guessing.
 
 ## CLI
 
@@ -124,19 +139,30 @@ The CLI shares the same store:
 
 ```powershell
 node dist/cli.js create "Modernize INVRPT report" --priority high --tags rpg
+node dist/cli.js create "Bulk task" --staged             # non-pullable until released
 node dist/cli.js list --status pending --tag rpg
 node dist/cli.js show 1
 node dist/cli.js claim 1 --assignee bob
-node dist/cli.js status 1 blocked                     # set status
-node dist/cli.js mode 1 refactor                      # set/clear the mode slug
-node dist/cli.js deps 3 1,2                            # task 3 waits on 1 and 2 (empty clears)
+node dist/cli.js status 1 blocked                        # set status (rejects staged/needs_input)
+node dist/cli.js mode 1 refactor                         # set/clear the mode slug
+node dist/cli.js deps 3 1,2                               # task 3 waits on 1 and 2 (empty clears)
 node dist/cli.js note 1 "Waiting on test data"
 node dist/cli.js result 1 "Done; 3 procedures extracted"
-node dist/cli.js next                                 # next pending task + its routed mode
-node dist/cli.js delete 1
+node dist/cli.js next                                    # next pending task + its routed mode
+node dist/cli.js delete 1 [--force] [--cleanup]          # refuses if it wrote files; cleanup removes created ones
 node dist/cli.js stats
-node dist/cli.js report                               # markdown standup/audit of the board
+node dist/cli.js report                                  # markdown standup/audit of the board
 node dist/cli.js report --status blocked --out report.md
+
+# curation gate (pause dispatch while you triage, then release)
+node dist/cli.js disarm "triaging"                        # no worker pulls until armed
+node dist/cli.js release --tag batch                      # staged -> pending (all, or by ids/tag)
+node dist/cli.js arm                                      # resume dispatch
+node dist/cli.js board                                    # armed? + counts by status
+
+# answer a worker's question (see "Asking a human" below)
+node dist/cli.js questions                                # open questions awaiting an answer
+node dist/cli.js answer 5 <question_id> pool size is 20
 ```
 
 `report` groups tasks by status in pull order, each with age, idle time, the
@@ -329,6 +355,39 @@ node dist/cli.js create "INVRPT report" --template bug-fix
 
 Built-ins: `bug-fix`, `feature`, `research`, `code-review`, `doc`, `refactor`.
 
+## Board safety gates
+
+Guardrails for running unattended at scale — so a bulk-create can't race a live worker, and
+"done" means something:
+
+- **Staging / arming.** Create tasks `staged` (non-pullable) and `release_tasks` them once
+  you've reviewed the set, or `disarm_board` to pause *all* dispatch while you curate, then
+  `arm_board`. A worker never pulls a staged task or pulls while disarmed (enforced in the
+  board layer, so both the worker and `/bob-work` obey it).
+- **Done-integrity.** A read-only run (`ask`/`plan`/`review`) terminates as **`analysis_done`**,
+  not `done`. An implementation task reaches `done` only with **execution evidence** (files
+  changed / commit / test); without it the worker parks it `analysis_done` rather than show
+  green for unbuilt work. `submit_result` takes an `evidence` field; the worker derives it from
+  the task's git diff.
+- **Delete-safety.** Workers record the files/commits they produce as task **artifacts**, so
+  `delete_task` warns and refuses when a task already wrote files (unless `force`); `cleanup`
+  removes only files the task *created* — never source it merely edited.
+
+## Asking a human (board round-trip)
+
+When a worker needs a value it can't determine, it **asks on the board and waits** — it does
+not guess. `ask_question` parks the task **`needs_input`** and writes the question (with
+optional multiple-choice `options`) where any board client can see it: `get_task` returns a
+`pending_question`, and `board_report` lists an **"❓ Awaiting answer"** group with how long
+it's been waiting. The worker then blocks on `await_answer` (a poll of the shared board).
+
+Anyone answers with one call — `answer_task_question(task_id, question_id, answer)` over MCP, or
+`bob answer <id> <question_id> <text>` from a terminal — and the waiting worker resumes. Answers
+are matched by a unique `question_id`, so a stale answer can't apply to a new question. Fail-safe:
+a question unanswered past its deadline times out and the task parks `blocked` (a board-activity
+sweep fires this even if the asking worker died) — never a fabricated answer, never a silent
+`done`. The `bob-work` skill follows this path instead of inventing a value.
+
 ## Driving Bob over IPC
 
 Bob starts a `node-ipc` server when launched with `ROO_CODE_IPC_SOCKET_PATH`
@@ -348,10 +407,14 @@ unattended runs — see above).
 
 ## Task model
 
-`id`, `title`, `description`, `status` (pending/in_progress/blocked/done/cancelled),
-`priority` (low/medium/high/urgent), `tags[]`, `mode` (or null to auto-route),
-`depends_on[]` (task IDs that must be `done` first), `assignee`, `result`, timestamps,
-and a per-task notes table.
+`id`, `title`, `description`, `status`, `priority` (low/medium/high/urgent), `tags[]`,
+`mode` (or null to auto-route), `depends_on[]` (task IDs that must be `done`/`analysis_done`
+first), `assignee`, `result`, timestamps, plus per-task **notes**, **artifacts**
+(files/commits/tests a worker produced), and **questions** (the ask/answer round-trip) tables.
+
+Status lifecycle: `staged` (created non-pullable) → `pending` → `in_progress` →
+`needs_input` (awaiting a human answer) → back to `in_progress`, or a terminal
+`analysis_done` (read-only / no verified code) · `done` · `blocked` · `cancelled`.
 
 ## Layout
 
