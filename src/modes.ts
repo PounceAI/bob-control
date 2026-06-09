@@ -1,4 +1,5 @@
 import type { Task } from "./types.js";
+import { DEFAULT_ALLOW_PREFIXES } from "./command-policy.js";
 
 // Bob's built-in modes. `mode` is stored as a free string so custom Roo
 // .roomodes slugs work too; setting configuration.mode on dispatch switches Bob.
@@ -110,43 +111,17 @@ export interface ModeProfile {
   };
 }
 
-// Safe command prefixes the worker lets Bob auto-run unattended (Bob's QMo does a
-// case-insensitive startsWith match). Anything NOT matched here — rm, del, format,
-// shutdown, or simply an unrecognized command — gets neither an allow nor a deny
-// match, so Bob's WMo returns "ask_user" and surfaces a manual approval prompt.
-// That is the guardrail: we deliberately avoid "*" (auto-run anything) and avoid
-// deniedCommands (which hard-*rejects* without asking) so risky commands pause for
-// a human (or, under the classifier policy, for Claude). A chained command (a && b)
+// Safe command prefixes the worker lets Bob auto-run unattended (Bob's QMo does a case-insensitive
+// startsWith match). Anything NOT matched here gets neither an allow nor a deny match, so Bob's WMo
+// returns "ask_user" and surfaces a manual approval prompt — which the worker's deterministic
+// permission gate (command-policy.ts) then resolves non-interactively (allow → approve, deny/unknown
+// → surface needs_input). We deliberately avoid "*" (auto-run anything). A chained command (a && b)
 // auto-runs only if every part matches.
-// Arg-taking entries end in a space ("npm ") so they can't match a longer word.
-// `ls`/`dir`/`pwd`/`tsc` are bare because they're valid with no args; they over-match
-// (ls→lsof) but only read-only tools, and no destructive command shares their prefix
-// (pinned by the SAFE_COMMANDS test).
-// `cd ` is included because agents routinely prefix a safe command with it
-// (`cd <workspace> && npm test`); since a chained command auto-runs only if EVERY part
-// matches, allowing `cd ` doesn't enable a dangerous tail (`cd x && rm -rf` still asks).
-export const SAFE_COMMANDS = [
-  "npm ",
-  "npx ",
-  "pnpm ",
-  "yarn ",
-  "node ",
-  "tsc",
-  "cd ",
-  "git ",
-  "ls",
-  "dir",
-  "pwd",
-  "cat ",
-  "type ",
-  "echo ",
-  "grep ",
-  "rg ",
-  "findstr ",
-  "python ",
-  "python3 ",
-  "pip ",
-];
+//
+// This list is the deterministic policy's allow prefixes (DEFAULT_ALLOW_PREFIXES) so the two never
+// drift: it scopes git to safe local subcommands (push / reset --hard are NOT here → they fall
+// through to the policy's deny), and has no bare `npm `/`pip ` (so installs fall through too).
+export const SAFE_COMMANDS: readonly string[] = DEFAULT_ALLOW_PREFIXES;
 
 const STANDARD: ModeProfile = {
   risk: "standard",
@@ -304,7 +279,8 @@ export function dispatchAutoApprove(
   profile: ModeProfile,
   extraCommands: string[] = [],
 ): ModeProfile["autoApprove"] & { allowedCommands: string[] } & typeof WORKFLOW_AUTO_APPROVE {
-  const baseCommands = profile.commandPolicy === "auto" ? ["*"] : profile.commandPolicy === "none" ? [] : SAFE_COMMANDS;
+  const baseCommands: string[] =
+    profile.commandPolicy === "auto" ? ["*"] : profile.commandPolicy === "none" ? [] : [...SAFE_COMMANDS];
   // Merge extra commands into the base allowlist (on top of SAFE_COMMANDS for allowlist/classifier policies)
   const allowedCommands =
     profile.commandPolicy === "none" || profile.commandPolicy === "auto"

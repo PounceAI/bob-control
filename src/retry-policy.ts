@@ -1,4 +1,4 @@
-// Auto-retry policy for transient task failures (timeout/abort). Extracted from
+// Auto-retry policy for transient task failures (timeout/abort/idle). Extracted from
 // the worker so it can be tested without a live Bob/IPC connection. When enabled
 // (--retry flag), transient failures re-queue the task with exponential backoff
 // instead of parking it blocked forever.
@@ -33,7 +33,7 @@ export interface RetryDecision {
 
 /**
  * Decide whether a failed dispatch should be retried. Only transient failures
- * (timeout/abort) are eligible; other failures (e.g., verification gave up,
+ * (timeout/abort/idle) are eligible; others (budget abort, verification gave up,
  * dependency blocks) are NOT retried to avoid infinite loops.
  */
 export function shouldRetry(result: DispatchResult, deps: RetryPolicyDeps): RetryDecision {
@@ -46,9 +46,12 @@ export function shouldRetry(result: DispatchResult, deps: RetryPolicyDeps): Retr
     };
   }
 
-  // Only retry transient failures: timeout or abort. Do NOT retry a task that
-  // completed (even if verification failed — that's handled by bob-polls, not here).
-  const isTransient = result.status === "timeout" || result.status === "aborted";
+  // Only retry transient failures. timeout/aborted are transient; 'idle' is too — the idle watchdog
+  // (shorter than the wall clock) now preempts what used to surface as a retryable 'timeout', so a
+  // plain no-progress stall must stay retryable. (A blocked-on-ask idle is handled upstream as a
+  // needs_input question and never reaches here.) 'budget' is NOT retried — a runaway that blew its
+  // ceiling would just blow it again. Completed-but-unverified is handled by bob-polls, not here.
+  const isTransient = result.status === "timeout" || result.status === "aborted" || result.status === "idle";
   if (!isTransient) {
     return {
       shouldRetry: false,

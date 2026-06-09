@@ -1,4 +1,6 @@
 import net from "node:net";
+import { IdleWatchdog } from "./watchdog.js";
+import { BudgetTracker, budgetExceeded, parseApiReqUsage } from "./budget.js";
 
 /**
  * Async client for IBM Bob's Roo Code IPC socket. Wire protocol (from
@@ -44,6 +46,21 @@ export interface DispatchOptions {
     name: string,
     detail: { say?: string; ask?: string; text?: string; partial?: boolean; ts?: number },
   ) => void;
+  /**
+   * Idle / blocked-on-ask watchdog window (ms). When the dispatch makes no progress for this long
+   * it ends as 'idle' instead of burning the full wall-clock. <= 0 or omitted disables it.
+   */
+  idleMs?: number;
+  /** Shorter window once an UNANSWERABLE blocking ask is seen, so a permission-prompt wedge ends
+   *  fast. <= 0 falls back to idleMs. Only meaningful with idleMs > 0. */
+  blockedAskGraceMs?: number;
+  /** Predicate: will a gate answer this ask type? An ask that returns false is "unanswerable" and
+   *  trips the watchdog's short grace. Omitted → every ask is treated as unanswerable. */
+  isAnswerableAsk?: (ask: string) => boolean;
+  /** Hard output-token ceiling; the dispatch ends as 'budget' once it's exceeded. <= 0 disables. */
+  tokenCeiling?: number;
+  /** Hard turn (api-request) cap; the dispatch ends as 'budget' once exceeded. <= 0 disables. */
+  turnCap?: number;
 }
 
 export interface ReviewIssue {
@@ -63,9 +80,25 @@ export interface DispatchResult {
   result: string;
   /** Last non-empty streamed say text (e.g. a tool call) — diagnostics only, NOT a completion. */
   lastText: string;
-  status: "completed" | "aborted" | "timeout";
+  /**
+   * How the dispatch ended:
+   *  - completed: Bob fired taskCompleted / attempt_completion.
+   *  - aborted:   the pipe dropped or Bob aborted the task.
+   *  - timeout:   the flat wall-clock elapsed.
+   *  - idle:      the watchdog tripped (no progress, or wedged on an unanswerable ask).
+   *  - budget:    the token/turn ceiling was exceeded (runaway backstop).
+   */
+  status: "completed" | "aborted" | "timeout" | "idle" | "budget";
   /** Review findings from submit_review_findings tool (review mode only). */
   reviewFindings?: ReviewIssue[];
+  /** The blocking ask still pending when the dispatch ended (drives a needs_input question). */
+  pendingAsk?: string;
+  /** That ask's payload text (e.g. the command awaiting approval). */
+  pendingAskText?: string;
+  /** Output tokens observed (from api-request events); 0 when Bob didn't report usage. */
+  tokensUsed?: number;
+  /** Distinct api requests observed (≈ assistant turns). */
+  turns?: number;
 }
 
 export interface TaskLifecycleEvent {
@@ -85,6 +118,16 @@ interface ActiveDispatch {
   timer: ReturnType<typeof setTimeout>;
   onEvent?: DispatchOptions["onEvent"];
   done: boolean;
+  /** Idle / blocked-on-ask watchdog (undefined when disabled). */
+  watchdog?: IdleWatchdog;
+  /** Accumulates token usage to enforce the budget ceiling. */
+  budget: BudgetTracker;
+  tokenCeiling?: number;
+  turnCap?: number;
+  isAnswerableAsk?: (ask: string) => boolean;
+  /** The blocking ask currently awaiting a response (cleared when progress resumes). */
+  pendingAsk?: string;
+  pendingAskText?: string;
 }
 
 /** Default to the node-ipc-mangled doubled pipe that Bob actually registers. */
@@ -261,11 +304,59 @@ export class BobClient {
           const ask: string | undefined = cline.ask;
           const say: string | undefined = cline.say ?? cline.ask;
           const text: string = String(cline.text ?? "");
+          const partial = !!cline.partial;
+          // `ts` is the message's unique timestamp — the gates + budget tracker dedup on it so a
+          // re-emitted ask/usage is handled once while a genuine re-run (new ts) is handled again.
+          const ts: number | undefined = typeof cline.ts === "number" ? cline.ts : undefined;
+          // A message whose taskId is KNOWN to differ from our dispatch (a concurrent chat in another
+          // tab, or an orchestrator subtask under its own id) must not drive OUR budget/watchdog — it
+          // could wrongly abort us as 'budget' or trip 'idle' on a foreign prompt. Unknown/undefined
+          // ids and our own id count as ours (fail-open: never abort on someone else's activity).
+          const isForeignTask = !!(taskId && this.active.ourTaskId && taskId !== this.active.ourTaskId);
           if (say === "completion_result" && text.trim()) this.active.lastCompletion = text;
           else if (text.trim()) this.active.lastText = text;
 
+          // Budget backstop: accumulate token usage from Bob's per-request 'api_req_started' say (Roo
+          // updates that one frame in place with final token counts under the same ts) and abort cleanly
+          // once a runaway dispatch crosses the token ceiling (or turn cap). Keying on the single
+          // canonical event avoids double-counting a separate api_req_finished frame.
+          if (!isForeignTask && say === "api_req_started") {
+            const usage = parseApiReqUsage(text);
+            if (usage) {
+              this.active.budget.update(ts, usage);
+              const over = budgetExceeded(this.active.budget, {
+                tokenCeiling: this.active.tokenCeiling,
+                turnCap: this.active.turnCap,
+              });
+              if (over) {
+                if (this.active.ourTaskId) this.cancel(this.active.ourTaskId);
+                this.finish("budget");
+                return;
+              }
+            }
+          }
+
+          // Idle / blocked-on-ask watchdog. A FINAL blocking ask arms the (short) grace when no gate
+          // will answer it; any non-ask message (streamed says, tool output) is progress and resets
+          // the idle window. Partial ask fragments are ignored so a streaming prompt can't keep
+          // resetting the grace and mask the wedge. Skipped for a foreign task (see isForeignTask).
+          if (!isForeignTask) {
+            if (ask) {
+              if (!partial) {
+                this.active.pendingAsk = ask;
+                this.active.pendingAskText = text;
+                const answerable = this.active.isAnswerableAsk ? this.active.isAnswerableAsk(ask) : false;
+                this.active.watchdog?.ask(ask, text, answerable);
+              }
+            } else {
+              this.active.pendingAsk = undefined;
+              this.active.pendingAskText = undefined;
+              this.active.watchdog?.activity();
+            }
+          }
+
           // Capture submit_review_findings tool calls (review mode)
-          if (say === "tool" && text && !cline.partial) {
+          if (say === "tool" && text && !partial) {
             try {
               const parsed = JSON.parse(text);
               if (parsed.tool === "submit_review_findings" && Array.isArray(parsed.issues)) {
@@ -283,11 +374,10 @@ export class BobClient {
             }
           }
 
-          // `ts` is the message's unique timestamp — the gates dedup on it so a
-          // re-emitted ask is handled once while a genuine re-run (new ts) is handled again.
-          const ts: number | undefined = typeof cline.ts === "number" ? cline.ts : undefined;
-          this.active.onEvent?.(name, { say, ask, text, partial: !!cline.partial, ts });
+          this.active.onEvent?.(name, { say, ask, text, partial, ts });
         } else {
+          // A lifecycle-only event (no message) isn't counted as progress: a wedge on an ask emits
+          // no messages, so letting these reset the idle window would mask exactly what we watch for.
           this.active.onEvent?.(name, {});
         }
       }
@@ -313,6 +403,7 @@ export class BobClient {
     if (!a || a.done) return;
     a.done = true;
     clearTimeout(a.timer);
+    a.watchdog?.stop();
     this.active = null;
     a.settle({
       taskId: a.ourTaskId,
@@ -323,6 +414,10 @@ export class BobClient {
       lastText: a.lastText,
       status,
       reviewFindings: a.reviewFindings,
+      pendingAsk: a.pendingAsk,
+      pendingAskText: a.pendingAskText,
+      tokensUsed: a.budget.outputTokens,
+      turns: a.budget.turns,
     });
   }
 
@@ -340,10 +435,29 @@ export class BobClient {
         settle: resolve,
         onEvent: opts.onEvent,
         done: false,
+        budget: new BudgetTracker(),
+        tokenCeiling: opts.tokenCeiling,
+        turnCap: opts.turnCap,
+        isAnswerableAsk: opts.isAnswerableAsk,
         timer: setTimeout(() => this.finish("timeout"), timeoutMs),
       };
       active.timer.unref?.();
+      // Idle / blocked-on-ask watchdog: ends a wedged dispatch (e.g. stuck on an unanswerable
+      // command-permission prompt) well before the wall clock, cancelling the Bob task on the way out.
+      if (opts.idleMs && opts.idleMs > 0) {
+        active.watchdog = new IdleWatchdog({
+          idleMs: opts.idleMs,
+          blockedAskGraceMs: opts.blockedAskGraceMs ?? 0,
+          onTrip: () => {
+            const a = this.active;
+            if (!a || a.done) return;
+            if (a.ourTaskId) this.cancel(a.ourTaskId);
+            this.finish("idle");
+          },
+        });
+      }
       this.active = active;
+      active.watchdog?.start();
       const sent = this.send({
         type: "TaskCommand",
         origin: "client",
@@ -363,6 +477,12 @@ export class BobClient {
       // Socket write failed (dropped pipe): settle now instead of waiting out the timeout.
       if (!sent) this.finish("aborted");
     });
+  }
+
+  /** Cancel the in-flight dispatch's Bob task, if one is bound. Used by the permission gate to end a
+   *  dispatch promptly on a blocking deny (so a denied command can't burn the wall-clock). */
+  cancelActive(): void {
+    if (this.active?.ourTaskId) this.cancel(this.active.ourTaskId);
   }
 
   /** Cancel a running Bob task by id. */

@@ -567,10 +567,11 @@ server.registerTool(
     title: "Revert a Task (roll back to its checkpoint)",
     description:
       "Restore the working tree to the task's pre-task checkpoint — undo what the task changed. " +
-      "Requires a checkpoint (captured when the worker ran with --checkpoint). REFUSES if this " +
-      "server's repo isn't the one the task edited, or if HEAD moved since capture (pass force to " +
-      "override). The pre-revert state is pinned to a recovery ref. Restores tracked files (HEAD " +
-      "untouched) and removes files the task created.",
+      "Requires a checkpoint, which the worker captures by default but CONSUMES on completion (a " +
+      "failed dispatch preserves its WIP to branch bob/task-<id> instead), so this works only while " +
+      "one still exists. REFUSES if this server's repo isn't the one the task edited, or if HEAD moved " +
+      "since capture (pass force to override). The pre-revert state is pinned to a recovery ref. " +
+      "Restores tracked files (HEAD untouched) and removes files the task created.",
     inputSchema: {
       id: z.number().int(),
       force: z.boolean().optional().describe("Revert even if HEAD moved since the checkpoint"),
@@ -578,7 +579,10 @@ server.registerTool(
   },
   async ({ id, force }) => {
     const r = await revertTaskToCheckpoint(process.cwd(), id, "human", { force });
-    if (r === null) return fail(`Task ${id} has no checkpoint (run the worker with --checkpoint to capture one)`);
+    if (r === null)
+      return fail(
+        `Task ${id} has no checkpoint — it's consumed once the task completes; a failed dispatch's work is preserved to branch bob/task-${id}`,
+      );
     if (!r.reverted) return fail(r.note);
     return json({ id, reverted: true, removed: r.removed, recoveryRef: r.recoveryRef ?? null, note: r.note });
   },

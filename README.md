@@ -153,7 +153,7 @@ node dist/cli.js note 1 "Waiting on test data"
 node dist/cli.js result 1 "Done; 3 procedures extracted"
 node dist/cli.js next                                    # next pending task + its routed mode
 node dist/cli.js delete 1 [--force] [--cleanup]          # refuses if it wrote files; cleanup removes created ones
-node dist/cli.js revert 1 [--force]                      # roll the tree back to task 1's checkpoint (--force if HEAD moved)
+node dist/cli.js revert 1 [--force]                      # roll the tree back to task 1's checkpoint while one exists (--force if HEAD moved)
 node dist/cli.js stats
 node dist/cli.js report                                  # markdown standup/audit of the board
 node dist/cli.js report --status blocked --out report.md
@@ -225,7 +225,9 @@ node dist/worker.js --dry-run
 Flags: `--once` `--tag <t>` `--dry-run` `--pipe` `--poll` `--timeout` `--assignee`
 `--new-tab` `--max-risk <safe|standard|elevated>` `--retry <N>` `--detect-plan-stop`
 `--no-notify` `--no-defer` `--answer-followups` `--escalate-all` `--review-plans`
-`--allow-commands <prefix,prefix>` `--checkpoint` (plus the verify-and-continue flags below).
+`--allow-commands <prefix,prefix>` `--deny-commands <prefix,prefix>` `--no-command-gate`
+`--allow-all-commands` `--no-checkpoint` `--no-idle-watchdog` `--idle-timeout <ms>`
+`--no-budget` `--budget-cap <tokens>` `--max-turns <n>` (plus the verify-and-continue flags below).
 Needs Bob running with IPC enabled (see below).
 Aborted or timed-out tasks are parked as `blocked`; with `--retry <N>` the worker first
 re-dispatches a transient failure (timeout/abort) up to N times before parking it.
@@ -270,28 +272,33 @@ Bob and launch via [launch-bob-ipc.cmd](launch-bob-ipc.cmd) (it runs
 [set-bob-autoapprove.mjs](set-bob-autoapprove.mjs), which writes the same allowlist to
 Bob's global state).
 
-For the gray zone (a command not on the allowlist), any mode that runs commands can
-hand the decision to Claude instead of a human:
+For the gray zone (a command not on the allowlist), the worker resolves the approval prompt
+**non-interactively by default** — a headless dispatch never waits on a human. A deterministic
+permission gate ([command-policy.ts](src/command-policy.ts)) evaluates the command: an allowlisted one
+(safe local git subcommands, `pytest` / `uv run pytest` / `python -m pytest`, python, scoped
+`__pycache__` cleanup) is approved; a denied or unrecognised one (`git push`, network installs,
+`curl`/`wget`/`sudo`, `rm -rf` outside the repo) is rejected, recorded as a **`needs_input`** question
+(the exact command + cwd + task), and the dispatch is **ended promptly** so a blocked command can't
+burn the wall-clock. Tune it with `--allow-commands` / `--deny-commands` (comma-separated), or:
+
+```powershell
+node dist/worker.js --allow-commands "make build,go test"   # extend the auto-run allowlist
+node dist/worker.js --no-command-gate                       # disable the gate (idle watchdog stays the backstop)
+node dist/worker.js --allow-all-commands                    # SANDBOX ONLY: auto-run every command, gate off
+```
+
+For an unrecognised command the deterministic gate default-denies; to instead have **Claude** judge
+the gray zone, add `--command-classifier`:
 
 ```powershell
 node dist/worker.js --command-classifier                             # cli backend: reuses your Claude login, no key
 node dist/worker.js --command-classifier --classifier-backend api    # one Anthropic call (needs ANTHROPIC_API_KEY)
 ```
 
-The classifier presses approve/reject over IPC, which needs a one-time patch that
-exposes Bob's buttons — `node tools/patch-bob-buttons.mjs`, then restart Bob. It
-engages for any mode with a gray zone — every mode except `ask` (which runs no
-commands), including the read-only `plan`/`review` modes — so it works at the default
-`--max-risk standard`. Fail-safe: only an explicit
-"approve" runs a command; any error or timeout leaves it for a human. Extra flags:
+The classifier presses approve/reject over IPC, which needs a one-time patch that exposes Bob's
+buttons — `node tools/patch-bob-buttons.mjs`, then restart Bob. Fail-safe: only an explicit "approve"
+runs a command; any error or timeout falls back to the deterministic default-deny. Extra flags:
 `--classifier-backend <cli|api>` `--classifier-model` `--classifier-cli`.
-
-To skip the classifier for commands you already trust in a given drain, extend the
-auto-run allowlist with `--allow-commands` (comma-separated command prefixes):
-
-```powershell
-node dist/worker.js --allow-commands "npm run lint,git fetch"   # these auto-run, no classifier call
-```
 
 The other thing that stalls an unattended task is Bob **asking a question** mid-task
 (e.g. "which approach should I take?"). With `--answer-followups`, the worker asks
@@ -341,18 +348,27 @@ is treated as a pass (logged as a task note) so infrastructure failures never bl
 
 When both `--review-plans` and `--escalate-all` are set, `--review-plans` takes precedence.
 
-### Per-task checkpoint / rollback
+### Resilience guards: checkpoint-before-death, idle watchdog, token budget
 
-With `--checkpoint`, the worker captures a **pre-task git snapshot** before each task and
-**auto-reverts** to it on a clean-fail terminal — verify/judge gave up after `--max-continues`,
-a no-result timeout/abort (after retries), or a worker error — so a bad unattended run that wrote
-**uncommitted** changes is rolled back instead of left in the tree. If the task **committed** its
-work, auto-revert won't run (it refuses to rewrite history — see *Verified* below); it logs the
-skip and records a board note, and you can roll back manually with `bob revert <id> --force`. A
-successful task keeps its checkpoint, so you can undo any run on demand with `bob revert <id>`
-(or the `revert_task` tool).
+The worker hardens each unattended dispatch against the ways it can die without finishing. These
+are **on by default** (in a git repo); tune or disable them with the flags noted.
 
-The rollback is destructive, so it's **safe by construction** ([src/checkpoint.ts](src/checkpoint.ts)):
+**Checkpoint-before-death → branch.** Before each task the worker captures a **pre-task git
+snapshot** (pinned, gc-safe). On **any** terminal failure — an idle / blocked-on-ask trip, a token
+budget abort, a no-result timeout/abort (after retries), a verify/judge give-up, or a worker error
+— it **preserves the dispatch's partial work to a dedicated `bob/task-<id>` branch and restores the
+working tree to its pre-task state**, so a dying run never leaves uncommitted WIP on `main`. Recover
+the stranded work with `git checkout bob/task-<id>`; the failure note records the branch and root
+cause. `--no-checkpoint` disables it; no-op outside a git repo, or when the task **committed** its
+work (HEAD moved — see *Verified* below).
+
+The same machinery powers the manual `bob revert <id>` / `revert_task` rollback, which restores a
+task's pre-task checkpoint **while one still exists**. The checkpoint is **consumed on completion**
+(both on success and when failed work is preserved to a branch), so it never pins a commit per task
+forever — which means `revert` is a no-op once a task has terminated; recover a failed task's work
+from its `bob/task-<id>` branch instead.
+
+The manual rollback is destructive, so it's **safe by construction** ([src/checkpoint.ts](src/checkpoint.ts)):
 - **Repo-bound** — the checkpoint records the repo it came from; a revert run in any *other*
   working tree is **refused**, never applied to the wrong repo.
 - **Pinned** — the snapshot is held by a real ref (`refs/bob/checkpoint/<id>`), so `git gc`
@@ -366,10 +382,22 @@ The rollback is destructive, so it's **safe by construction** ([src/checkpoint.t
   only files the task *created* are removed (emptied dirs pruned). Pre-task edits and
   pre-existing untracked files are left intact.
 
-Opt-in (off by default). No-op outside a git repo. Gitignored files a task creates aren't
-auto-removed (they're not the tracked snapshot's concern). Deleting a task also drops its
-checkpoint ref; `refs/bob/recovery/<sha>` refs from past reverts are kept as a safety net and
-can be pruned by hand once you're sure you don't need them.
+No-op outside a git repo. Gitignored files a task creates aren't auto-removed (they're not the
+tracked snapshot's concern). Deleting a task also drops its checkpoint ref; `refs/bob/recovery/<sha>`
+refs from past reverts are kept as a safety net and can be pruned by hand once you're sure you don't
+need them.
+
+**Idle / blocked-on-ask watchdog.** A dispatch that makes no progress for `--idle-timeout` (180s
+default) — or wedges on a prompt the headless worker can't answer (e.g. a command-permission ask) —
+ends as `idle` well before the wall clock, after a short `--blocked-ask-grace` (10s). The pending ask
+is surfaced to the board as a `needs_input` question rather than swallowed. `--no-idle-watchdog`
+disables it (wall-clock `--timeout` only).
+
+**Token / turn budget.** Each task carries an estimated token scope (set at creation — see
+*right-sizing*); the worker enforces `estimate × (1 + --budget-headroom%)` (floored), or a flat
+`--budget-cap` when there's no estimate, as a hard ceiling that aborts a runaway loop as `budget`.
+`--max-turns` adds an api-request cap; `--no-budget` disables both. (Best-effort: it reads Bob's
+api-request token usage, and falls open — never trips — if that usage isn't reported.)
 
 ### Review-mode findings
 
@@ -482,7 +510,9 @@ src/
   llm.ts          shared Claude transport (api / cli backends)
   classify.ts     command-safety classifier (gray-zone command asks) + hard deny-list
   json-extract.ts balanced-brace JSON extraction shared by classify/answer/judge
-  command-gate.ts gray-zone approve/reject gate (worker -> IPC)
+  command-policy.ts deterministic command allow/deny/escalate policy (allowlist source + gate resolver)
+  permission-gate.ts default-on non-interactive permission gate (allow->approve, deny->needs_input + end)
+  command-gate.ts gray-zone LLM approve/reject gate (worker -> IPC), the escalation path
   answer.ts       answerer for Bob's followup questions
   followup-gate.ts answer-or-escalate gate for followup asks (worker -> IPC)
   worker-answer.ts handle a human's answer to an escalated followup

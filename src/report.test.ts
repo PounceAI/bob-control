@@ -20,6 +20,7 @@ function task(over: Partial<Task> & Pick<Task, "id" | "status">): Task {
     updated_at: ago(60 * MIN),
     depends_on: [],
     retry_attempts: 0,
+    estimated_tokens: null,
     ...over,
   };
 }

@@ -23,7 +23,7 @@ function harness(over: Partial<RetryPolicyDeps> = {}) {
   return { deps, logs, notes, sleeps };
 }
 
-const result = (status: "completed" | "aborted" | "timeout"): DispatchResult => ({
+const result = (status: DispatchResult["status"]): DispatchResult => ({
   taskId: "task-1",
   result: "",
   lastText: "",
@@ -53,6 +53,22 @@ test("aborted is a transient failure: retries when under cap", () => {
   assert.equal(decision.shouldRetry, true);
   assert.ok(decision.delayMs > 0);
   assert.match(decision.reason, /transient 'aborted'/);
+});
+
+test("idle is a transient failure: retries (the watchdog now preempts what was a retryable timeout)", () => {
+  const h = harness({ currentAttempts: 0, maxAttempts: 3 });
+  const decision = shouldRetry(result("idle"), h.deps);
+  assert.equal(decision.shouldRetry, true);
+  assert.ok(decision.delayMs > 0);
+  assert.match(decision.reason, /transient 'idle'/);
+});
+
+test("budget is NOT a transient failure: a runaway that blew its ceiling won't be retried", () => {
+  const h = harness({ currentAttempts: 0, maxAttempts: 3 });
+  const decision = shouldRetry(result("budget"), h.deps);
+  assert.equal(decision.shouldRetry, false);
+  assert.equal(decision.delayMs, 0);
+  assert.match(decision.reason, /not a transient failure/);
 });
 
 test("completed is NOT a transient failure: does not retry", () => {

@@ -15,6 +15,8 @@ import {
   type Risk,
 } from "./modes.js";
 import { createCommandGate } from "./command-gate.js";
+import { createPermissionGate, type PermissionVerdict } from "./permission-gate.js";
+import { isCommandAsk } from "./command-policy.js";
 import { createFollowupGate } from "./followup-gate.js";
 import { handleStdinAnswer } from "./worker-answer.js";
 import { BobClient, resolvePipe, type DispatchResult } from "./bob-ipc.js";
@@ -31,7 +33,8 @@ import {
   type JudgeContext,
   type GitBaseline,
 } from "./judge.js";
-import { captureCheckpoint, revertTaskToCheckpoint } from "./checkpoint.js";
+import { captureCheckpoint, preserveWipToBranch, releaseCheckpoint } from "./checkpoint.js";
+import { computeCeiling } from "./budget.js";
 import type { Task } from "./types.js";
 import { isCompleted } from "./types.js";
 import { readFileSync } from "node:fs";
@@ -81,8 +84,26 @@ function buttonPatchPresent(): boolean | null {
  *   node dist/worker.js --detect-plan-stop     catch plan-only completions (no code written) and auto-continue
  *   node dist/worker.js --emit-json     also print @@WORKER {json} event lines (for the extension)
  *   node dist/worker.js --retry 3       auto-retry transient failures (timeout/abort) up to 3 total attempts
+ *   node dist/worker.js --no-checkpoint     don't preserve partial work to a branch on a failed dispatch
+ *   node dist/worker.js --no-idle-watchdog  disable the idle / blocked-on-ask watchdog (wall-clock only)
+ *   node dist/worker.js --no-budget         disable the per-task token/turn budget backstop
+ *   node dist/worker.js --deny-commands a,b  extra command prefixes/substrings to default-deny
+ *   node dist/worker.js --no-command-gate   disable the deterministic permission gate (idle-watchdog backstop only)
+ *   node dist/worker.js --allow-all-commands  SANDBOX ONLY: auto-run every command (Bob policy 'auto', gate off)
+ *
+ * Resilience guards (on by default): a deterministic permission gate (command-policy.ts) resolves
+ * shell-command approval prompts non-interactively — allowlisted commands are approved, denied/unknown
+ * ones are rejected, recorded as a needs_input (exact command + cwd + task), and the dispatch is ended
+ * promptly (no deadlock on a human approval). An idle watchdog ends a dispatch that makes no progress
+ * (or wedges on any other unanswerable ask) well before the wall clock; a token/turn budget aborts a
+ * runaway loop; and on ANY terminal failure the worker preserves the dispatch's partial work to a
+ * bob/task-<id> branch and restores the working tree clean (never leaves uncommitted WIP on main),
+ * recording the root cause + branch in a structured note.
+ *
  * Flags: --pipe <path>  --poll <ms>  --timeout <ms>  --assignee <name>  --defer-idle <ms>
  *        --verify-command <cmd>  --max-continues <n>  --retry <max-attempts>
+ *        --idle-timeout <ms>  --blocked-ask-grace <ms>  --budget-headroom <pct>  --budget-cap <tokens>
+ *        --max-turns <n>
  *
  * Each mode has a risk level (safe < standard < elevated); only tasks at or
  * below --max-risk are dispatched. While the user is chatting with Bob, dispatch
@@ -129,9 +150,38 @@ interface Opts {
   retry: boolean;
   maxRetryAttempts: number;
   allowCommands: string[];
-  /** Capture a pre-task git checkpoint and auto-revert on a clean-fail terminal. */
+  /** Capture a pre-task checkpoint and, on a terminal failure, preserve partial work to a
+   *  bob/task-<id> branch + restore main clean. Default on; --no-checkpoint disables. */
   checkpoint: boolean;
+  /** Idle / blocked-on-ask watchdog window (ms). 0 = disabled (--no-idle-watchdog). */
+  idleTimeoutMs: number;
+  /** Shorter window once an unanswerable blocking ask is seen (ms). */
+  blockedAskGraceMs: number;
+  /** Per-task token budget backstop on. Default on; --no-budget disables. */
+  budget: boolean;
+  /** Headroom (percent) over a task's estimate before the token ceiling trips. */
+  budgetHeadroomPct: number;
+  /** Output-token ceiling for a task with no estimate (flat cap). */
+  budgetFlatCap: number;
+  /** Hard turn (api-request) cap; 0 = off. */
+  maxTurns: number;
+  /** Deterministic permission gate on (default); --no-command-gate disables it. */
+  permissionGate: boolean;
+  /** Extra command prefixes/substrings to default-deny (--deny-commands). */
+  denyCommands: string[];
+  /** Sandbox escape hatch: auto-run ALL commands (Bob commandPolicy 'auto'); disables the gate. */
+  allowAllCommands: boolean;
 }
+
+// Watchdog / budget defaults. The blocked-ask grace is the high-value, low-false-positive guard
+// (it kills a permission-prompt wedge in seconds); the pure-idle window is generous and, because a
+// trip now preserves WIP to a branch, an over-eager idle trip is non-destructive.
+const DEFAULT_IDLE_TIMEOUT_MS = 180_000;
+const DEFAULT_BLOCKED_ASK_GRACE_MS = 10_000;
+const DEFAULT_BUDGET_HEADROOM_PCT = 15;
+const DEFAULT_BUDGET_FLAT_CAP = 100_000;
+/** Floor for the estimate-derived ceiling, so a low estimate can't abort real work early. */
+const BUDGET_CEILING_FLOOR = 50_000;
 
 function parseOpts(argv: string[]): Opts {
   const val = (name: string): string | undefined => {
@@ -160,14 +210,15 @@ function parseOpts(argv: string[]): Opts {
   const surface = val("--surface");
   const newTab = has("--new-tab") || surface === "newTab";
   const maxRetryAttempts = num("--retry", 0);
-  // Parse --allow-commands: comma-separated prefixes to extend the allowlist.
-  const allowCommandsStr = val("--allow-commands");
-  const allowCommands = allowCommandsStr
-    ? allowCommandsStr
-        .split(",")
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0)
-    : [];
+  // Comma-separated command prefixes/substrings (extend the allowlist / denylist).
+  const csv = (raw: string | undefined): string[] =>
+    raw
+      ? raw
+          .split(",")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+      : [];
+  const allowCommands = csv(val("--allow-commands"));
   return {
     once: has("--once"),
     newTab,
@@ -198,26 +249,49 @@ function parseOpts(argv: string[]): Opts {
     retry: maxRetryAttempts > 0,
     maxRetryAttempts,
     allowCommands,
-    checkpoint: has("--checkpoint"),
+    // Checkpoint-before-death is on by default now (the safety net for "never leave WIP on main");
+    // --no-checkpoint opts out. --checkpoint is still accepted (a no-op) for back-compat.
+    checkpoint: !has("--no-checkpoint"),
+    idleTimeoutMs: has("--no-idle-watchdog") ? 0 : num("--idle-timeout", DEFAULT_IDLE_TIMEOUT_MS),
+    blockedAskGraceMs: num("--blocked-ask-grace", DEFAULT_BLOCKED_ASK_GRACE_MS),
+    budget: !has("--no-budget"),
+    budgetHeadroomPct: num("--budget-headroom", DEFAULT_BUDGET_HEADROOM_PCT),
+    budgetFlatCap: num("--budget-cap", DEFAULT_BUDGET_FLAT_CAP),
+    maxTurns: num("--max-turns", 0),
+    permissionGate: !has("--no-command-gate"),
+    denyCommands: csv(val("--deny-commands")),
+    allowAllCommands: has("--allow-all-commands"),
   };
 }
 
 /**
- * On a clean-fail terminal, roll a task's tree back to its pre-task checkpoint. Opt-in
- * (--checkpoint); no-op without a checkpoint or outside a git repo. A committed task is refused
- * (won't rewrite history) and only logged — recover with `bob revert <id> --force`. Best-effort:
- * never throws into the worker's terminal handling.
+ * Checkpoint-before-death: on any terminal failure, preserve the task's partial work to a
+ * bob/task-<id> branch and restore the working tree to its pre-task checkpoint, so a dying dispatch
+ * never leaves uncommitted WIP on main. On by default; no-op without a checkpoint (not a git repo /
+ * --no-checkpoint) or when HEAD moved (the work is already committed). Best-effort: never throws into
+ * the worker's terminal handling. Returns the branch name when work was preserved.
  */
-async function revertIfEnabled(opts: Opts, taskId: number): Promise<void> {
-  if (!opts.checkpoint) return;
+async function checkpointBeforeDeath(opts: Opts, taskId: number): Promise<string | undefined> {
+  if (!opts.checkpoint) return undefined;
   try {
-    const r = await revertTaskToCheckpoint(process.cwd(), taskId, "worker");
-    if (r?.reverted) console.log(`  ↩ #${taskId} rolled back to pre-task checkpoint (${r.note})`);
-    else if (r) console.log(`  ⚠ #${taskId} checkpoint NOT rolled back: ${r.note}`);
+    const r = await preserveWipToBranch(process.cwd(), taskId, "worker");
+    if (r.branch) console.log(`  💾 #${taskId} partial work preserved to ${r.branch}; main restored clean`);
+    else if (r.note) console.log(`  ↩ #${taskId} ${r.note}`);
+    return r.branch;
   } catch (err) {
-    console.log(`  ⚠ #${taskId} checkpoint rollback errored: ${(err as Error).message}`);
+    console.log(`  ⚠ #${taskId} checkpoint-before-death errored: ${(err as Error).message}`);
+    return undefined;
   }
 }
+
+/** Human-readable root cause for a failure note, keyed by dispatch status. */
+const TERMINAL_CAUSE: Record<DispatchResult["status"], string> = {
+  completed: "completed",
+  aborted: "aborted (pipe dropped or Bob aborted the task)",
+  timeout: "wall-clock timeout (no completion_result)",
+  idle: "idle watchdog — no progress / wedged on an unanswerable prompt",
+  budget: "token/turn budget exceeded (runaway backstop)",
+};
 
 /**
  * Highest-priority pending task whose mode's risk is at or below the gate
@@ -295,6 +369,27 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   // The api backend can't run without a key; the cli backend reuses Claude's login.
   const classifierBlocked = opts.classifierBackend === "api" && !apiKey;
+
+  // Which blocking asks a gate will actually answer. An ask outside this set is "unanswerable" for a
+  // headless worker, so the idle watchdog trips its short grace instead of waiting out the wall clock.
+  // Use the shared isCommandAsk so the watchdog agrees with the gates on BOTH command spellings
+  // (command / command_security_warning) — one source of truth instead of re-listing them by hand.
+  const commandAnswerable = classifierOn && !classifierBlocked;
+  const followupAnswerable = opts.answerFollowups && !classifierBlocked;
+  const isAnswerableAsk = (ask: string): boolean =>
+    (isCommandAsk(ask) && commandAnswerable) || (ask === "followup" && followupAnswerable);
+
+  // Per-task token ceiling: the task's estimate (+ headroom, floored) when it carries one, else the
+  // flat cap. 0 disables the token check (--no-budget). A turn cap (--max-turns) is an extra backstop.
+  const tokenCeiling = opts.budget
+    ? computeCeiling(task.estimated_tokens ?? undefined, {
+        headroomPct: opts.budgetHeadroomPct,
+        floor: BUDGET_CEILING_FLOOR,
+        flatCap: opts.budgetFlatCap,
+      })
+    : 0;
+  const turnCap = opts.budget ? opts.maxTurns : 0;
+
   // False once this dispatch settles, so a late verdict can't press the next task's prompt.
   let dispatchActive = true;
   const commandGate = createCommandGate({
@@ -310,6 +405,40 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     addNote: repo.addNote,
     log: (m) => console.log(m),
     isActive: () => dispatchActive,
+  });
+
+  // Deterministic, non-interactive permission gate (command-policy.ts) — the headless analog of an
+  // SDK canUseTool resolver. On by default for execute-capable modes: it approves allowlisted commands
+  // and, on a denied/unknown one, rejects it, raises a structured needs_input (exact command + cwd +
+  // task), and ends the dispatch — so a permission prompt can never deadlock the wall-clock. The LLM
+  // classifier (--command-classifier) becomes the escalation path for unrecognised commands.
+  const repoRoot = process.cwd();
+  const permissionGate = createPermissionGate({
+    enabled: opts.permissionGate && !opts.allowAllCommands && policyHasGrayZone(profile.commandPolicy),
+    policy: { allow: opts.allowCommands, deny: opts.denyCommands, repoRoot },
+    escalateToLlm: classifierOn,
+    task: { id: task.id, title: task.title },
+    cwd: repoRoot,
+    client: {
+      approve: () => client.approve(),
+      reject: () => client.reject(),
+      cancelActive: () => client.cancelActive(),
+    },
+    addNote: repo.addNote,
+    log: (m) => console.log(m),
+    isActive: () => dispatchActive,
+    surface: ({ command, cwd, reason }) => {
+      const short = command.replace(/\s+/g, " ").slice(0, 200);
+      const question =
+        `Bob needs to run a command the permission policy will not auto-approve (${reason}): ` +
+        `\`${short}\` (in ${cwd}). Approve it and re-queue the task, or add it to --allow-commands.`;
+      const q = repo.askQuestion(task.id, question);
+      if (q) {
+        console.log(`  ❓ #${task.id} command needs approval → needs_input (question ${q.question_id})`);
+        emit(opts, "question", { id: task.id, title: task.title, question, command });
+        if (opts.notify) notify(`Bob needs command approval on #${task.id}`, question);
+      }
+    },
   });
 
   // Question handling: when Bob asks a followup mid-task, answer it with Claude
@@ -341,10 +470,6 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   activeFollowupGates.set(task.id, followupGateObj);
 
   let lastSay = "";
-  // Last blocking ask Bob surfaced. The gate answers command asks; other types
-  // (followup, mistake_limit_reached, …) we deliberately don't auto-press — we just
-  // record the last one so a wedge is diagnosable instead of a silent timeout.
-  let lastAsk = "";
 
   // Dispatch helper used by the initial run and each verify-and-continue. Marks the
   // dispatch active for its duration so the command/followup gates only press while a
@@ -355,9 +480,17 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
       return await client.dispatch({
         text,
         mode,
-        config: dispatchAutoApprove(profile, opts.allowCommands),
+        config: dispatchAutoApprove(
+          opts.allowAllCommands ? { ...profile, commandPolicy: "auto" } : profile,
+          opts.allowCommands,
+        ),
         newTab: opts.newTab,
         timeoutMs: opts.timeoutMs,
+        idleMs: opts.idleTimeoutMs,
+        blockedAskGraceMs: opts.blockedAskGraceMs,
+        isAnswerableAsk,
+        tokenCeiling,
+        turnCap,
         onEvent: (name, { say, ask, text, partial, ts }) => {
           if (say && say !== lastSay) {
             lastSay = say;
@@ -365,12 +498,22 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
             console.log(`  · ${name}/${say}${t ? `: ${t}` : ""}`);
           }
 
-          if (ask && !partial) lastAsk = ask;
+          // Deterministic permission gate FIRST (no LLM/human): it approves allowlisted commands and
+          // rejects+surfaces (needs_input) + ends the dispatch on a deny/unknown. Only an unrecognised
+          // command WITH the classifier enabled is handed on to the LLM command-gate.
+          let pv: PermissionVerdict = "ignored";
+          try {
+            pv = permissionGate({ ask, text, partial, ts });
+          } catch (e) {
+            console.error(`  ⚠ permission gate error on #${task.id}: ${(e as Error).message}`);
+          }
           // .catch each gate: a press/answer that throws (e.g. an IPC write on a dropped pipe, or an
           // answerer failure) must not become an unhandled rejection that crashes the worker.
-          commandGate({ ask, text, partial, ts }).catch((e) =>
-            console.error(`  ⚠ command gate error on #${task.id}: ${(e as Error).message}`),
-          );
+          if (pv === "escalate") {
+            commandGate({ ask, text, partial, ts }).catch((e) =>
+              console.error(`  ⚠ command gate error on #${task.id}: ${(e as Error).message}`),
+            );
+          }
           followupGateObj
             .gate({ ask, text, partial, ts })
             .catch((e) => console.error(`  ⚠ followup gate error on #${task.id}: ${(e as Error).message}`));
@@ -513,6 +656,36 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     return; // the loop's finally unregisters the gate
   }
 
+  // Idle / blocked-on-ask trip with no completion: the dispatch wedged on a prompt the headless
+  // worker can't answer (e.g. a command-permission ask). bob-ipc already cancelled the Bob task on the
+  // watchdog trip; here we preserve any partial work to a branch and surface the EXACT pending ask as a
+  // FIRST-CLASS board question (needs_input) so it reaches the orchestrator instead of vanishing into
+  // the log. res.pendingAsk is undefined for a pure idle (it's cleared the moment Bob makes progress),
+  // so a plain no-progress stall falls through to the normal terminal handling (park blocked) below.
+  if (res.status === "idle" && !res.result.trim() && res.pendingAsk) {
+    const branch = await checkpointBeforeDeath(opts, task.id);
+    const askText = (res.pendingAskText ?? "").replace(/\s+/g, " ").trim();
+    const branchNote = branch ? ` Partial work saved to branch ${branch}.` : "";
+    const question =
+      `Bob stalled on a '${res.pendingAsk}' prompt the headless worker can't answer` +
+      (askText ? `: ${askText.slice(0, 300)}` : "") +
+      `.${branchNote} Answer to guide it (it will re-run), or clear the prompt and re-queue the task.`;
+    const q = repo.askQuestion(task.id, question);
+    if (q) {
+      console.log(`  ❓ #${task.id} idle on '${res.pendingAsk}' → needs_input (question ${q.question_id})`);
+      emit(opts, "question", { id: task.id, title: task.title, question });
+      if (opts.notify) notify(`Bob needs input on #${task.id}`, question);
+    } else {
+      // Couldn't park needs_input (task no longer in_progress) — record it blocked HERE with the branch
+      // we already preserved, instead of falling through to a second checkpointBeforeDeath on the
+      // now-consumed checkpoint (which would drop the branch pointer and write a misleading note).
+      repo.updateStatus(task.id, "blocked");
+      repo.addNote(task.id, `Idle/blocked-on-ask; could not park needs_input. ${question}`, "worker");
+      emit(opts, "taskFail", { id: task.id, title: task.title, status: "idle", branch });
+    }
+    return; // either branch handled it; the loop's finally unregisters the gate
+  }
+
   // Mark done only on a GENUINE completion: Bob fired taskCompleted, or it
   // emitted a real attempt_completion (completion_result). In some multi-step
   // tasks Bob emits completion_result then taskAborted/timeout — we still keep
@@ -549,6 +722,9 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     if (task.retry_attempts > 0) {
       repo.resetRetryAttempts(task.id);
     }
+    // Consume the pre-task checkpoint on success so a default-on checkpoint doesn't pin one gc-immune
+    // commit per completed task forever — the preserve-to-branch net only needs it on a failure.
+    await releaseCheckpoint(task.id, process.cwd());
     if (res.status !== "completed") {
       repo.addNote(task.id, `Captured completion_result despite terminal '${res.status}' event.`, "worker");
     }
@@ -567,15 +743,16 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     });
     if (opts.notify) notify(`Bob finished #${task.id} (${finalStatus})`, `${task.title} — ${result}`);
   } else if (verifyGaveUp) {
+    const branch = await checkpointBeforeDeath(opts, task.id);
     repo.updateStatus(task.id, "blocked");
+    const branchNote = branch ? ` Partial work preserved to branch ${branch}.` : "";
     repo.addNote(
       task.id,
-      `Blocked: result never passed verification after ${opts.maxContinues} continue(s).`,
+      `Blocked: result never passed verification after ${opts.maxContinues} continue(s).${branchNote}`,
       "worker",
     );
-    await revertIfEnabled(opts, task.id);
     console.log(`  ✗ verification never passed — task marked blocked`);
-    emit(opts, "taskFail", { id: task.id, title: task.title, status: "verify-failed" });
+    emit(opts, "taskFail", { id: task.id, title: task.title, status: "verify-failed", branch });
     if (opts.notify) notify(`Bob task #${task.id} failed verification`, task.title);
   } else {
     // No result captured: a genuine failure. Check if we should retry.
@@ -607,25 +784,30 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
       console.log(`  ↻ task re-queued as pending for retry`);
       emit(opts, "taskRetry", { id: task.id, title: task.title, attempt: task.retry_attempts + 1 });
     } else {
-      // No retry: park as blocked. On timeout Bob may still be churning, so tell it to stop.
+      // No retry: park as blocked. A wall-clock 'timeout' may leave Bob still running, so cancel it
+      // (idle/budget were already cancelled at the bob-ipc trip; an 'aborted' pipe has nothing to
+      // cancel). Then preserve any partial work to a branch (never leave WIP on main) and write a
+      // STRUCTURED failure note: root cause, last activity, pending ask, usage, branch.
       if (res.status === "timeout" && res.taskId) {
         client.cancel(res.taskId);
         console.log(`  ⓧ sent cancel to Bob task ${res.taskId}`);
       }
 
+      const branch = await checkpointBeforeDeath(opts, task.id);
       repo.updateStatus(task.id, "blocked");
       const lastText = res.lastText.trim().replace(/\s+/g, " ").slice(0, 140);
-      const lastNote = lastText ? ` Last activity: ${lastText}` : "";
-      const askNote = lastAsk ? ` Last pending ask: '${lastAsk}'.` : "";
+      const lastNote = lastText ? ` Last activity: ${lastText}.` : "";
+      const askNote = res.pendingAsk ? ` Last pending ask: '${res.pendingAsk}'.` : "";
+      const usageNote = res.tokensUsed ? ` (~${res.tokensUsed} output tokens, ${res.turns ?? 0} turns).` : "";
+      const branchNote = branch ? ` Partial work preserved to branch ${branch}.` : "";
       const retryNote = task.retry_attempts > 0 ? ` After ${task.retry_attempts} retry attempt(s).` : "";
       repo.addNote(
         task.id,
-        `Dispatch ended as '${res.status}' with no completion_result.${askNote}${lastNote}${retryNote}`,
+        `Dispatch ended: ${TERMINAL_CAUSE[res.status]}.${askNote}${usageNote}${lastNote}${branchNote}${retryNote}`,
         "worker",
       );
-      await revertIfEnabled(opts, task.id);
       console.log(`  ✗ ${res.status} — task marked blocked (${retryDecision.reason})`);
-      emit(opts, "taskFail", { id: task.id, title: task.title, status: res.status });
+      emit(opts, "taskFail", { id: task.id, title: task.title, status: res.status, branch });
       if (opts.notify) notify(`Bob task #${task.id} ${res.status}`, task.title);
     }
   }
@@ -771,6 +953,24 @@ async function main(): Promise<void> {
       `bob-worker: auto-retry = on (transient failures retry up to ${opts.maxRetryAttempts} total attempt${opts.maxRetryAttempts === 1 ? "" : "s"} with exponential backoff).`,
     );
   }
+  console.log(
+    `bob-worker: resilience — idle watchdog ${
+      opts.idleTimeoutMs > 0 ? `${opts.idleTimeoutMs}ms (blocked-ask grace ${opts.blockedAskGraceMs}ms)` : "off"
+    }; token budget ${
+      opts.budget
+        ? `on (headroom ${opts.budgetHeadroomPct}%, flat cap ${opts.budgetFlatCap}${opts.maxTurns ? `, max-turns ${opts.maxTurns}` : ""})`
+        : "off"
+    }; checkpoint-before-death ${opts.checkpoint ? "on (preserve WIP to bob/task-<id>)" : "off"}.`,
+  );
+  console.log(
+    `bob-worker: command permissions — ${
+      opts.allowAllCommands
+        ? "ALLOW-ALL (sandbox bypass: every command auto-runs, gate off)"
+        : opts.permissionGate
+          ? `deterministic gate ON (allowlist auto-runs; denied/unknown → needs_input + end${opts.commandClassifier ? "; unknown escalates to the classifier" : "; default-deny"})`
+          : "gate OFF (commands fall back to the idle-watchdog backstop)"
+    }.`,
+  );
   let idled = false;
   let deferring = false;
   let disarmed = false;
@@ -849,10 +1049,11 @@ async function main(): Promise<void> {
       // when the error is thrown after completion/parking.
       const cur = repo.getTask(task.id)?.status;
       if (!cur || (!isCompleted(cur) && cur !== "needs_input")) {
+        const branch = await checkpointBeforeDeath(opts, task.id);
         repo.updateStatus(task.id, "blocked");
-        repo.addNote(task.id, `Worker error: ${(err as Error).message}`, "worker");
-        await revertIfEnabled(opts, task.id);
-        emit(opts, "taskFail", { id: task.id, status: "error", message: (err as Error).message });
+        const branchNote = branch ? ` Partial work preserved to branch ${branch}.` : "";
+        repo.addNote(task.id, `Worker error: ${(err as Error).message}.${branchNote}`, "worker");
+        emit(opts, "taskFail", { id: task.id, status: "error", message: (err as Error).message, branch });
       }
     } finally {
       // Guarantee the followup gate is unregistered on EVERY exit path (return / throw / needs_input),
