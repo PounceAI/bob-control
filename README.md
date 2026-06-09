@@ -399,6 +399,12 @@ disables it (wall-clock `--timeout` only).
 `--max-turns` adds an api-request cap; `--no-budget` disables both. (Best-effort: it reads Bob's
 api-request token usage, and falls open — never trips — if that usage isn't reported.)
 
+**Right-sizing at creation.** `create_task` estimates a task's single-dispatch scope from its
+description length, the files it names, and its mode ([scope.ts](src/scope.ts)) and stamps the
+`estimated_tokens` the budget ceiling above is derived from. An oversized task is tagged `too-big`,
+and an oversized *implementation* task with no explicit mode is routed to `orchestrator` — which
+decomposes it into subtasks — rather than dispatched doomed to a mid-work timeout.
+
 ### Review-mode findings
 
 When a `review` task finishes, the worker captures Bob's findings to the board. Bob's
@@ -520,6 +526,10 @@ src/
   verdict-cache.ts LRU cache for classifier verdicts (skip repeat calls for identical commands)
   review-findings.ts (de)serialize review-mode findings (text <-> structured) for the board
   retry-policy.ts retry/backoff for failed dispatches
+  watchdog.ts     idle / blocked-on-ask dispatch watchdog (ends a wedged run early)
+  budget.ts       per-dispatch token/turn budget tracker + ceiling
+  scope.ts        task scope estimate for right-sizing at creation
+  checkpoint.ts   per-task git checkpoint: capture, preserve-to-branch on death, revert
   defer.ts        pause dispatch while you're chatting with Bob
   report.ts       board -> markdown standup/audit (CLI + board_report tool)
   notify.ts       desktop toast and terminal bell
