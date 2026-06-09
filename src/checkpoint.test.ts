@@ -4,7 +4,14 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureCheckpoint, restoreCheckpoint, revertTaskToCheckpoint, deleteTaskAndCheckpoint } from "./checkpoint.js";
+import {
+  captureCheckpoint,
+  restoreCheckpoint,
+  revertTaskToCheckpoint,
+  deleteTaskAndCheckpoint,
+  preserveWipToBranch,
+  releaseCheckpoint,
+} from "./checkpoint.js";
 import { snapshotWorktreeTree } from "./git.js";
 import { getDb, createTask, setCheckpoint, getCheckpoint, clearCheckpoint, getNotes, recordArtifact } from "./db.js";
 
@@ -239,6 +246,79 @@ describe("checkpoint orchestration + persistence (db)", () => {
     const dir = makeRepo();
     const t = createTask({ title: "no ckpt" });
     assert.equal(await revertTaskToCheckpoint(dir, t.id, "test"), null);
+    rm(dir);
+  });
+
+  it("preserveWipToBranch saves partial work to bob/task-<id> and leaves main clean", async () => {
+    const dir = makeRepo();
+    commit(dir, "f.txt", "v1");
+    const t = createTask({ title: "checkpoint before death" });
+    setCheckpoint(t.id, (await captureCheckpoint(dir, t.id))!);
+    // Bob strands partial work: a tracked edit + a brand-new untracked file, uncommitted, on main.
+    writeFileSync(join(dir, "f.txt"), "v2-partial");
+    writeFileSync(join(dir, "new-work.txt"), "half-done feature");
+
+    const r = await preserveWipToBranch(dir, t.id, "worker");
+    assert.equal(r.preserved, true);
+    assert.equal(r.branch, `bob/task-${t.id}`);
+    assert.ok(refPresent(dir, `refs/heads/bob/task-${t.id}`), "task branch created");
+
+    // Main is restored clean: the tracked edit reverted, the new file removed, HEAD unmoved.
+    assert.equal(readFileSync(join(dir, "f.txt"), "utf8"), "v1", "tracked edit reverted on main");
+    assert.equal(existsSync(join(dir, "new-work.txt")), false, "created file removed from main");
+    assert.equal(git(dir, "status", "--porcelain"), "", "working tree is clean — no stranded WIP");
+
+    // The partial work is fully recoverable from the branch (tracked edit AND the new file).
+    assert.equal(git(dir, "show", `bob/task-${t.id}:f.txt`), "v2-partial", "branch holds the tracked edit");
+    assert.equal(
+      git(dir, "show", `bob/task-${t.id}:new-work.txt`),
+      "half-done feature",
+      "branch holds the untracked file too",
+    );
+    assert.equal(getCheckpoint(t.id), null, "checkpoint consumed after preserve");
+    assert.ok(getNotes(t.id).some((n) => /Preserved partial work to branch/.test(n.note)));
+    rm(dir);
+  });
+
+  it("preserveWipToBranch with no WIP makes no branch and reports nothing to preserve", async () => {
+    const dir = makeRepo();
+    commit(dir, "f.txt", "v1");
+    const t = createTask({ title: "clean exit" });
+    setCheckpoint(t.id, (await captureCheckpoint(dir, t.id))!);
+    // No edits — the dispatch died with a clean tree.
+    const r = await preserveWipToBranch(dir, t.id, "worker");
+    assert.equal(r.preserved, false);
+    assert.equal(refPresent(dir, `refs/heads/bob/task-${t.id}`), false, "no branch made when there's no WIP");
+    assert.equal(getCheckpoint(t.id), null, "checkpoint still consumed");
+    rm(dir);
+  });
+
+  it("releaseCheckpoint consumes the column AND deletes the pin ref (no leak on success)", async () => {
+    const dir = makeRepo();
+    commit(dir, "f.txt", "v1");
+    writeFileSync(join(dir, "f.txt"), "dirty"); // dirty → pin points at a real stash commit
+    const t = createTask({ title: "release on success" });
+    const cp = (await captureCheckpoint(dir, t.id))!;
+    setCheckpoint(t.id, cp);
+    assert.ok(refPresent(dir, cp.ref), "pin ref exists before release");
+
+    await releaseCheckpoint(t.id);
+    assert.equal(getCheckpoint(t.id), null, "checkpoint column cleared");
+    assert.equal(refPresent(dir, cp.ref), false, "pin ref deleted — nothing left to leak");
+    // Idempotent: a second release on a now-checkpoint-less task is a no-op, not a throw.
+    await releaseCheckpoint(t.id);
+    rm(dir);
+  });
+
+  it("preserveWipToBranch returns preserved:false (no checkpoint) without touching the tree", async () => {
+    const dir = makeRepo();
+    commit(dir, "f.txt", "v1");
+    writeFileSync(join(dir, "f.txt"), "uncommitted");
+    const t = createTask({ title: "no checkpoint" });
+    const r = await preserveWipToBranch(dir, t.id, "worker");
+    assert.equal(r.preserved, false);
+    assert.match(r.note, /no pre-task checkpoint/);
+    assert.equal(readFileSync(join(dir, "f.txt"), "utf8"), "uncommitted", "tree untouched without a checkpoint");
     rm(dir);
   });
 

@@ -12,6 +12,8 @@ import type { TaskCheckpoint } from "./types.js";
 
 const CHECKPOINT_REF = (taskId: number) => `refs/bob/checkpoint/${taskId}`;
 const RECOVERY_REF = (sha: string) => `refs/bob/recovery/${sha}`;
+/** Discoverable branch a task's preserved partial work is saved to on a terminal failure. */
+export const TASK_BRANCH = (taskId: number) => `bob/task-${taskId}`;
 
 /**
  * Capture a rollback checkpoint for `cwd` (a git work tree). Snapshots the tracked tree as a
@@ -135,6 +137,21 @@ export async function restoreCheckpoint(
 }
 
 /**
+ * Drop a task's checkpoint record AND delete its pin ref (best-effort), so a consumed or obsolete
+ * checkpoint can't leak a gc-immune snapshot. Shared consume step for revert, preserve-to-branch, and
+ * a successful completion (otherwise a default-on checkpoint would pin one commit per task forever).
+ * No-op when the task has no checkpoint. Never throws.
+ */
+export async function releaseCheckpoint(taskId: number, fallbackCwd?: string): Promise<void> {
+  const cp = repo.getCheckpoint(taskId);
+  if (!cp) return;
+  repo.clearCheckpoint(taskId);
+  if (cp.ref.startsWith("refs/bob/checkpoint/")) {
+    await runGit(["update-ref", "-d", cp.ref], cp.root || fallbackCwd || process.cwd());
+  }
+}
+
+/**
  * Revert a task to its stored checkpoint and record the outcome on the board. On success the
  * checkpoint is consumed (column cleared + pin ref deleted). Returns null if the task has no
  * checkpoint, else the RestoreOutcome (reverted:false = refused, left intact for a correct retry).
@@ -153,12 +170,82 @@ export async function revertTaskToCheckpoint(
   const r = await restoreCheckpoint(repoCwd, cp, opts);
   if (r.reverted) {
     repo.addNote(taskId, `↩ Checkpoint rollback: ${r.note}.`, actor);
-    repo.clearCheckpoint(taskId);
-    if (cp.ref.startsWith("refs/bob/checkpoint/")) await runGit(["update-ref", "-d", cp.ref], repoCwd);
+    await releaseCheckpoint(taskId, repoCwd);
   } else {
     repo.addNote(taskId, `Checkpoint rollback NOT applied: ${r.note}.`, actor);
   }
   return r;
+}
+
+export interface PreserveOutcome {
+  /** True when partial work was committed to a branch (and the working tree restored clean). */
+  preserved: boolean;
+  /** The branch holding the preserved WIP, when preserved. */
+  branch?: string;
+  /** Human-readable detail: success, or why nothing was preserved. */
+  note: string;
+  /** The underlying restore (HEAD checks, removed files, recovery ref). */
+  outcome?: RestoreOutcome;
+}
+
+/**
+ * Create a branch pointing at `commitish` so a human can `git checkout` the preserved work. If the
+ * branch already exists (an earlier preserve of the same task), suffix it (-2, -3, …) so prior WIP
+ * is never clobbered. Returns the branch name, or undefined if the ref couldn't be resolved/written.
+ */
+async function createTaskBranch(cwd: string, taskId: number, commitish: string): Promise<string | undefined> {
+  const sha = (await gitOut(["rev-parse", commitish], cwd)).trim();
+  if (!sha) return undefined;
+  let name = TASK_BRANCH(taskId);
+  for (let n = 2; await refExists(`refs/heads/${name}`, cwd); n++) {
+    name = `${TASK_BRANCH(taskId)}-${n}`;
+  }
+  return (await runGit(["update-ref", `refs/heads/${name}`, sha], cwd)).ok ? name : undefined;
+}
+
+/**
+ * Checkpoint-before-death: on a terminal failure (idle trip, budget abort, wall-clock timeout,
+ * crash), save the task's partial work to a dedicated `bob/task-<id>` branch and restore the working
+ * tree to its pre-task checkpoint — so the dispatch never leaves uncommitted WIP on main. Builds on
+ * restoreCheckpoint, which pins the pre-revert worktree (tracked AND untracked) to a recovery commit;
+ * we alias that commit to a friendly branch. Returns preserved:false (no destruction) when there's no
+ * checkpoint, the restore is refused (e.g. HEAD moved — the work is already committed), or there was
+ * no WIP to save. Consumes the checkpoint on a successful restore. Best-effort: callers swallow throws.
+ */
+export async function preserveWipToBranch(
+  cwd: string,
+  taskId: number,
+  actor: string,
+  opts: { force?: boolean } = {},
+): Promise<PreserveOutcome> {
+  const cp = repo.getCheckpoint(taskId);
+  if (!cp) return { preserved: false, note: "no pre-task checkpoint (not a git repo, or checkpoints off)" };
+  // Restore the repo the checkpoint came from (a long-lived server's cwd may differ); restoreCheckpoint
+  // still verifies cp.root, refuses a moved HEAD, and pins the discarded state to a recovery ref.
+  const repoCwd = cp.root || cwd;
+  const r = await restoreCheckpoint(repoCwd, cp, opts);
+  if (!r.reverted) {
+    repo.addNote(taskId, `WIP not preserved: ${r.note}.`, actor);
+    return { preserved: false, note: r.note, outcome: r };
+  }
+  // recoveryRef is undefined only when there was nothing to recover (worktree already matched the
+  // checkpoint). Otherwise alias that pinned pre-revert commit to a discoverable task branch.
+  const branch = r.recoveryRef ? await createTaskBranch(repoCwd, taskId, r.recoveryRef) : undefined;
+
+  // Consume the checkpoint and drop its pin now that the pre-task state is restored. (The recovery
+  // ref the branch points at is a separate ref, untouched by this.)
+  await releaseCheckpoint(taskId, repoCwd);
+
+  if (branch) {
+    repo.addNote(
+      taskId,
+      `💾 Preserved partial work to branch ${branch}; restored the working tree to its pre-task state.`,
+      actor,
+    );
+    return { preserved: true, branch, note: `preserved to ${branch}`, outcome: r };
+  }
+  repo.addNote(taskId, "↩ No partial work to preserve; working tree was already at the pre-task state.", actor);
+  return { preserved: false, note: "no WIP to preserve", outcome: r };
 }
 
 /**

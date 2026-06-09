@@ -7,16 +7,14 @@
 // Mirrors the command-gate.ts pattern: injectable deps, unit-testable.
 
 import { spawn } from "node:child_process";
-import type { ReviewIssue } from "./bob-ipc.js";
+import type { DispatchResult } from "./bob-ipc.js";
 
-/** A dispatch result, narrowed to the fields the poll loop reads and passes through. */
-export interface PollResult {
-  taskId: string | null;
-  result: string;
-  lastText: string;
-  status: "completed" | "aborted" | "timeout";
-  reviewFindings?: ReviewIssue[];
-}
+/**
+ * The poll loop reads and passes a dispatch result straight through, so it IS a DispatchResult
+ * (including the idle/budget statuses and the watchdog/budget fields the worker reads after the loop).
+ * Aliased rather than re-declared so the two can't drift.
+ */
+export type PollResult = DispatchResult;
 
 export interface VerifyResult {
   passed: boolean;

@@ -6,6 +6,8 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Task, TaskNote, TaskStatus, TaskPriority, TaskArtifact, ArtifactKind, TaskCheckpoint } from "./types.js";
 import { CLAIMABLE_STATUS, isCompleted, TASK_STATUSES } from "./types.js";
+import { estimateTaskScope } from "./scope.js";
+import { looksLikeImplementation } from "./modes.js";
 
 // Subsystems extracted from db.ts into cohesive modules (they reuse db's connection + helpers).
 // Re-exported here so the public db API is unchanged for the ~12 modules that import from "./db.js".
@@ -145,6 +147,7 @@ function migrate(d: DatabaseSync): void {
   addColumnIfMissing(d, "tasks", "depends_on", "TEXT");
   addColumnIfMissing(d, "tasks", "retry_attempts", "INTEGER DEFAULT 0");
   addColumnIfMissing(d, "tasks", "checkpoint", "TEXT");
+  addColumnIfMissing(d, "tasks", "estimated_tokens", "INTEGER");
 }
 
 /**
@@ -298,6 +301,7 @@ function rowToTask(r: Record<string, unknown>): Task {
     updated_at: String(r.updated_at),
     depends_on: parseDependsOn(r.depends_on),
     retry_attempts: Number(r.retry_attempts ?? 0),
+    estimated_tokens: r.estimated_tokens == null ? null : Number(r.estimated_tokens),
   };
 }
 
@@ -325,14 +329,35 @@ export interface CreateTaskInput {
   depends_on?: number[];
   /** Create non-pullable ('staged'). Release to 'pending' deliberately with releaseTasks. */
   staged?: boolean;
+  /** Override the auto-computed single-dispatch token estimate (see scope.ts). */
+  estimated_tokens?: number | null;
 }
 
 export function createTask(input: CreateTaskInput): Task {
   const d = getDb();
   const deps = input.depends_on ?? [];
 
-  // One transaction: validate → insert → cycle-check. A thrown validation/cycle error (or a crash)
-  // ROLLBACKs the insert, so a half-created or cyclic row can never reach the board.
+  // Right-size the task before it lands (see scope.ts): estimate its single-dispatch token scope so
+  // the worker can enforce a budget ceiling, and an oversized task is flagged — or routed to
+  // orchestrator, which decomposes it into subtasks — rather than dispatched doomed to a mid-work
+  // timeout that strands partial work.
+  const scope = estimateTaskScope({ title: input.title, description: input.description, mode: input.mode });
+  const estimatedTokens = input.estimated_tokens ?? scope.tokens;
+  let mode = input.mode ?? null;
+  let tags = input.tags ?? [];
+  // Auto-route an oversized IMPLEMENTATION task that has no explicit mode to orchestrator. Don't
+  // override a mode the creator chose, don't push read-only/analysis intent into a write-capable mode,
+  // and don't reroute a STAGED task — it's under deliberate curation, so flag it and let the curator
+  // decide on release rather than silently changing its mode. (Non-routed oversize is only flagged.)
+  const routeToOrchestrator =
+    scope.oversized && !mode && !input.staged && looksLikeImplementation(`${input.title} ${input.description ?? ""}`);
+  if (scope.oversized) {
+    if (routeToOrchestrator) mode = "orchestrator";
+    if (!tags.includes("too-big")) tags = [...tags, "too-big"];
+  }
+
+  // One transaction: validate → insert → cycle-check (+ oversize note). A thrown validation/cycle
+  // error (or a crash) ROLLBACKs everything, so a half-created or cyclic row can never reach the board.
   return transaction(() => {
     for (const depId of deps) {
       if (!getTask(depId)) {
@@ -344,17 +369,18 @@ export function createTask(input: CreateTaskInput): Task {
     const status: TaskStatus = input.staged ? "staged" : "pending";
     const info = d
       .prepare(
-        `INSERT INTO tasks (title, description, status, priority, tags, mode, depends_on, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (title, description, status, priority, tags, mode, depends_on, estimated_tokens, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.title,
         input.description ?? null,
         status,
         input.priority ?? "medium",
-        JSON.stringify(input.tags ?? []),
-        input.mode ?? null,
+        JSON.stringify(tags),
+        mode,
         JSON.stringify(deps),
+        estimatedTokens,
         now,
         now,
       );
@@ -364,6 +390,18 @@ export function createTask(input: CreateTaskInput): Task {
     // Self-dependency / cycle check; on a cycle the throw rolls the insert back (no manual delete).
     const cycleError = detectCycle(d, taskId, deps);
     if (cycleError) throw new Error(cycleError);
+
+    if (scope.oversized) {
+      const routed = routeToOrchestrator
+        ? " Routed to orchestrator mode to decompose into subtasks."
+        : " Consider splitting it, or set mode 'orchestrator' to decompose it.";
+      addNote(
+        taskId,
+        `⚖ Oversized: estimated ~${estimatedTokens} output tokens > single-dispatch budget ~${scope.budget} ` +
+          `(${scope.fileCount} file(s) named).${routed} Tagged 'too-big'.`,
+        "scope",
+      );
+    }
 
     return getTask(taskId)!;
   });

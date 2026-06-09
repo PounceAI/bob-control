@@ -63,6 +63,9 @@ export interface Task {
   depends_on: number[];
   /** Number of retry attempts made for transient failures (timeout/abort). */
   retry_attempts: number;
+  /** Estimated single-dispatch output-token scope (see scope.ts), or null if not estimated.
+   *  Set at creation; drives the worker's per-task token budget ceiling. */
+  estimated_tokens: number | null;
 }
 
 export interface TaskNote {

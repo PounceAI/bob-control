@@ -4,6 +4,7 @@
 // human, we ask Claude and press approve/reject over IPC (needs the Bob button
 // patch). Fail-safe by construction: only an explicit "approve" runs the command.
 import { classifyCommand } from "./classify.js";
+import { isCommandAsk } from "./command-policy.js";
 import { getSharedCache, type VerdictCache } from "./verdict-cache.js";
 
 /** The subset of BobClient the gate presses. */
@@ -141,7 +142,7 @@ export function createCommandGate(deps: GateDeps): (ev: GateEvent) => Promise<vo
 
   return function onCommandAsk(ev: GateEvent): Promise<void> {
     if (!deps.enabled || ev.partial) return Promise.resolve();
-    if (ev.ask !== "command" && ev.ask !== "command_security_warning") return Promise.resolve();
+    if (!isCommandAsk(ev.ask)) return Promise.resolve();
     const command = (ev.text ?? "").trim();
     if (!command) return Promise.resolve();
     // Dedup by ASK IDENTITY (ts): Bob re-emits the same pending ask as it streams —

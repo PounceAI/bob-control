@@ -100,7 +100,7 @@ Commands:
   answer <id> <question_id> <text>         answer a worker's board question (resumes the worker)
   result <id> <text> [--open]
   delete <id> [--force] [--cleanup]        refuses if the task recorded artifacts; --force deletes anyway, --cleanup also removes files
-  revert <id> [--force]                    roll the working tree back to the task's pre-task checkpoint (needs --checkpoint run; --force if HEAD moved)
+  revert <id> [--force]                    roll the working tree back to a task's pre-task checkpoint, while one still exists (--force if HEAD moved)
   disarm [reason...]                       pause dispatch (no worker pulls until armed)
   arm                                      resume dispatch
   release [ids...] [--tag <tag>]           move staged tasks to pending (all if no filter)
@@ -381,7 +381,10 @@ async function main(): Promise<void> {
     case "revert": {
       const id = requireId(positional);
       const r = await revertTaskToCheckpoint(process.cwd(), id, "me", { force: flags.force === true });
-      if (r === null) die(`task ${id} has no checkpoint (run the worker with --checkpoint to capture one)`);
+      if (r === null)
+        die(
+          `task ${id} has no checkpoint — it's consumed once the task completes; a failed dispatch's work is preserved to branch bob/task-${id}`,
+        );
       if (!r.reverted) die(r.note);
       const removed = r.removed.length ? `, removed ${r.removed.length} created file(s)` : "";
       const recovery = r.recoveryRef ? ` (recovery snapshot: ${r.recoveryRef})` : "";
