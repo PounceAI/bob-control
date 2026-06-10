@@ -140,6 +140,16 @@ function migrate(d: DatabaseSync): void {
     -- Open-question lookups (getOpenQuestion / listOpenQuestions) filter by status and order
     -- by asked_at; the table is never pruned (rows flip to answered/timed_out), so index it.
     CREATE INDEX IF NOT EXISTS idx_questions_open ON task_questions(status, asked_at);
+
+    -- Worker liveness: a draining worker upserts its heartbeat here so board_status (and the
+    -- dispatch skills' await_task) can tell whether anything is servicing the board.
+    CREATE TABLE IF NOT EXISTS worker_heartbeats (
+      worker_id  TEXT PRIMARY KEY,
+      assignee   TEXT,
+      pid        INTEGER,
+      started_at TEXT NOT NULL,
+      last_beat  TEXT NOT NULL
+    );
   `);
 
   // node:sqlite has no "ADD COLUMN IF NOT EXISTS", so probe and add what's missing.
@@ -515,6 +525,68 @@ export function setBoardArmed(armed: boolean, reason?: string): void {
       .run(key, value, now);
   upsert(ARMED_KEY, armed ? "1" : "0");
   if (reason !== undefined) upsert("armed_reason", reason);
+}
+
+// ---------------------------------------------------------------------------
+// Worker heartbeat (liveness). A draining worker upserts a heartbeat on a timer; board_status
+// reports whether any is fresh, so a foreman knows await_task will actually be serviced — vs.
+// blocking forever because nothing is pulling. A hard-killed worker's stale row ages out of the
+// freshness window and is pruned on read.
+// ---------------------------------------------------------------------------
+/** The worker beats every INTERVAL; a heartbeat counts as live within WINDOW. WINDOW is a
+ *  multiple of INTERVAL so a brief GC/IO pause never misreads as "no worker". */
+export const WORKER_HEARTBEAT_INTERVAL_MS = 5_000;
+export const WORKER_HEARTBEAT_WINDOW_MS = 20_000;
+
+export interface WorkerLiveness {
+  /** A worker beat within the freshness window — the board is being drained. */
+  draining: boolean;
+  /** Distinct workers that beat within the window. */
+  workers: number;
+  /** Seconds since the most recent beat, or null if none was ever recorded. */
+  last_beat_seconds_ago: number | null;
+}
+
+/** A draining worker announces it's alive. Upsert keyed by a stable per-process id; refresh
+ *  last_beat each call. */
+export function recordWorkerHeartbeat(
+  workerId: string,
+  meta: { assignee?: string | null; pid?: number | null } = {},
+): void {
+  const now = nowIso();
+  getDb()
+    .prepare(
+      `INSERT INTO worker_heartbeats (worker_id, assignee, pid, started_at, last_beat) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(worker_id) DO UPDATE SET assignee = excluded.assignee, pid = excluded.pid, last_beat = excluded.last_beat`,
+    )
+    .run(workerId, meta.assignee ?? null, meta.pid ?? null, now, now);
+}
+
+/** Drop a worker's heartbeat on graceful shutdown (best-effort; the window covers a hard kill). */
+export function clearWorkerHeartbeat(workerId: string): void {
+  getDb().prepare("DELETE FROM worker_heartbeats WHERE worker_id = ?").run(workerId);
+}
+
+/** Is a worker draining the board right now? Live = beat within `windowMs`. Opportunistically
+ *  prunes long-dead rows so the table can't grow unbounded. `nowMs` injectable for tests. */
+export function getWorkerLiveness(windowMs = WORKER_HEARTBEAT_WINDOW_MS, nowMs = Date.now()): WorkerLiveness {
+  getDb()
+    .prepare("DELETE FROM worker_heartbeats WHERE last_beat < ?")
+    .run(new Date(nowMs - windowMs * 30).toISOString()); // prune workers dead far past the window
+  const rows = getDb().prepare("SELECT last_beat FROM worker_heartbeats").all() as { last_beat: string }[];
+  const liveCutoff = nowMs - windowMs;
+  let workers = 0;
+  let mostRecent: number | null = null;
+  for (const r of rows) {
+    const t = Date.parse(r.last_beat);
+    if (t >= liveCutoff) workers++;
+    if (mostRecent === null || t > mostRecent) mostRecent = t;
+  }
+  return {
+    draining: workers > 0,
+    workers,
+    last_beat_seconds_ago: mostRecent === null ? null : Math.max(0, Math.round((nowMs - mostRecent) / 1000)),
+  };
 }
 
 /** Release staged tasks to pending (optionally filtered by ids and/or tag). Returns the count released. */

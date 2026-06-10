@@ -6,7 +6,7 @@ description: >-
   explicitly wants IBM BOB to plan or design something — e.g. "have Bob plan the migration",
   "ask Bob to design this", "get Bob's plan for X". Do NOT use for your own planning, generic
   "make a plan" asks, or Claude Code's plan mode.
-allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks, mcp__bob-tasks__await_task
+allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks, mcp__bob-tasks__await_task, mcp__bob-tasks__board_status
 ---
 
 You are the **foreman**. The user wants **IBM Bob** to produce a plan/design — analysis only,
@@ -29,7 +29,9 @@ Do this:
      the paths; you may include a short `git diff` excerpt for context, but keep it bounded.
 
 3. **Wait for Bob, then surface the plan.** Report the new task id and that it routes to
-   `{plan}`, then call `await_task {task_id: id}` — it **blocks until Bob's worker drains the
+   `{plan}`. First check `board_status`: if `worker_draining.draining` is **false**, no worker will
+   pull this — say it's **queued as #id** and tell the user to start one (`launch-worker.cmd`),
+   then stop. Otherwise call `await_task {task_id: id}` — it **blocks until the worker drains the
    task and Bob settles it**, so the plan comes back in this same turn:
    - `analysis_done` (or `done`) → present Bob's plan from the task **`result`**.
    - `waiting` (poll window elapsed) → call `await_task` again; keep waiting while Bob works. If

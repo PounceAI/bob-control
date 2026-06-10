@@ -6,7 +6,7 @@ description: >-
   when the user explicitly wants IBM BOB to do security work — e.g. "have Bob do a security
   review", "ask Bob to scan this for vulnerabilities", "get Bob's devsecops review". Do NOT use
   for your own security analysis or Claude Code's /security-review.
-allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks, mcp__bob-tasks__await_task
+allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks, mcp__bob-tasks__await_task, mcp__bob-tasks__board_status
 ---
 
 You are the **foreman**. The user wants **IBM Bob** to do security / DevSecOps work. Bob runs
@@ -36,7 +36,9 @@ Do this:
      and summarize what it changed (note anything it flagged but deliberately left unfixed).
 
 4. **Wait for Bob, then surface what was fixed.** Report the new task id and that it routes to
-   `{devsecops}`, then call `await_task {task_id: id}` — it **blocks until Bob's worker drains the
+   `{devsecops}`. First check `board_status`: if `worker_draining.draining` is **false**, no worker will
+   pull this — say it's **queued as #id** and tell the user to start one (`launch-worker.cmd`),
+   then stop. Otherwise call `await_task {task_id: id}` — it **blocks until the worker drains the
    task and Bob settles it**, so the result comes back in this same turn:
    - `done` → present what Bob **fixed** from the task **`result`** (highest-severity first), plus
      any residual risks it flagged. The diff is on the working tree for the user to review.

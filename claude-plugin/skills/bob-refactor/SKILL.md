@@ -6,7 +6,7 @@ description: >-
   explicitly wants IBM BOB to refactor or restructure code — e.g. "have Bob refactor this
   module", "ask Bob to clean up X", "get Bob to restructure Y". Do NOT use for your own
   refactors or generic "refactor this" asks you'd do yourself.
-allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks, mcp__bob-tasks__await_task
+allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks, mcp__bob-tasks__await_task, mcp__bob-tasks__board_status
 ---
 
 You are the **foreman**. The user wants **IBM Bob** to refactor/restructure code. Bob's
@@ -28,7 +28,9 @@ Do this:
      off-limits. If useful, include the current `git diff`/`git log` context, bounded.
 
 3. **Wait for Bob, then surface what changed.** Report the new task id and that it routes to
-   `{refactor}`, then call `await_task {task_id: id}` — it **blocks until Bob's worker drains the
+   `{refactor}`. First check `board_status`: if `worker_draining.draining` is **false**, no worker will
+   pull this — say it's **queued as #id** and tell the user to start one (`launch-worker.cmd`),
+   then stop. Otherwise call `await_task {task_id: id}` — it **blocks until the worker drains the
    task and Bob settles it**, so the result comes back in this same turn:
    - `done` → summarize what Bob changed from the task **`result`** and remind the user to review
      the diff / run tests before merging.

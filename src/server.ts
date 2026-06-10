@@ -569,8 +569,10 @@ server.registerTool(
   {
     title: "Board Status",
     description:
-      "Dispatch state and counts: whether the board is armed, task counts by status, and whether " +
-      "a worker looks active. Check before a bulk-create so you don't drop tasks onto a live board.",
+      "Dispatch state and counts: whether the board is armed, task counts by status, whether a " +
+      "worker looks active, and whether a worker is currently draining the board (`worker_draining` " +
+      "— a live heartbeat). Check `worker_draining` before await_task: if false, nothing will pull " +
+      "the task, so don't block — start a worker first. Also check before a bulk-create.",
     inputSchema: {},
   },
   async () => {
@@ -579,6 +581,7 @@ server.registerTool(
     return json({
       armed: repo.isBoardArmed(),
       worker_likely_active: workerLikelyActive(),
+      worker_draining: repo.getWorkerLiveness(),
       counts: repo.countByStatus(tasks),
       total: tasks.length,
     });

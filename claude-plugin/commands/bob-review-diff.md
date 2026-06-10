@@ -1,7 +1,7 @@
 ---
 description: Send the diff you just made to Bob for a read-only (ask-mode) code review
 argument-hint: "[optional: a focus note, or a git ref range like main...HEAD]"
-allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks, mcp__bob-tasks__await_task
+allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks, mcp__bob-tasks__await_task, mcp__bob-tasks__board_status
 ---
 
 You are the **foreman**. The user wants **Bob** to code-review the changes that were just
@@ -40,8 +40,10 @@ Do this:
      findings format, so keep this short; don't over-specify.)
 
 3. **Wait for Bob, then surface the findings.** Report the new task id and that it routes to
-   `{review}`, then call `await_task {task_id: id}` — it **blocks until Bob's auto-dispatch
-   worker drains the task and Bob settles it**, so the review comes back in this same turn:
+   `{review}`. First check `board_status`: if `worker_draining.draining` is **false**, no worker will
+   pull this — tell the user it's **queued as #id** and to start one (`launch-worker.cmd`), then
+   stop. Otherwise call `await_task {task_id: id}` — it **blocks until the worker drains the task
+   and Bob settles it**, so the review comes back in this same turn:
    - `analysis_done` (or `done`) → the full review is in the task **`result`** plus a structured
      **`bob-review` note** (severity / location / category, with any `fixed_diff`). Surface the
      findings. **Note:** under headless dispatch review mode returns the review as completion
