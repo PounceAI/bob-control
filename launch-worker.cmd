@@ -7,8 +7,9 @@ REM end-to-end hands-off: they create a task, then await_task hooks back with th
 REM result the moment Bob settles it.
 REM
 REM Make it autostart at logon (so "standing" really means always up):
-REM   schtasks /create /tn "BobWorker" /sc onlogon /tr "\"%~f0\"" /f
-REM Remove it:   schtasks /delete /tn "BobWorker" /f
+REM   No admin: drop a shortcut to this file in your Startup folder (Win+R -> shell:startup).
+REM   Admin terminal only: schtasks /create /tn "BobWorker" /sc onlogon /tr "\"%~f0\"" /f
+REM     (schtasks/Task Scheduler needs elevation; remove with  schtasks /delete /tn "BobWorker" /f)
 REM
 REM Requires IBM Bob running with IPC enabled (see launch-bob-ipc.cmd).
 REM Extra worker flags pass through, e.g.:  launch-worker.cmd --no-notify --max-risk safe

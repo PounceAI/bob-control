@@ -259,12 +259,12 @@ system sound and terminal bell are off by default).
 **Run it standing (hands-off loop).** Creating a task doesn't start Bob — a worker has to pull it.
 Keep one **always draining** and the plugin's dispatch skills become end-to-end hands-off: they
 `create_task`, then `await_task` hooks back with Bob's result in the same turn (no manual dispatch,
-no "check back later"). [`launch-worker.cmd`](launch-worker.cmd) starts one; register it at logon so
-it's always up (and remove it just as easily):
+no "check back later"). [`launch-worker.cmd`](launch-worker.cmd) starts one; autostart it at logon so it's always up.
+**No admin:** drop a shortcut to it in your Startup folder (`Win+R` → `shell:startup`). **With an
+elevated terminal** you can use a Scheduled Task instead (Task Scheduler needs admin):
 
 ```powershell
-schtasks /create /tn "BobWorker" /sc onlogon /tr "\"<repo>\launch-worker.cmd\"" /f
-schtasks /delete /tn "BobWorker" /f
+schtasks /create /tn "BobWorker" /sc onlogon /tr "\"<repo>\launch-worker.cmd\"" /f   # remove: schtasks /delete /tn "BobWorker" /f
 ```
 
 ### Task dependencies
