@@ -5,7 +5,7 @@
 // template), runs the worker once scoped to JUST that task (via a unique tag),
 // waits for Bob to finish, then prints the captured result. It deliberately
 // does NOT pass --emit-json (that flag's stdin-death guard kills the worker
-// mid-dispatch when run from a non-interactive shell — see memory).
+// mid-dispatch when run from a non-interactive shell).
 //
 // Usage:
 //   node tools/dispatch.mjs "Subject line"                       (auto-routed mode)

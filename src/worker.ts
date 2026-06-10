@@ -112,9 +112,10 @@ function buttonPatchPresent(): boolean | null {
  * been idle for --defer-idle ms.
  *
  * With --verify-and-continue, after Bob completes a task, the worker runs an
- * acceptance check (--verify-command or built-in heuristics) and, if it fails,
- * sends the problem back to Bob to fix — looping until it passes or --max-continues
- * is reached. This catches broken builds/tests without human intervention.
+ * acceptance check (--verify-command and/or --verify-judge; with neither, the
+ * check blind-passes) and, if it fails, sends the problem back to Bob to fix —
+ * looping until it passes or --max-continues is reached. This catches broken
+ * builds/tests without human intervention.
  *
  * With --detect-plan-stop, the worker checks if Bob did real work (git working-tree
  * changed) after completion. If the tree is clean (plan-only, no code written), it
@@ -250,7 +251,7 @@ function parseOpts(argv: string[]): Opts {
     retry: maxRetryAttempts > 0,
     maxRetryAttempts,
     allowCommands,
-    // Checkpoint-before-death is on by default now (the safety net for "never leave WIP on main");
+    // Checkpoint-before-death is on by default (the safety net for "never leave WIP on main");
     // --no-checkpoint opts out. --checkpoint is still accepted (a no-op) for back-compat.
     checkpoint: !has("--no-checkpoint"),
     idleTimeoutMs: has("--no-idle-watchdog") ? 0 : num("--idle-timeout", DEFAULT_IDLE_TIMEOUT_MS),
@@ -944,7 +945,7 @@ async function main(): Promise<void> {
     );
   }
   if (opts.verifyAndContinue) {
-    const cmd = opts.verifyCommand ? `command="${opts.verifyCommand}"` : "built-in heuristics";
+    const cmd = opts.verifyCommand ? `command="${opts.verifyCommand}"` : "no verify command — blind-pass";
     const judgeNote = opts.verifyJudge ? " + LLM judge" : "";
     console.log(
       `bob-worker: verify-and-continue = on (${cmd}${judgeNote}, max ${opts.maxContinues} continue${opts.maxContinues === 1 ? "" : "s"}).`,

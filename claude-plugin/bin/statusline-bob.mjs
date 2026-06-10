@@ -28,7 +28,7 @@
 // NO WAL-init writes) and only if the file exists, so it's cheap to run on every
 // render and never mutates or blocks Bob's queue. Any error degrades to the base
 // segment. The board must be reached from the Windows side (WAL shared memory can't
-// cross the WSL/Windows boundary — see CLAUDE.md / memory wsl-sqlite-wal-gotcha).
+// cross the WSL/Windows boundary — see CLAUDE.md).
 
 // Suppress ONLY the node:sqlite experimental warning (emitted at module load),
 // mirroring src/suppress-warnings.ts. Must run before node:sqlite is imported.

@@ -1,7 +1,20 @@
 {
   "name": "bob-control",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Bob Control: MCP server + CLI + worker that runs IBM Bob (and any MCP-capable agent) unattended against a SQLite task board.",
+  "author": "Joshua Gilbert",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Joshua-Gilbert/bob-control.git"
+  },
+  "keywords": [
+    "mcp",
+    "task-board",
+    "agent-orchestration",
+    "ibm-bob",
+    "sqlite",
+    "worker"
+  ],
   "type": "module",
   "bin": {
     "bob-tasks": "dist/cli.js"

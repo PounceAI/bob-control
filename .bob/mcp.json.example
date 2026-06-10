@@ -6,7 +6,7 @@
       "command": "node",
       "args": ["/absolute/path/to/bob-control/dist/server.js"],
       "env": {
-        "BOB_TASKS_PORTABLE": "1"
+        "BOB_TASKS_DB": "/absolute/path/to/bob-control/data/tasks.db"
       },
       "cwd": "/absolute/path/to/bob-control",
       "timeout": 60,
@@ -22,11 +22,14 @@
         "ask_question",
         "answer_task_question",
         "await_answer",
+        "await_task",
         "create_task",
         "set_task_mode",
         "set_task_dependencies",
         "delete_task",
+        "revert_task",
         "board_status",
+        "board_report",
         "record_artifact",
         "release_tasks",
         "arm_board",

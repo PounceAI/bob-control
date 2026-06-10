@@ -42,4 +42,3 @@ Windows for Node 22 and 24; a red check blocks the merge.
 
 - The board is a pull queue: creating a task does not start Bob. Bob runs it when its
   worker pulls, or when you dispatch via the worker above.
-- See project memory `wsl-sqlite-wal-gotcha` for the full diagnosis.

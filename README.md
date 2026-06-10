@@ -50,8 +50,12 @@ it at your clone:
 
 ```powershell
 cp .bob/mcp.json.example .bob/mcp.json
-# edit the three /absolute/path/to/bob-control paths
+# edit the four /absolute/path/to/bob-control paths
 ```
+
+The template pins `BOB_TASKS_DB` to the repo's own `data/tasks.db` (boards are per
+project — see below); for one shared queue across every repo, replace that `env` entry
+with `"BOB_TASKS_PORTABLE": "1"` on both Bob and the plugin.
 
 Bob hot-reloads `.bob/mcp.json` on save and lists `bob-tasks` under the MCP
 Servers panel's Project tab. To make it available in every workspace, put the
@@ -346,6 +350,8 @@ With `--review-plans`, plan/design-approval questions ("should I proceed with th
 "which approach should I take?") are escalated to you for review, while mechanical clarifications
 ("which file?", "flag name -x or -y?") are auto-answered. This is a middle ground between
 `--escalate-all` (blocks on every question) and the default (auto-answers everything confident).
+When both `--review-plans` and `--escalate-all` are set, `--review-plans` takes precedence.
+
 ### Verify-and-continue with LLM judge
 
 When `--verify-and-continue` is on, the worker runs an acceptance check after Bob completes
@@ -369,8 +375,6 @@ When both `--verify-command` and `--verify-judge` are set, the command runs **fi
 pass; the judge then provides an **additional gate** (both must pass). When only `--verify-judge`
 is set, the judge is the sole acceptance signal. The judge fails safe: any LLM error or timeout
 is treated as a pass (logged as a task note) so infrastructure failures never block tasks.
-
-When both `--review-plans` and `--escalate-all` are set, `--review-plans` takes precedence.
 
 ### Resilience guards: checkpoint-before-death, idle watchdog, token budget
 
