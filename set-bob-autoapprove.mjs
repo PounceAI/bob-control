@@ -15,8 +15,14 @@ import { copyFileSync, existsSync } from "node:fs";
 // Same allowlist the worker sends per-dispatch, so global state can't drift from it.
 import { SAFE_COMMANDS } from "./dist/modes.js";
 
-const DB =
-  "C:/Users/joshu/AppData/Roaming/IBM Bob/User/globalStorage/state.vscdb";
+const APPDATA = process.env.APPDATA;
+if (!APPDATA) {
+  console.error(
+    "[set-autoapprove] %APPDATA% is not set — run from a normal Windows session."
+  );
+  process.exit(1);
+}
+const DB = `${APPDATA.replace(/\\/g, "/")}/IBM Bob/User/globalStorage/state.vscdb`;
 
 // Roo/Bob globalState keys. Values are stored exactly as VS Code stores them:
 // JSON.stringify(value). Booleans -> "true", arrays -> '["npm ", ...]'.

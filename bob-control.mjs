@@ -81,7 +81,6 @@ let buffer = "";
 let clientId = null;
 let sentCommand = false;
 let ourTaskId = null;
-const seenTasks = new Set();
 
 const killTimer = setTimeout(() => {
   log(`\n[bob-control] timeout after ${timeoutMs}ms — closing.`);
@@ -166,7 +165,6 @@ function handle(msg) {
       ourTaskId = taskId;
       log(`[bob-control] task id = ${taskId}  (cancel with: node bob-control.mjs --cancel ${taskId})`);
     }
-    if (taskId) seenTasks.add(taskId);
     printEvent(name, payload);
     const terminal = /taskCompleted|taskAborted|TaskCompleted|TaskAborted/.test(String(name));
     if (!keepOpen && terminal && ourTaskId && taskId === ourTaskId) {

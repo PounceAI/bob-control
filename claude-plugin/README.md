@@ -12,9 +12,9 @@ connector is plain TypeScript on the built-in `node:sqlite`.
 
 ## What's in it
 
-- **MCP server** (`.mcp.json` → `server/server.mjs`) — the 10 task tools, with
-  `BOB_TASKS_PORTABLE=1` so the board lives at a shared `~/.bob-tasks/tasks.db`
-  (Windows: `%USERPROFILE%\.bob-tasks\tasks.db`) that every repo and Bob agree on.
+- **MCP server** (`.mcp.json` → `server/server.mjs`) — the board's task tools, with
+  `BOB_TASKS_DB=${CLAUDE_PROJECT_DIR}/data/tasks.db` so **each project you open gets its
+  own board** (the per-project model the root README describes).
 - **Foreman commands**
   - `/bob-new <rough description>` — turn a rough ask into one well-formed task.
   - `/bob-board [tag]` — the board grouped by status, in pull order.
@@ -46,7 +46,7 @@ connector is plain TypeScript on the built-in `node:sqlite`.
   (`⚡ Bob: N running (M queued) · #id title …`) shown next to the model and directory.
   Run `/bob-statusline` once to install it (Claude Code doesn't let plugins set a status
   line directly, so this command writes the snippet into your `~/.claude/settings.json`
-  for you, pointing at the shared portable board). `/bob-statusline --remove` undoes it.
+  for you; the line resolves the open project's own board). `/bob-statusline --remove` undoes it.
   The line stays quiet (model · dir only) whenever nothing is running or queued.
 
 The commands mirror the dispatcher's mode-routing rules (`src/modes.ts`), so the mode
@@ -73,14 +73,20 @@ status line to your settings.
 
 ## Share the board with Bob
 
-Point Bob at the same central board by setting the same flag in its `.bob/mcp.json`:
+Boards are per project, so Bob must open the **same** `<project>/data/tasks.db` the plugin
+does. Bob doesn't expand `${CLAUDE_PROJECT_DIR}`, so each project needs its own
+`.bob/mcp.json` with the path spelled out — from the connector checkout, run:
 
-```jsonc
-"env": { "BOB_TASKS_PORTABLE": "1" }
+```powershell
+node tools/init-project-board.mjs <project-dir>
 ```
 
-Both sides then resolve `~/.bob-tasks/tasks.db`. The server logs the resolved path on
-startup (`board: …`) if you want to confirm or back it up. To migrate an existing
-repo-local board, copy `data/tasks.db` (plus `-wal`/`-shm`) into `~/.bob-tasks/`.
+It writes a correct `.bob/mcp.json` (server path, `BOB_TASKS_DB`, `cwd`) and creates
+`data/`. The server logs the resolved path on startup (`board: …`) if you want to confirm
+both sides agree.
+
+Prefer one queue across **every** repo instead? Set `BOB_TASKS_PORTABLE=1` on **both**
+sides (the plugin's `.mcp.json` env and Bob's) so both resolve a shared
+`~/.bob-tasks/tasks.db`.
 
 Requires Node ≥ 22.5 on PATH (built-in `node:sqlite`).

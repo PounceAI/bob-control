@@ -61,8 +61,9 @@ const entry = {
   alwaysAllow: [
     "list_tasks", "get_task", "get_next_task", "claim_task", "update_task_status",
     "add_task_note", "submit_result", "ask_question", "answer_task_question", "await_answer",
-    "create_task", "set_task_mode", "set_task_dependencies", "delete_task", "board_status",
-    "record_artifact", "release_tasks", "arm_board", "disarm_board",
+    "await_task", "create_task", "set_task_mode", "set_task_dependencies", "delete_task",
+    "revert_task", "board_status", "board_report", "record_artifact", "release_tasks",
+    "arm_board", "disarm_board",
   ],
   watchPaths: [serverJs],
 };

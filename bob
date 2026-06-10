@@ -5,9 +5,9 @@
 # can't cross the WSL/Windows boundary, so Linux-side node fails with "disk I/O
 # error 4618". Under WSL this routes through Windows node.exe (via interop), which
 # co-opens the board cleanly; on a native-Windows shell it uses plain node.
-# Background: project memory wsl-sqlite-wal-gotcha.
 #
-# Usage: bob <create|list|show|claim|status|note|result|delete|stats|route|help> [args]
+# Usage: bob <create|list|show|claim|status|note|result|answer|revert|board|report|...> [args]
+# Run './bob help' for the full command list.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

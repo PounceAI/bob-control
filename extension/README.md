@@ -18,10 +18,11 @@ All settings are under the `bobTasks.*` namespace:
 
 ### Core Settings
 
-- **`bobTasks.projectRoot`** — Path to the Bob Control project (containing `dist/worker.js`). Empty = the first workspace folder.
+- **`bobTasks.connectorPath`** — Absolute path to the Bob Control connector install (the folder containing `dist/worker.js`). Set it once (User scope) so the worker can start regardless of which project Bob has open. Empty = auto-detect: any open workspace folder that contains `dist/worker.js`, else the legacy `bobTasks.projectRoot` if it still points at the install.
+- **`bobTasks.projectRoot`** — Working directory the worker runs in — the project Bob operates on (verify/judge run git here). Empty = the first workspace folder. To locate `dist/worker.js`, use `bobTasks.connectorPath` instead.
 - **`bobTasks.nodePath`** — Node executable used to run the worker. Must be Node >= 22.5 (for `node:sqlite`). Set an absolute path if `node` on PATH is older.
 - **`bobTasks.dbPath`** — SQLite task DB (`BOB_TASKS_DB`). Empty = the project's `data/tasks.db`. Must match the MCP server's DB.
-- **`bobTasks.pipe`** — Bob IPC named pipe. Default: `\\\\.\\pipe\\pipe\\bob-ipc`.
+- **`bobTasks.pipe`** — Bob IPC named pipe. Default: `\\.\pipe\pipe\bob-ipc` (the doubled form node-ipc registers).
 - **`bobTasks.maxRisk`** — Only auto-dispatch tasks whose mode risk is at or below this. Options: `safe`, `standard`, `elevated`. Default: `standard`. (`advanced` mode is elevated.)
 - **`bobTasks.pollMs`** — Idle poll interval (ms). Default: `3000`.
 - **`bobTasks.timeoutMs`** — Per-task dispatch timeout (ms). Default: `300000` (5 minutes).
@@ -53,7 +54,7 @@ All settings are under the `bobTasks.*` namespace:
 ### Verify-and-Continue
 
 - **`bobTasks.verifyAndContinue`** — After Bob completes a task, run an acceptance check and loop back to Bob to fix issues until it passes or `maxContinues` is reached. Catches broken builds/tests without human intervention. Default: `false`.
-- **`bobTasks.verifyCommand`** — Command to run for acceptance checks when `verifyAndContinue` is on. Empty = use built-in heuristics (git working-tree check). Exit code 0 = pass, non-zero = fail.
+- **`bobTasks.verifyCommand`** — Command to run for acceptance checks when `verifyAndContinue` is on. Empty = the check blind-passes (no verify command — not checked); enable `bobTasks.verifyJudge` for a real gate. Exit code 0 = pass, non-zero = fail.
 - **`bobTasks.verifyJudge`** — Use an LLM judge to verify task completion when no `verifyCommand` is set. The judge reviews Bob's work against the task criteria and actual code changes (git diff). Uses the same backend as the command classifier. When both `verifyCommand` and `verifyJudge` are on, the command runs first and the judge provides an additional gate. Default: `false`.
 - **`bobTasks.maxContinues`** — Maximum number of fix loops when `verifyAndContinue` is on. After this many attempts, the task is marked as failed. Default: `3`.
 - **`bobTasks.detectPlanStop`** — Check if Bob did real work (git working-tree changed) after completion. If the tree is clean (plan-only, no code written), auto-continue asking Bob to implement the plan. Default: `false`.
@@ -114,7 +115,7 @@ When the extension is active, a status-bar item shows the worker state (click it
 ### Prerequisites
 
 1. **Bob Control built** — The parent project must be built at `../dist` (relative to this extension directory). Run `npm install && npm run build` in the project root.
-2. **Bob launched with IPC** — Bob must be running with `ROO_CODE_IPC_SOCKET_PATH` set to the named pipe (e.g., `\\\\.\\pipe\\pipe\\bob-ipc` on Windows). Use the project's `launch-bob-ipc.cmd` script.
+2. **Bob launched with IPC** — Bob must be running with `ROO_CODE_IPC_SOCKET_PATH` set to `\\.\pipe\bob-ipc`. Use the project's `launch-bob-ipc.cmd` script. (node-ipc internally mangles that into a doubled `\\.\pipe\pipe\bob-ipc` — the name the worker actually connects to, and the default of `bobTasks.pipe`.)
 3. **Node >= 22.5** — The worker requires Node 22.5 or later for `node:sqlite`. Verify with `node --version`. If your system Node is older, set `bobTasks.nodePath` to an absolute path to a newer Node binary.
 
 ### Build Steps
@@ -135,7 +136,7 @@ This compiles the TypeScript source to `extension/out/extension.js`.
 npm run package
 ```
 
-This creates `bob-tasks-0.1.0.vsix`. Then in Bob:
+This creates `bob-tasks-1.0.0.vsix`. Then in Bob:
 
 1. Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`)
 2. Run **Extensions: Install from VSIX…**
@@ -146,14 +147,14 @@ This creates `bob-tasks-0.1.0.vsix`. Then in Bob:
 
 Copy the entire `extension/` directory to Bob's extensions folder:
 
-- Windows: `%USERPROFILE%\.bobide\extensions\local.bob-tasks-0.1.0\`
-- macOS/Linux: `~/.bobide/extensions/local.bob-tasks-0.1.0/`
+- Windows: `%USERPROFILE%\.bobide\extensions\local.bob-tasks-1.0.0\`
+- macOS/Linux: `~/.bobide/extensions/local.bob-tasks-1.0.0/`
 
 Then reload Bob.
 
 ## Usage
 
-1. Configure settings (especially `bobTasks.projectRoot` if the extension isn't in the connector project)
+1. Configure settings (especially `bobTasks.connectorPath` if the connector isn't an open workspace folder)
 2. Run **Bob Tasks: Start Worker** from the Command Palette
 3. The worker will poll for queued tasks and auto-dispatch them to Bob
 4. Watch the status bar for worker state
