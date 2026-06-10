@@ -93,6 +93,11 @@ npm install && npm run build      # build also bundles claude-plugin/server/serv
 | `bob-foreman` subagent | Split a large request into several correctly-routed, ordered tasks |
 | **Skills** (model-invoked) | Ask for IBM Bob by name to dispatch its specialty modes: **bob-review** (`review`), **bob-plan** (`plan`), **bob-refactor** (`refactor`), **bob-security** (`devsecops`) |
 
+The dispatch surfaces — **bob-review** / **bob-plan** / **bob-refactor** / **bob-security** and
+`/bob-review-diff` — **block on Bob via `await_task`** and present the result in the *same* turn, so
+a review / plan / fix runs end-to-end hands-off **while a worker is draining the board**
+(`npm run worker`); with no worker draining they fall back to "queued as #id".
+
 ### Boards are per project
 
 The plugin's MCP server points at **the open project's own** board —
@@ -131,10 +136,18 @@ board path on startup, so you can confirm both tools agree.
 | `ask_question` | Raise a question for a human; parks the task `needs_input` (never guess) |
 | `answer_task_question` | Answer a worker's question (by `question_id`); resumes the worker |
 | `await_answer` | The worker's blocking wait for an answer (poll of the shared board) |
+| `await_task` | Block until a task **settles** (done / analysis_done / blocked / cancelled / needs_input), then return it with its result — dispatch-and-wait |
 
 A typical Bob loop: `get_next_task {claim:true}` then `add_task_note` while working,
 then `submit_result`. If it needs a value it can't determine, `ask_question` → `await_answer`
 rather than guessing.
+
+From the foreman side, a dispatcher that queues work can `create_task` → `await_task` to **block
+until Bob finishes** and act on the result in the same turn — no board polling. `await_task` is a
+chunked poll of the shared board (each call stays under the MCP timeout; call again if it returns
+`{status:'waiting'}`), so the settling write Bob's worker makes "hooks" you straight back into your
+turn. It resolves on every settled state — including `needs_input`, where it hands back Bob's open
+question so you can `answer_task_question` and `await_task` again.
 
 ## CLI
 
@@ -242,6 +255,17 @@ Each mode has a risk level, and the worker only dispatches tasks at or below
 `--max-risk` (default `standard`); higher-risk ones stay pending for manual
 dispatch. On finish the worker pops a tray toast (`--no-notify` to silence; the
 system sound and terminal bell are off by default).
+
+**Run it standing (hands-off loop).** Creating a task doesn't start Bob — a worker has to pull it.
+Keep one **always draining** and the plugin's dispatch skills become end-to-end hands-off: they
+`create_task`, then `await_task` hooks back with Bob's result in the same turn (no manual dispatch,
+no "check back later"). [`launch-worker.cmd`](launch-worker.cmd) starts one; register it at logon so
+it's always up (and remove it just as easily):
+
+```powershell
+schtasks /create /tn "BobWorker" /sc onlogon /tr "\"<repo>\launch-worker.cmd\"" /f
+schtasks /delete /tn "BobWorker" /f
+```
 
 ### Task dependencies
 
@@ -509,6 +533,7 @@ src/
   db.ts           SQLite store + repository (connection, tasks, deps, artifacts, checkpoints)
   questions.ts    board-native ask/answer/timeout round-trip (extracted from db.ts)
   completion.ts   done-integrity gate: completeTask + Evidence (extracted from db.ts)
+  await-task.ts   await_task poll classification (settled / needs_input / unsettled) — testable seam
   modes.ts        mode slugs, router, per-mode risk + auto-approve profiles
   templates.ts    task templates
   bob-ipc.ts      async IPC client (BobClient; approve/reject/sendMessage)

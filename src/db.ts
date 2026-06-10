@@ -449,6 +449,15 @@ export function getTask(id: number): Task | null {
   return row ? rowToTask(row) : null;
 }
 
+/** Hot-path read for await_task's poll loop: just status + result, skipping the full-row parse
+ *  (tags / depends_on / mode / …) getTask does. Mirrors questionState's column-narrowing. */
+export function getTaskStatus(id: number): { status: TaskStatus; result: string | null } | null {
+  const row = getDb().prepare("SELECT status, result FROM tasks WHERE id = ?").get(id) as
+    | { status: string; result: string | null }
+    | undefined;
+  return row ? { status: row.status as TaskStatus, result: (row.result as string | null) ?? null } : null;
+}
+
 export interface ListTasksOptions {
   status?: TaskStatus;
   tag?: string;

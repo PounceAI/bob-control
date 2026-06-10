@@ -6,7 +6,7 @@ description: >-
   explicitly wants IBM BOB (not you) to review code — e.g. "have Bob review this", "send these
   changes to Bob for review", "get Bob's review of the diff". Do NOT use for the user's own
   review requests, generic "review this" asks, or anything covered by Claude's own /code-review.
-allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks
+allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks, mcp__bob-tasks__await_task
 ---
 
 You are the **foreman**. The user wants **IBM Bob** to code-review a set of changes in this
@@ -42,10 +42,18 @@ Do this:
      reuse / simplification / efficiency — then the diff in a fenced ```diff block, then the
      user's focus note if any. Keep it short; review mode supplies its own rubric.
 
-4. **Surface the result.** Report the new task id and that it routes to `{review}`. Then
-   `get_task` on it once or twice:
-   - When the worker has drained it (status `done`), the review is in the task **`result`** and
-     a structured **`bob-review` note** (findings with severity / location / `fixed_diff`).
-     Present those findings to the user, correctness issues first.
-   - If still `pending`/`in_progress`, tell the user it's **queued as #id** — Bob reviews it
-     when its worker pulls — and they can re-invoke or check `/bob-board`.
+4. **Wait for Bob, then surface the findings.** Report the new task id and that it routes to
+   `{review}`, then call `await_task {task_id: id}` — it **blocks until Bob's auto-dispatch
+   worker drains the task and Bob settles it**, so the whole review loop completes in this one
+   turn (no "check back later"):
+   - `analysis_done` (or `done`) → the review is in the task **`result`** plus a structured
+     **`bob-review` note** (severity / location / `fixed_diff`). Present the findings,
+     correctness issues first.
+   - `waiting` (the poll window elapsed) → call `await_task` again and keep waiting while Bob
+     works. If it stays `waiting` across several calls, **no worker is draining the board** —
+     tell the user it's **queued as #id** and to start the worker (`npm run worker`) or check
+     `/bob-board`.
+   - `needs_input` → Bob asked a question (it's in the response); surface it and have the user
+     answer (`answer_task_question` or the board), then `await_task` again.
+   - `blocked` / `cancelled` → Bob stopped without completing; report that with the reason from
+     the task notes.
