@@ -30,6 +30,19 @@ export function isCompleted(status: TaskStatus): boolean {
   return COMPLETED_STATUSES.includes(status);
 }
 
+/**
+ * States where a worker is no longer actively driving a task forward on its own — an await_task
+ * poll resolves here so the caller (Claude) can react the moment Bob settles. The transient
+ * states (staged/pending/in_progress) keep the caller waiting. `needs_input` is settled-but-
+ * actionable: the task can't progress until a human/Claude answers its board question, so we
+ * surface it rather than block until the question's own timeout fires.
+ */
+export const SETTLED_STATUSES: readonly TaskStatus[] = ["done", "analysis_done", "blocked", "cancelled", "needs_input"];
+
+export function isSettled(status: TaskStatus): boolean {
+  return SETTLED_STATUSES.includes(status);
+}
+
 /** Kinds of execution artifact a worker can record against a task. */
 export const ARTIFACT_KINDS = ["file", "commit", "test"] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];

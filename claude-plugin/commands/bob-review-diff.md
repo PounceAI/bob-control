@@ -1,7 +1,7 @@
 ---
 description: Send the diff you just made to Bob for a read-only (ask-mode) code review
 argument-hint: "[optional: a focus note, or a git ref range like main...HEAD]"
-allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks
+allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks, mcp__bob-tasks__await_task, mcp__bob-tasks__board_status
 ---
 
 You are the **foreman**. The user wants **Bob** to code-review the changes that were just
@@ -39,19 +39,22 @@ Do this:
      focus note from `$ARGUMENTS` if any. (Bob's review mode supplies its own rubric and
      findings format, so keep this short; don't over-specify.)
 
-3. **Surface the result.** Report the new task id and that it routes to `{review}`. Then call
-   `get_task` on it once or twice:
-   - When Bob's worker has drained it (status `done`), the full review is in the task
-     **`result`** and the worker also persists a structured **`bob-review` note** (findings
-     parsed into severity / location / category, with any `fixed_diff`). Surface those
-     findings to the user. **Note:** under headless dispatch review mode returns the review as
-     completion text rather than writing to Bob's webview findings panel, so the board — not
-     the panel — is the source of truth here.
-   - If it's still `pending`/`in_progress`, tell the user it's **queued as #id** — Bob reviews
-     it when its worker pulls — and they can re-run this command or `/bob-board` to check status.
+3. **Wait for Bob, then surface the findings.** Report the new task id and that it routes to
+   `{review}`. First check `board_status`: if `worker_draining.draining` is **false**, no worker will
+   pull this — tell the user it's **queued as #id** and to start one (`launch-worker.cmd`), then
+   stop. Otherwise call `await_task {task_id: id}` — it **blocks until the worker drains the task
+   and Bob settles it**, so the review comes back in this same turn:
+   - `analysis_done` (or `done`) → the full review is in the task **`result`** plus a structured
+     **`bob-review` note** (severity / location / category, with any `fixed_diff`). Surface the
+     findings. **Note:** under headless dispatch review mode returns the review as completion
+     text, not to Bob's webview panel — the board is the source of truth.
+   - `waiting` (poll window elapsed) → call `await_task` again; keep waiting while Bob works. If
+     it stays `waiting` across several calls, **no worker is draining the board** — tell the user
+     it's **queued as #id** and to start the worker (`npm run worker`) or check `/bob-board`.
+   - `needs_input` → Bob asked a question (in the response); surface it and have the user answer,
+     then `await_task` again. `blocked` / `cancelled` → report Bob stopped, with the note reason.
 
-Note: this command **queues** the review on the shared board; the run happens when Bob's
-auto-dispatch worker pulls the task. `review` mode is read-only, so it's safe to drain
-unattended. (If you instead want the full review text returned **inline in Claude Code**
-rather than in Bob's panel, file it in `ask` mode — Bob then returns the review as the task
-result.)
+Note: `await_task` only **waits** — Bob runs the task when his auto-dispatch worker pulls it, so
+this loop is autonomous only while a worker is draining the board (`npm run worker`); otherwise it
+falls back to "queued as #id". `review` mode is read-only, safe to drain unattended. (If you want
+the review text returned **inline** rather than via the board, file it in `ask` mode instead.)

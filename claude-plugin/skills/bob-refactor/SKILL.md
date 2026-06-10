@@ -6,7 +6,7 @@ description: >-
   explicitly wants IBM BOB to refactor or restructure code — e.g. "have Bob refactor this
   module", "ask Bob to clean up X", "get Bob to restructure Y". Do NOT use for your own
   refactors or generic "refactor this" asks you'd do yourself.
-allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks
+allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks, mcp__bob-tasks__await_task, mcp__bob-tasks__board_status
 ---
 
 You are the **foreman**. The user wants **IBM Bob** to refactor/restructure code. Bob's
@@ -27,8 +27,16 @@ Do this:
      especially **"Preserve behavior; keep the build and tests green."** Call out anything
      off-limits. If useful, include the current `git diff`/`git log` context, bounded.
 
-3. **Surface the result.** Report the new task id and that it routes to `{refactor}`. Then
-   `get_task`:
-   - When `done`, summarize what Bob changed from the task **`result`** and remind the user to
-     review the diff / run tests before merging.
-   - If still `pending`/`in_progress`, say it's **queued as #id** (check `/bob-board`).
+3. **Wait for Bob, then surface what changed.** Report the new task id and that it routes to
+   `{refactor}`. First check `board_status`: if `worker_draining.draining` is **false**, no worker will
+   pull this — say it's **queued as #id** and tell the user to start one (`launch-worker.cmd`),
+   then stop. Otherwise call `await_task {task_id: id}` — it **blocks until the worker drains the
+   task and Bob settles it**, so the result comes back in this same turn:
+   - `done` → summarize what Bob changed from the task **`result`** and remind the user to review
+     the diff / run tests before merging.
+   - `waiting` (poll window elapsed) → call `await_task` again; keep waiting while Bob works. If
+     it stays `waiting` across several calls, **no worker is draining the board** — say it's
+     **queued as #id**; start the worker (`npm run worker`) or check `/bob-board`.
+   - `needs_input` → Bob asked a question (in the response); surface it for the user to answer,
+     then `await_task` again. `blocked` / `cancelled` → report Bob stopped, with the note reason
+     (a refactor that couldn't keep tests green often lands here).

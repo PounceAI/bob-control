@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import "./suppress-warnings.js";
+import { randomUUID } from "node:crypto";
 import * as repo from "./db.js";
 import {
   resolveMode,
@@ -848,6 +849,24 @@ async function main(): Promise<void> {
     }
   }
   emit(opts, "connected", { pipe: resolvePipe(opts.pipe), maxRisk: opts.maxRisk });
+
+  // Heartbeat: announce this worker is alive and draining so board_status (and the dispatch
+  // skills' await_task) can tell the board is being serviced. Beats on a timer independent of the
+  // dispatch loop, so a long in-flight task doesn't read as "no worker". Cleared on graceful exit;
+  // a hard kill is covered by the liveness window. (A dry run isn't draining — skip it.)
+  if (!opts.dryRun) {
+    const workerId = randomUUID();
+    const beat = () => repo.recordWorkerHeartbeat(workerId, { assignee: opts.assignee, pid: process.pid });
+    beat();
+    setInterval(beat, repo.WORKER_HEARTBEAT_INTERVAL_MS).unref();
+    process.on("exit", () => {
+      try {
+        repo.clearWorkerHeartbeat(workerId);
+      } catch {
+        /* best-effort on the way out */
+      }
+    });
+  }
 
   let stopping = false;
   const stop = () => {

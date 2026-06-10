@@ -4,9 +4,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import * as repo from "./db.js";
 import { TASK_STATUSES, TASK_PRIORITIES, ARTIFACT_KINDS } from "./types.js";
+import type { TaskStatus } from "./types.js";
 import { resolveMode, isReadOnlyMode } from "./modes.js";
 import { revertTaskToCheckpoint, deleteTaskAndCheckpoint } from "./checkpoint.js";
 import { buildReport } from "./report.js";
+import { awaitTaskOutcome } from "./await-task.js";
 
 const WORKER_ACTIVE_WINDOW_MS = 5 * 60 * 1000;
 
@@ -50,6 +52,20 @@ function json(obj: unknown): ToolResult {
 
 function fail(message: string): ToolResult {
   return { content: [{ type: "text", text: message }], isError: true };
+}
+
+// Shared skeleton for the await_* tools: block server-side in chunks so a single call stays under
+// the MCP transport timeout while the total wait spans minutes (the caller re-invokes). Poll
+// `settle` every AWAIT_POLL_INTERVAL_MS until it yields a terminal result; return null once the
+// per-call `window` elapses, so the caller renders its own tool-specific 'waiting' response.
+async function awaitPoll(window: number, settle: () => ToolResult | null): Promise<ToolResult | null> {
+  const deadline = Date.now() + window;
+  for (;;) {
+    const result = settle();
+    if (result) return result;
+    if (Date.now() >= deadline) return null;
+    await sleep(AWAIT_POLL_INTERVAL_MS);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -368,11 +384,10 @@ server.registerTool(
         .describe(`Per-call poll window (default ${AWAIT_CHUNK_DEFAULT_MS}ms, capped ${AWAIT_CHUNK_MAX_MS}ms)`),
     },
   },
-  async ({ task_id, question_id, wait_ms }) => {
+  async ({ question_id, wait_ms }) => {
     const window = Math.min(wait_ms ?? AWAIT_CHUNK_DEFAULT_MS, AWAIT_CHUNK_MAX_MS);
-    const deadline = Date.now() + window;
     // Poll the shared DB: the answer arrives from ANOTHER client's answer_task_question.
-    for (;;) {
+    const settled = await awaitPoll(window, () => {
       const st = repo.questionState(question_id);
       if (st.status === "unknown") return fail(`no question '${question_id}'`);
       if (st.status === "answered") return json({ status: "answered", answer: st.answer ?? "" });
@@ -382,9 +397,61 @@ server.registerTool(
           note: "question timed out — task parked blocked; do not fabricate an answer",
         });
       }
-      if (Date.now() >= deadline) return json({ status: "waiting", note: "no answer yet — call await_answer again" });
-      await sleep(AWAIT_POLL_INTERVAL_MS);
-    }
+      return null;
+    });
+    return settled ?? json({ status: "waiting", note: "no answer yet — call await_answer again" });
+  },
+);
+
+server.registerTool(
+  "await_task",
+  {
+    title: "Await Task Completion (blocks here)",
+    description:
+      "Block until task #task_id settles, then return it — the way to 'hook' back into your turn " +
+      "the moment Bob finishes. Returns {status:'done'|'analysis_done', result} on success, " +
+      "{status:'blocked'|'cancelled', result} when Bob stopped without completing, " +
+      "{status:'needs_input', question} when Bob is waiting on a board question (answer it with " +
+      "answer_task_question, then call await_task again), or {status:'waiting', current} after the " +
+      "poll window (call await_task again). Polls the shared board; the result is written by Bob's " +
+      "worker. Use after dispatching a task you want to act on as soon as it's done.",
+    inputSchema: {
+      task_id: z.number().int(),
+      wait_ms: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(`Per-call poll window (default ${AWAIT_CHUNK_DEFAULT_MS}ms, capped ${AWAIT_CHUNK_MAX_MS}ms)`),
+    },
+  },
+  async ({ task_id, wait_ms }) => {
+    const window = Math.min(wait_ms ?? AWAIT_CHUNK_DEFAULT_MS, AWAIT_CHUNK_MAX_MS);
+    // Poll the shared board: the settling write arrives from Bob's worker (another client).
+    let lastStatus: TaskStatus | undefined;
+    const settled = await awaitPoll(window, () => {
+      const o = awaitTaskOutcome(task_id);
+      switch (o.kind) {
+        case "missing":
+          return fail(`no task '#${task_id}'`);
+        case "settled":
+          return json({ status: o.status, result: o.result });
+        case "needs_input":
+          // Not "finished" — Bob is parked on a board question; surface it so the caller can answer
+          // and await_task again, rather than block until the question's own timeout.
+          return json({
+            status: "needs_input",
+            question: o.question,
+            note: "Bob is waiting on a board question — answer with answer_task_question, then call await_task again.",
+          });
+        case "unsettled":
+          lastStatus = o.status;
+          return null;
+      }
+    });
+    return (
+      settled ?? json({ status: "waiting", current: lastStatus, note: "task not settled yet — call await_task again" })
+    );
   },
 );
 
@@ -502,8 +569,10 @@ server.registerTool(
   {
     title: "Board Status",
     description:
-      "Dispatch state and counts: whether the board is armed, task counts by status, and whether " +
-      "a worker looks active. Check before a bulk-create so you don't drop tasks onto a live board.",
+      "Dispatch state and counts: whether the board is armed, task counts by status, whether a " +
+      "worker looks active, and whether a worker is currently draining the board (`worker_draining` " +
+      "— a live heartbeat). Check `worker_draining` before await_task: if false, nothing will pull " +
+      "the task, so don't block — start a worker first. Also check before a bulk-create.",
     inputSchema: {},
   },
   async () => {
@@ -512,6 +581,7 @@ server.registerTool(
     return json({
       armed: repo.isBoardArmed(),
       worker_likely_active: workerLikelyActive(),
+      worker_draining: repo.getWorkerLiveness(),
       counts: repo.countByStatus(tasks),
       total: tasks.length,
     });

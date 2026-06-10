@@ -6,7 +6,7 @@ description: >-
   when the user explicitly wants IBM BOB to do security work — e.g. "have Bob do a security
   review", "ask Bob to scan this for vulnerabilities", "get Bob's devsecops review". Do NOT use
   for your own security analysis or Claude Code's /security-review.
-allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks
+allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks, mcp__bob-tasks__await_task, mcp__bob-tasks__board_status
 ---
 
 You are the **foreman**. The user wants **IBM Bob** to do security / DevSecOps work. Bob runs
@@ -35,8 +35,15 @@ Do this:
      ```diff block), and ask Bob to **fix the vulnerabilities it finds**, highest-severity first,
      and summarize what it changed (note anything it flagged but deliberately left unfixed).
 
-4. **Surface the result.** Report the new task id and that it routes to `{devsecops}`. Then
-   `get_task`:
-   - When `done`, present what Bob **fixed** from the task **`result`** (highest-severity first),
-     plus any residual risks it flagged. The diff is on the working tree for the user to review.
-   - If still `pending`/`in_progress`, say it's **queued as #id** (check `/bob-board`).
+4. **Wait for Bob, then surface what was fixed.** Report the new task id and that it routes to
+   `{devsecops}`. First check `board_status`: if `worker_draining.draining` is **false**, no worker will
+   pull this — say it's **queued as #id** and tell the user to start one (`launch-worker.cmd`),
+   then stop. Otherwise call `await_task {task_id: id}` — it **blocks until the worker drains the
+   task and Bob settles it**, so the result comes back in this same turn:
+   - `done` → present what Bob **fixed** from the task **`result`** (highest-severity first), plus
+     any residual risks it flagged. The diff is on the working tree for the user to review.
+   - `waiting` (poll window elapsed) → call `await_task` again; keep waiting while Bob works. If
+     it stays `waiting` across several calls, **no worker is draining the board** — say it's
+     **queued as #id**; start the worker (`npm run worker`) or check `/bob-board`.
+   - `needs_input` → Bob asked a question (in the response); surface it for the user to answer,
+     then `await_task` again. `blocked` / `cancelled` → report Bob stopped, with the note reason.
