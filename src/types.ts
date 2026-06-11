@@ -43,6 +43,16 @@ export function isSettled(status: TaskStatus): boolean {
   return SETTLED_STATUSES.includes(status);
 }
 
+/**
+ * Terminally finished: succeeded (done/analysis_done) or cancelled — the task will NOT run again.
+ * Narrower than isSettled, which also includes the resumable/awaiting states `blocked` and
+ * `needs_input`. Used to decide that a late question answer must not resurrect a finished run
+ * into a redundant re-dispatch (see answerQuestion / closeOpenQuestions).
+ */
+export function isFinished(status: TaskStatus): boolean {
+  return isCompleted(status) || status === "cancelled";
+}
+
 /** Kinds of execution artifact a worker can record against a task. */
 export const ARTIFACT_KINDS = ["file", "commit", "test"] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];

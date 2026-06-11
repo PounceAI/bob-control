@@ -3,7 +3,7 @@
 // evidence (files/commit/test), else analysis_done — or done-UNVERIFIED when evidence couldn't be
 // captured. Extracted from db.ts so the rule is a cohesive unit; it reuses db's primitives.
 import type { Task } from "./types.js";
-import { getTask, writeResult, addNote, recordArtifact, hasEvidence } from "./db.js";
+import { getTask, writeResult, addNote, recordArtifact, hasEvidence, closeOpenQuestions } from "./db.js";
 
 /** Evidence that a task actually executed (vs. produced only analysis). */
 export interface Evidence {
@@ -53,6 +53,9 @@ export interface CompleteOptions {
 export function completeTask(id: number, opts: CompleteOptions): Task | null {
   const task = getTask(id);
   if (!task) return null;
+  // The run finished — close any still-open board question so a late answer can't resurrect this
+  // task into a redundant re-dispatch (idempotency backstop). One call covers every terminal branch.
+  closeOpenQuestions(id, "run completed");
   if (opts.evidence) recordEvidenceArtifacts(id, opts.evidence);
 
   // Read-only is a mode fact, reliable regardless of cwd.

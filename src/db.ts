@@ -23,10 +23,18 @@ const moduleDir = dirname(fileURLToPath(import.meta.url));
 //   1. BOB_TASKS_DB         — explicit path wins.
 //   2. BOB_TASKS_PORTABLE   — a shared board in the user's home (~/.bob-tasks/tasks.db),
 //      so the Claude Code plugin and Bob can agree on one queue from any repo.
-//   3. else                 — the repo-local <project-root>/data/tasks.db.
+//   3. CLAUDE_PROJECT_DIR   — the open project's <dir>/data/tasks.db. Claude Code sets this in every
+//      MCP server it spawns (plugin AND a terminal/project .mcp.json), so a terminal-configured
+//      server lands on the SAME project board the plugin does without an explicit BOB_TASKS_DB —
+//      otherwise the module-relative fallback (4) reads a different board than the worker writes.
+//   4. else                 — the repo-local <project-root>/data/tasks.db (module-relative).
 export function defaultDbPath(): string {
-  if (process.env.BOB_TASKS_DB) return resolve(process.env.BOB_TASKS_DB);
+  // .trim() so a whitespace-only value doesn't resolve to a bogus path ("" is already falsy).
+  const explicit = process.env.BOB_TASKS_DB?.trim();
+  if (explicit) return resolve(explicit);
   if (process.env.BOB_TASKS_PORTABLE) return resolve(homedir(), ".bob-tasks", "tasks.db");
+  const projectDir = process.env.CLAUDE_PROJECT_DIR?.trim();
+  if (projectDir) return resolve(projectDir, "data", "tasks.db");
   return resolve(moduleDir, "..", "data", "tasks.db");
 }
 

@@ -38,10 +38,18 @@ npm run smoke      # optional self-test
 
 Needs Node 22.5+ (uses the built-in `node:sqlite`, so there's no native build step).
 Board path resolution: `BOB_TASKS_DB` (explicit) › `BOB_TASKS_PORTABLE=1` (a shared
-`~/.bob-tasks/tasks.db`) › repo-local `data/tasks.db`. The plugin points each project at
-**its own** board (see [Boards are per project](#boards-are-per-project)). On first open the
-store also writes a `.gitignore` beside itself, so the board never lands as untracked state
-in a consuming repo.
+`~/.bob-tasks/tasks.db`) › `CLAUDE_PROJECT_DIR/data/tasks.db` (Claude Code sets
+`CLAUDE_PROJECT_DIR` in every MCP server it spawns — plugin **and** a plain terminal/project
+`.mcp.json` — so both resolve the same project board) › repo-local module-relative `data/tasks.db`.
+The plugin points each project at **its own** board (see
+[Boards are per project](#boards-are-per-project)). On first open the store also writes a
+`.gitignore` beside itself, so the board never lands as untracked state in a consuming repo.
+
+> **All processes must agree on one board.** The plugin MCP, a terminal-configured MCP, the
+> worker, and Bob each resolve `tasks.db` independently; if they diverge, `await_task` polls a
+> board nothing writes to and never settles. The server logs the resolved board path on startup —
+> confirm every process prints the same one. The **worker** is launched outside Claude Code (so it
+> has no `CLAUDE_PROJECT_DIR`); point it with an explicit `BOB_TASKS_DB` matching the project board.
 
 ## Connecting Bob
 
@@ -115,6 +123,37 @@ leaves IBM-i/RPG work for Bob, so the two never double-work a task.
 Prefer one queue across **every** repo instead? Set `BOB_TASKS_PORTABLE=1` on both the plugin
 and Bob to share a fixed `~/.bob-tasks/tasks.db`. Either way the server logs the resolved
 board path on startup, so you can confirm both tools agree.
+
+### From a plain terminal (no plugin)
+
+A plain `claude` terminal session gets the **tools** from a project/user `.mcp.json` but not the
+plugin's **skills** (`/bob-work`, `bob-review`, …) that script the dispatch loop — so without
+guidance it may fall back to polling the board by hand instead of blocking. Two things make it work
+like the plugin:
+
+1. **Point it at the project board.** In a hand-written `.mcp.json`, `${CLAUDE_PROJECT_DIR}` is only
+   substituted when you give it a default — `${CLAUDE_PROJECT_DIR:-.}` (bare `${CLAUDE_PROJECT_DIR}`
+   is a plugin-only direct substitution). The server also reads `CLAUDE_PROJECT_DIR` from its own
+   environment, so even an unset `BOB_TASKS_DB` resolves the same project board the plugin uses:
+
+   ```jsonc
+   // <project>/.mcp.json
+   {
+     "mcpServers": {
+       "bob-tasks": {
+         "type": "stdio",
+         "command": "node",
+         "args": ["/absolute/path/to/bob-control/dist/server.js"],
+         "env": { "BOB_TASKS_DB": "${CLAUDE_PROJECT_DIR:-.}/data/tasks.db" }
+       }
+     }
+   }
+   ```
+
+2. **Drive it with `await_task`, don't poll.** After `create_task`, call `await_task` to block until
+   the task settles; if it returns `needs_input`, `answer_task_question` then `await_task` again.
+   Don't loop on `list_tasks`/`board_status` to watch a task — `await_task` blocks server-side and
+   needs a worker draining the board (`npm run worker` against the **same** `BOB_TASKS_DB`).
 
 ## Tools
 
