@@ -42,6 +42,34 @@ test("read-only modes scale the estimate down vs a write mode", () => {
   assert.ok(ask.tokens < code.tokens, "ask mode estimated smaller than code mode");
 });
 
+test("read-only review: a fenced diff is INPUT, not scope — not false-flagged too-big", () => {
+  // The /bob-review skill pastes the whole diff into the description; those filenames are the code
+  // being reviewed (input), not files to edit, so a review must not be flagged oversized for them.
+  const description = [
+    "Review this diff for correctness, then simplification.",
+    "```diff",
+    "edit src/a.ts, src/b.ts, src/c.ts, src/d.ts, src/e.ts, src/f.ts and wire them with tests",
+    "```",
+  ].join("\n");
+  const review = estimateTaskScope({ title: "Code review: my change", description, mode: "review" });
+  assert.equal(review.fileCount, 0, "filenames inside the fence are excluded for a read-only mode");
+  assert.equal(review.oversized, false, "the embedded diff no longer false-flags too-big");
+
+  // Contrast: the SAME content in an implementation mode keeps counting the code (it's the work).
+  const code = estimateTaskScope({ title: "Apply my change", description, mode: "code" });
+  assert.ok(code.fileCount >= 6, "implementation mode still counts the pasted files");
+  assert.equal(code.oversized, true, "and is still right-sized as oversized");
+});
+
+test("read-only review still counts files named OUTSIDE a fence (not blinded)", () => {
+  const s = estimateTaskScope({
+    title: "Review",
+    description: "Focus on src/db.ts and src/server.ts.\n```diff\nedit src/inside.ts\n```",
+    mode: "review",
+  });
+  assert.equal(s.fileCount, 2, "db.ts + server.ts (prose) count; inside.ts (fenced) does not");
+});
+
 test("respects a custom budget", () => {
   const s = estimateTaskScope({ title: "Edit a.ts" }, 1_000);
   assert.equal(s.budget, 1_000);

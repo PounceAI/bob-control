@@ -4,6 +4,7 @@
 // output-token scope from the description's size, the number of files it names, and the mode, then
 // flags an oversized task so it can be split — or routed to orchestrator, which decomposes it into
 // subtasks. Deliberately crude (no LLM): a hint, backed at runtime by the token budget backstop.
+import { isReadOnlyMode } from "./modes.js";
 
 /** Output tokens one dispatch can comfortably produce before it's better split. Tunable. */
 export const SINGLE_DISPATCH_BUDGET = 40_000;
@@ -30,18 +31,22 @@ export interface ScopeEstimate {
 const FILE_RE =
   /\b[\w./\\-]*\w\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|rb|c|cc|cpp|h|hpp|cs|md|json|ya?ml|toml|sql|sh|ps1|txt|html?|css|scss|vue|svelte|php|swift|kt|kts)\b/gi;
 
+// Fenced code blocks (```…```). For a read-only task an embedded diff/sample is material to READ,
+// not work to produce, so it's stripped before sizing. Module-level (like FILE_RE) — .replace()
+// resets lastIndex per call, so the shared global is stateless across calls.
+const FENCED_RE = /```[\s\S]*?```/g;
+
 function countFiles(text: string): number {
   const matches = text.match(FILE_RE);
   if (!matches) return 0;
   return new Set(matches.map((m) => m.toLowerCase())).size;
 }
 
-// Read-only modes produce less output (prose/findings, no code), so scale their estimate down.
-function modeMultiplier(mode?: string | null): number {
-  if (!mode) return 1;
-  const m = mode.trim().toLowerCase();
-  if (m === "ask" || m === "plan" || m === "review") return 0.5;
-  return 1;
+// Read-only (ask/plan/review): derive it from the mode's permission profile (the canonical
+// writes-off signal in modes.ts) rather than a parallel hardcoded list that could drift. Such modes
+// read code and emit prose/findings, so their output doesn't scale with how much code is pasted in.
+function isReadOnlyScopeMode(mode?: string | null): boolean {
+  return mode != null && isReadOnlyMode(mode.trim().toLowerCase());
 }
 
 /**
@@ -52,8 +57,14 @@ function modeMultiplier(mode?: string | null): number {
  *   spec complexity each ~200 chars of description ≈ another chunk of required work.
  */
 export function estimateTaskScope(input: ScopeInput, budget: number = SINGLE_DISPATCH_BUDGET): ScopeEstimate {
-  const text = `${input.title}\n${input.description ?? ""}`;
-  const descChars = (input.description ?? "").length;
+  const readOnly = isReadOnlyScopeMode(input.mode);
+  // For a read-only mode, drop fenced code blocks first: an embedded diff/sample is content to read,
+  // not files to write, so it shouldn't read as scope. (Implementation modes keep it — pasted code
+  // there often IS the work to produce.) Read-only output is smaller too, hence the 0.5 below.
+  const rawDescription = input.description ?? "";
+  const description = readOnly ? rawDescription.replace(FENCED_RE, " ") : rawDescription;
+  const text = `${input.title}\n${description}`;
+  const descChars = description.length;
   const fileCount = countFiles(text);
 
   const BASE = 3_000;
@@ -61,6 +72,6 @@ export function estimateTaskScope(input: ScopeInput, budget: number = SINGLE_DIS
   const PER_200_CHARS = 2_000;
 
   const raw = BASE + fileCount * PER_FILE + Math.ceil(descChars / 200) * PER_200_CHARS;
-  const tokens = Math.round(raw * modeMultiplier(input.mode));
+  const tokens = Math.round(raw * (readOnly ? 0.5 : 1));
   return { tokens, oversized: tokens > budget, budget, fileCount };
 }

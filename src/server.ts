@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import * as repo from "./db.js";
-import { TASK_STATUSES, TASK_PRIORITIES, ARTIFACT_KINDS } from "./types.js";
+import { TASK_STATUSES, TASK_PRIORITIES, ARTIFACT_KINDS, isFinished } from "./types.js";
 import type { TaskStatus } from "./types.js";
 import { resolveMode, isReadOnlyMode } from "./modes.js";
 import { revertTaskToCheckpoint, deleteTaskAndCheckpoint } from "./checkpoint.js";
@@ -227,6 +227,11 @@ server.registerTool(
       );
     }
     const task = repo.updateStatus(id, status);
+    // Settling a task (cancelled here; done/analysis_done go through completeTask) closes any
+    // still-open board question, so a late answer can't resurrect it into a redundant re-dispatch.
+    if (isFinished(status)) {
+      repo.closeOpenQuestions(id, `task moved to '${status}'`);
+    }
     // Manual done is allowed (backward-compatible), but flag it when there's no
     // recorded execution evidence so the board distinguishes verified from asserted.
     if (status === "done" && !repo.hasEvidence(id)) {
@@ -414,7 +419,10 @@ server.registerTool(
       "{status:'needs_input', question} when Bob is waiting on a board question (answer it with " +
       "answer_task_question, then call await_task again), or {status:'waiting', current} after the " +
       "poll window (call await_task again). Polls the shared board; the result is written by Bob's " +
-      "worker. Use after dispatching a task you want to act on as soon as it's done.",
+      "worker. Use after dispatching a task you want to act on as soon as it's done. PREFER this over " +
+      "looping on list_tasks/board_status/get_task to watch a task — it blocks server-side until the " +
+      "settling write lands and hands back needs_input questions to answer, so you should NOT poll the " +
+      "board by hand. Requires a worker draining the board (check board_status.worker_draining first).",
     inputSchema: {
       task_id: z.number().int(),
       wait_ms: z

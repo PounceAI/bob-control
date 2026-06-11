@@ -18,6 +18,8 @@ import {
   getQuestion,
   questionState,
   expireOverdueQuestions,
+  closeOpenQuestions,
+  completeTask,
 } from "./db.js";
 import { buildReport } from "./report.js";
 
@@ -118,6 +120,48 @@ describe("board question round-trip (needs_input)", () => {
     assert.ok(answerQuestion(id, q.question_id, "first").ok);
     assert.ok(answerQuestion(id, q.question_id, "second").ok);
     assert.equal(getQuestion(q.question_id)?.answer, "first");
+  });
+
+  it("completing a task CLOSES its open question (settle closes pending_question)", () => {
+    const id = workedTask("complete-closes-question");
+    const q = askQuestion(id, "which approach?")!;
+    assert.equal(getOpenQuestion(id)?.question_id, q.question_id);
+    completeTask(id, { result: "analysis text", ranReadOnly: true }); // run finished
+    assert.equal(getTask(id)?.status, "analysis_done");
+    assert.equal(getOpenQuestion(id), null); // no longer open
+    assert.equal(getQuestion(q.question_id)?.status, "timed_out"); // closed (superseded)
+  });
+
+  it("bug #43: a late answer to a SETTLED task is alreadyAnswered and does NOT re-dispatch", () => {
+    // stall → run completes out-of-band (answer-via-A) → answer the SAME qid via the board
+    // (answer-via-B): must report alreadyAnswered and leave the task settled (no second run).
+    const id = workedTask("no-double-run");
+    const q = askQuestion(id, "proceed?")!;
+    completeTask(id, { result: "review output (the one legitimate run)", ranReadOnly: true });
+    assert.equal(getTask(id)?.status, "analysis_done");
+
+    const res = answerQuestion(id, q.question_id, "proceed (late, via foreman/MCP)");
+    assert.deepEqual(res, { ok: true, alreadyAnswered: true }); // <-- not {alreadyAnswered:false}
+    assert.equal(getTask(id)?.status, "analysis_done"); // NOT resumed to in_progress → no re-dispatch
+  });
+
+  it("a late answer to a CANCELLED task is a no-op (guard fires even if the question stayed open)", () => {
+    const id = workedTask("answer-after-cancel");
+    const q = askQuestion(id, "still want this?")!;
+    updateStatus(id, "cancelled"); // low-level cancel: leaves the question open
+    assert.equal(getOpenQuestion(id)?.question_id, q.question_id); // still open here
+    const res = answerQuestion(id, q.question_id, "yes");
+    assert.deepEqual(res, { ok: true, alreadyAnswered: true });
+    assert.equal(getTask(id)?.status, "cancelled"); // not resurrected
+    assert.equal(getQuestion(q.question_id)?.status, "timed_out"); // guard closed it
+  });
+
+  it("closeOpenQuestions supersedes only OPEN questions and is idempotent", () => {
+    const id = workedTask("close-open");
+    const q = askQuestion(id, "open one?")!;
+    assert.equal(closeOpenQuestions(id, "test"), 1); // closed the open one
+    assert.equal(getQuestion(q.question_id)?.status, "timed_out");
+    assert.equal(closeOpenQuestions(id, "again"), 0); // nothing open → no-op
   });
 
   it("asking again SUPERSEDES the prior open question (one open per task)", () => {

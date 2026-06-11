@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   isCompleted,
   isSettled,
+  isFinished,
   TASK_STATUSES,
   TASK_PRIORITIES,
   COMPLETED_STATUSES,
@@ -31,6 +32,19 @@ test("isSettled: await_task resolves on settled states, keeps waiting on transie
   }
   // Every completed status is also settled (settled is the superset).
   for (const s of COMPLETED_STATUSES) assert.equal(isSettled(s), true);
+});
+
+test("isFinished: done/analysis_done/cancelled won't run again; blocked & needs_input still can", () => {
+  // Terminally finished — a late question answer must NOT resurrect these into a re-dispatch.
+  for (const s of ["done", "analysis_done", "cancelled"] as const) {
+    assert.equal(isFinished(s), true, `${s} is finished`);
+  }
+  // Settled-but-resumable / transient — NOT finished.
+  for (const s of ["blocked", "needs_input", "staged", "pending", "in_progress"] as const) {
+    assert.equal(isFinished(s), false, `${s} is not finished`);
+  }
+  // Finished is a strict subset of settled (excludes blocked + needs_input).
+  for (const s of TASK_STATUSES) if (isFinished(s)) assert.equal(isSettled(s), true, `${s} finished ⇒ settled`);
 });
 
 test("constant sets pin the invariants the gates and dependency logic depend on", () => {
