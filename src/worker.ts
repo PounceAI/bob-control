@@ -18,7 +18,7 @@ import {
 import { createCommandGate } from "./command-gate.js";
 import { createPermissionGate, type PermissionVerdict } from "./permission-gate.js";
 import { isCommandAsk } from "./command-policy.js";
-import { createFollowupGate } from "./followup-gate.js";
+import { createFollowupGate, buildIdleAskQuestion, parseFollowup, followupDisposition } from "./followup-gate.js";
 import { handleStdinAnswer } from "./worker-answer.js";
 import { BobClient, resolvePipe, type DispatchResult } from "./bob-ipc.js";
 import { formatReviewFindings, parseReviewFindings } from "./review-findings.js";
@@ -377,9 +377,23 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   // Use the shared isCommandAsk so the watchdog agrees with the gates on BOTH command spellings
   // (command / command_security_warning) — one source of truth instead of re-listing them by hand.
   const commandAnswerable = classifierOn && !classifierBlocked;
-  const followupAnswerable = opts.answerFollowups && !classifierBlocked;
-  const isAnswerableAsk = (ask: string): boolean =>
-    (isCommandAsk(ask) && commandAnswerable) || (ask === "followup" && followupAnswerable);
+  const followupPolicy = {
+    enabled: opts.answerFollowups,
+    blocked: classifierBlocked,
+    reviewPlans: opts.reviewPlans,
+    escalateAll: opts.escalateAll,
+  };
+  // A followup the gate auto-answers keeps the full idle window. An escalated followup is "answerable"
+  // only with a live human relay (--emit-json), who can answer over stdin this dispatch; headless has
+  // none, so escalation → short grace → the idle-recovery surfaces it to the board fast.
+  const isAnswerableAsk = (ask: string, text?: string): boolean => {
+    if (isCommandAsk(ask) && commandAnswerable) return true;
+    if (ask === "followup") {
+      const disp = followupDisposition(followupPolicy, parseFollowup(text ?? "")?.question ?? text ?? "");
+      return disp === "answer" || (disp === "escalate" && opts.emitJson);
+    }
+    return false;
+  };
 
   // Per-task token ceiling: the task's estimate (+ headroom, floored) when it carries one, else the
   // flat cap. 0 disables the token check (--no-budget). A turn cap (--max-turns) is an extra backstop.
@@ -462,9 +476,11 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
     log: (m) => console.log(m),
     isActive: () => dispatchActive,
     escalate: (question, options) => {
+      // The idle-recovery below owns the single board question + notify (an escalated followup trips
+      // fast headless) — no notify here, else it double-toasts. The emit stays for the extension's
+      // live stdin relay (--emit-json).
       console.log(`  ⤴ followup needs a human on #${task.id}: ${question.replace(/\s+/g, " ").slice(0, 80)}`);
       emit(opts, "question", { id: task.id, title: task.title, question, options });
-      if (opts.notify) notify(`Bob needs an answer on #${task.id}`, question);
     },
   });
 
@@ -472,6 +488,10 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   activeFollowupGates.set(task.id, followupGateObj);
 
   let lastSay = "";
+  // Last pending ask (any kind) seen this dispatch, from ANY frame. bob-ipc records only FINAL asks
+  // into res.pendingAsk (partials are ignored so a stream can't reset the watchdog grace), so an ask
+  // that wedges before a final frame would otherwise be lost; this lets the idle-recovery surface it.
+  let seenAsk: { kind: string; text: string } | undefined;
 
   // Dispatch helper used by the initial run and each verify-and-continue. Marks the
   // dispatch active for its duration so the command/followup gates only press while a
@@ -494,6 +514,15 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
         tokenCeiling,
         turnCap,
         onEvent: (name, { say, ask, text, partial, ts }) => {
+          // Capture the ask (see seenAsk). Clear only on a real non-ask message; a message-less
+          // lifecycle event (say/ask/text all absent) isn't progress and mustn't drop it.
+          if (ask) {
+            const t = (text ?? "").trim();
+            if (t) seenAsk = { kind: ask, text: t };
+          } else if (say !== undefined || (text ?? "").trim() !== "") {
+            seenAsk = undefined;
+          }
+
           if (say && say !== lastSay) {
             lastSay = say;
             const t = (text ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
@@ -659,22 +688,21 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   }
 
   // Idle / blocked-on-ask trip with no completion: the dispatch wedged on a prompt the headless
-  // worker can't answer (e.g. a command-permission ask). bob-ipc already cancelled the Bob task on the
-  // watchdog trip; here we preserve any partial work to a branch and surface the EXACT pending ask as a
-  // FIRST-CLASS board question (needs_input) so it reaches the orchestrator instead of vanishing into
-  // the log. res.pendingAsk is undefined for a pure idle (it's cleared the moment Bob makes progress),
-  // so a plain no-progress stall falls through to the normal terminal handling (park blocked) below.
-  if (res.status === "idle" && !res.result.trim() && res.pendingAsk) {
+  // worker can't answer (e.g. a command-permission ask, or a followup question no gate handled).
+  // bob-ipc already cancelled the Bob task on the watchdog trip; here we preserve any partial work to
+  // a branch and surface the pending ask as a FIRST-CLASS board question (needs_input) so it reaches
+  // the orchestrator instead of vanishing into the log. We fire on res.pendingAsk (a FINAL ask that
+  // survived to trip time) OR seenAsk (any ask captured from any frame — bob-ipc records only final
+  // asks, so an ask that wedged before a final frame would otherwise be lost). A pure no-progress
+  // stall (neither set) falls through to the normal terminal handling (park blocked) below.
+  const pendingAskKind = res.pendingAsk ?? seenAsk?.kind;
+  if (res.status === "idle" && !res.result.trim() && pendingAskKind) {
     const branch = await checkpointBeforeDeath(opts, task.id);
-    const askText = (res.pendingAskText ?? "").replace(/\s+/g, " ").trim();
-    const branchNote = branch ? ` Partial work saved to branch ${branch}.` : "";
-    const question =
-      `Bob stalled on a '${res.pendingAsk}' prompt the headless worker can't answer` +
-      (askText ? `: ${askText.slice(0, 300)}` : "") +
-      `.${branchNote} Answer to guide it (it will re-run), or clear the prompt and re-queue the task.`;
+    const rawAskText = (res.pendingAskText ?? "").trim() || seenAsk?.text || "";
+    const question = buildIdleAskQuestion({ askKind: pendingAskKind, rawAskText, branch });
     const q = repo.askQuestion(task.id, question);
     if (q) {
-      console.log(`  ❓ #${task.id} idle on '${res.pendingAsk}' → needs_input (question ${q.question_id})`);
+      console.log(`  ❓ #${task.id} idle on '${pendingAskKind}' → needs_input (question ${q.question_id})`);
       emit(opts, "question", { id: task.id, title: task.title, question });
       if (opts.notify) notify(`Bob needs input on #${task.id}`, question);
     } else {

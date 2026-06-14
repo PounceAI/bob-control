@@ -54,9 +54,10 @@ export interface DispatchOptions {
   /** Shorter window once an UNANSWERABLE blocking ask is seen, so a permission-prompt wedge ends
    *  fast. <= 0 falls back to idleMs. Only meaningful with idleMs > 0. */
   blockedAskGraceMs?: number;
-  /** Predicate: will a gate answer this ask type? An ask that returns false is "unanswerable" and
-   *  trips the watchdog's short grace. Omitted → every ask is treated as unanswerable. */
-  isAnswerableAsk?: (ask: string) => boolean;
+  /** Predicate: will a gate answer this ask? An ask that returns false is "unanswerable" and trips
+   *  the watchdog's short grace. The ask's payload text is passed so a followup can be classified
+   *  (auto-answer vs escalate). Omitted → every ask is treated as unanswerable. */
+  isAnswerableAsk?: (ask: string, text?: string) => boolean;
   /** Hard output-token ceiling; the dispatch ends as 'budget' once it's exceeded. <= 0 disables. */
   tokenCeiling?: number;
   /** Hard turn (api-request) cap; the dispatch ends as 'budget' once exceeded. <= 0 disables. */
@@ -124,7 +125,7 @@ interface ActiveDispatch {
   budget: BudgetTracker;
   tokenCeiling?: number;
   turnCap?: number;
-  isAnswerableAsk?: (ask: string) => boolean;
+  isAnswerableAsk?: (ask: string, text?: string) => boolean;
   /** The blocking ask currently awaiting a response (cleared when progress resumes). */
   pendingAsk?: string;
   pendingAskText?: string;
@@ -345,7 +346,7 @@ export class BobClient {
               if (!partial) {
                 this.active.pendingAsk = ask;
                 this.active.pendingAskText = text;
-                const answerable = this.active.isAnswerableAsk ? this.active.isAnswerableAsk(ask) : false;
+                const answerable = this.active.isAnswerableAsk ? this.active.isAnswerableAsk(ask, text) : false;
                 this.active.watchdog?.ask(ask, text, answerable);
               }
             } else {

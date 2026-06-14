@@ -77,6 +77,25 @@ export function parseFollowup(text: string): ParsedFollowup | null {
 }
 
 /**
+ * The board (needs_input) question for a dispatch that idled on an ask the headless worker couldn't
+ * answer. A followup ask is JSON ({question, suggest}) — surface the clean question + options, not the
+ * raw payload; other asks (commands) are plain text.
+ */
+export function buildIdleAskQuestion(input: { askKind: string; rawAskText: string; branch?: string }): string {
+  const { askKind, rawAskText, branch } = input;
+  const parsed = askKind === "followup" ? parseFollowup(rawAskText) : null;
+  const detail = parsed
+    ? parsed.question + (parsed.options.length ? ` [options: ${parsed.options.join(" | ")}]` : "")
+    : rawAskText.replace(/\s+/g, " ").trim();
+  const branchNote = branch ? ` Partial work saved to branch ${branch}.` : "";
+  return (
+    `Bob stalled on a '${askKind}' prompt the headless worker can't answer` +
+    (detail ? `: ${detail.slice(0, 300)}` : "") +
+    `.${branchNote} Answer to guide it (it will re-run), or clear the prompt and re-queue the task.`
+  );
+}
+
+/**
  * Classify a followup question as either a plan/design-approval question or a
  * mechanical clarification. Conservative: when unsure, treat as plan (safer to escalate).
  *
@@ -140,6 +159,23 @@ export function classifyQuestion(question: string): "plan" | "mechanical" {
   return "plan";
 }
 
+/**
+ * Escalate-vs-answer decision for a followup, as a PURE function so the worker's watchdog can predict
+ * what the gate will do (and the two never drift). Branch order matches onFollowupAsk: disabled →
+ * "off"; no key → escalate; --review-plans → plan escalates, mechanical answers; --escalate-all →
+ * escalate; else answer.
+ */
+export function followupDisposition(
+  deps: { enabled: boolean; blocked: boolean; reviewPlans: boolean; escalateAll: boolean },
+  question: string,
+): "answer" | "escalate" | "off" {
+  if (!deps.enabled) return "off";
+  if (deps.blocked) return "escalate";
+  if (deps.reviewPlans) return classifyQuestion(question) === "plan" ? "escalate" : "answer";
+  if (deps.escalateAll) return "escalate";
+  return "answer";
+}
+
 export function createFollowupGate(deps: FollowupGateDeps): {
   gate: (ev: FollowupEvent) => Promise<void>;
   answerHuman: (answer: string) => void;
@@ -192,35 +228,33 @@ export function createFollowupGate(deps: FollowupGateDeps): {
       deps.addNote(deps.task.id, `Followup escalated (${reason}): ${short}`, "answerer");
     };
 
-    if (deps.blocked) {
-      if (!warnedNoKey) {
-        deps.log("  ⚠ answerer=api but ANTHROPIC_API_KEY unset — escalating questions to a human.");
-        warnedNoKey = true;
-      }
-      doEscalate("no API key");
-      return Promise.resolve();
-    }
-
-    // reviewPlans takes precedence over escalateAll when both are on
-    if (deps.reviewPlans) {
-      const classification = classifyQuestion(parsed.question);
-      if (classification === "plan") {
+    // deps.enabled is already true here (early return at the top), so this is "answer" or "escalate".
+    const disposition = followupDisposition(
+      { enabled: deps.enabled, blocked: deps.blocked, reviewPlans: deps.reviewPlans, escalateAll: deps.escalateAll },
+      parsed.question,
+    );
+    if (disposition === "escalate") {
+      if (deps.blocked) {
+        if (!warnedNoKey) {
+          deps.log("  ⚠ answerer=api but ANTHROPIC_API_KEY unset — escalating questions to a human.");
+          warnedNoKey = true;
+        }
+        doEscalate("no API key");
+      } else if (deps.reviewPlans) {
         deps.log(`  ⤴ escalated followup to a human (plan/design question, --review-plans)`);
         doEscalate("plan/design, --review-plans");
-        return Promise.resolve();
+      } else {
+        deps.log(`  ⤴ escalated followup to a human (--escalate-all)`);
+        doEscalate("--escalate-all");
       }
-      // mechanical questions fall through to auto-answer below
-      deps.log(`  ⟲ answering mechanical followup (--review-plans): ${short}`);
-    } else if (deps.escalateAll) {
-      deps.log(`  ⤴ escalated followup to a human (--escalate-all)`);
-      doEscalate("--escalate-all");
       return Promise.resolve();
     }
 
-    // Only log if we didn't already log for reviewPlans mechanical case
-    if (!deps.reviewPlans) {
-      deps.log(`  ⟲ answering followup (${deps.backend}): ${short}`);
-    }
+    deps.log(
+      deps.reviewPlans
+        ? `  ⟲ answering mechanical followup (--review-plans): ${short}`
+        : `  ⟲ answering followup (${deps.backend}): ${short}`,
+    );
     return answer(
       parsed.question,
       parsed.options,
