@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createFollowupGate, parseFollowup, type FollowupGateDeps, type FollowupEvent } from "./followup-gate.js";
+import {
+  createFollowupGate,
+  parseFollowup,
+  buildIdleAskQuestion,
+  followupDisposition,
+  type FollowupGateDeps,
+  type FollowupEvent,
+} from "./followup-gate.js";
 import type { FollowupAnswer } from "./answer.js";
 
 function harness(
@@ -60,6 +67,70 @@ test("parseFollowup falls back to plain text and returns null when empty", () =>
   assert.deepEqual(parseFollowup("just a question?"), { question: "just a question?", options: [] });
   assert.equal(parseFollowup("   "), null);
   assert.equal(parseFollowup(JSON.stringify({ question: "" })), null);
+});
+
+// --- buildIdleAskQuestion (idle-recovery board question) ---
+
+test("buildIdleAskQuestion parses a followup JSON into a clean question + options", () => {
+  const q = buildIdleAskQuestion({
+    askKind: "followup",
+    rawAskText: JSON.stringify({
+      question: "Are these the complete implementations, or are there more files?",
+      suggest: [{ answer: "Complete" }, { answer: "More files" }],
+    }),
+  });
+  assert.match(q, /Bob stalled on a 'followup' prompt/);
+  assert.match(q, /Are these the complete implementations/);
+  assert.match(q, /\[options: Complete \| More files\]/);
+  assert.match(q, /re-run/);
+  // The raw JSON braces must not leak into the surfaced question.
+  assert.doesNotMatch(q, /"suggest"/);
+});
+
+test("buildIdleAskQuestion surfaces a non-followup ask (command) as plain text", () => {
+  const q = buildIdleAskQuestion({ askKind: "command", rawAskText: "rm -rf build", branch: "bob/task-46" });
+  assert.match(q, /Bob stalled on a 'command' prompt/);
+  assert.match(q, /rm -rf build/);
+  assert.match(q, /Partial work saved to branch bob\/task-46\./);
+});
+
+test("buildIdleAskQuestion handles a plain-text followup and omits an empty branch note", () => {
+  const q = buildIdleAskQuestion({ askKind: "followup", rawAskText: "just a question?" });
+  assert.match(q, /just a question\?/);
+  assert.doesNotMatch(q, /Partial work saved/);
+});
+
+// --- followupDisposition (shared escalate-vs-answer policy) ---
+
+const DISP = { enabled: true, blocked: false, reviewPlans: false, escalateAll: false };
+
+test("followupDisposition: disabled gate is 'off'", () => {
+  assert.equal(followupDisposition({ ...DISP, enabled: false }, "anything?"), "off");
+});
+
+test("followupDisposition: no API key (blocked) always escalates, even a mechanical question", () => {
+  assert.equal(followupDisposition({ ...DISP, blocked: true }, "which file path should I use?"), "escalate");
+});
+
+test("followupDisposition: default (no flags) auto-answers", () => {
+  assert.equal(followupDisposition(DISP, "Should I refactor the auth module?"), "answer");
+});
+
+test("followupDisposition: --review-plans escalates plan questions, answers mechanical ones", () => {
+  const rp = { ...DISP, reviewPlans: true };
+  assert.equal(followupDisposition(rp, "Should I proceed with deleting the table?"), "escalate");
+  assert.equal(followupDisposition(rp, "which file path should I use?"), "answer");
+});
+
+test("followupDisposition: --escalate-all escalates everything", () => {
+  assert.equal(followupDisposition({ ...DISP, escalateAll: true }, "which file path should I use?"), "escalate");
+});
+
+test("followupDisposition: --review-plans takes precedence over --escalate-all for mechanical questions", () => {
+  assert.equal(
+    followupDisposition({ ...DISP, reviewPlans: true, escalateAll: true }, "which file path should I use?"),
+    "answer",
+  );
 });
 
 // --- gate behavior ---

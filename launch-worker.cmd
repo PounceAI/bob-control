@@ -13,5 +13,9 @@ REM     (schtasks/Task Scheduler needs elevation; remove with  schtasks /delete 
 REM
 REM Requires IBM Bob running with IPC enabled (see launch-bob-ipc.cmd).
 REM Extra worker flags pass through, e.g.:  launch-worker.cmd --no-notify --max-risk safe
+REM
+REM Defaults below: --answer-followups + --review-plans so the standing worker auto-answers mechanical
+REM clarifications (file paths, flag names) and escalates plan/design questions to the board instead of
+REM waiting them out.
 cd /d "%~dp0"
-node "dist\worker.js" %*
+node "dist\worker.js" --answer-followups --review-plans %*
