@@ -172,7 +172,9 @@ test("every dispatched profile sends the autoApprovalEnabled master switch", () 
     // orchestration steps (the recurring "wedge after updateTodoList").
     assert.equal(aa.alwaysAllowUpdateTodoList, true, `${slug} must auto-approve todo updates`);
     assert.equal(aa.alwaysAllowSubtasks, true, `${slug} must auto-approve subtasks`);
-    assert.equal(aa.alwaysAllowModeSwitch, true, `${slug} must auto-approve mode switch`);
+    // Mode switch is deliberately NOT blanket-approved — it surfaces as an ask the risk-bounded
+    // mode-switch gate (mode-switch-gate.ts) resolves, so a safe task can't escalate past --max-risk.
+    assert.equal(aa.alwaysAllowModeSwitch, false, `${slug} must NOT blanket-approve mode switch (gated by risk)`);
   }
 });
 
