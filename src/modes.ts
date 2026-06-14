@@ -254,15 +254,19 @@ export function classifierReachable(maxRisk: Risk): boolean {
 
 // Workflow auto-approve toggles forced on for every dispatch. These gate Bob's own
 // orchestration steps, not file/command actions: without them Bob stops at an Approve
-// button every time it updates its todo list, spawns a subtask, or switches mode —
-// the recurring "stalled after updateTodoList" wedge. They're benign (no file or shell
-// side effects), so they're always on rather than per-mode. Resubmit auto-retries a
-// transient API error instead of stalling at a "retry?" prompt.
+// button every time it updates its todo list or spawns a subtask — the recurring
+// "stalled after updateTodoList" wedge. They're benign (no file or shell side effects),
+// so they're always on rather than per-mode. Resubmit auto-retries a transient API error
+// instead of stalling at a "retry?" prompt.
+//
+// alwaysAllowModeSwitch is deliberately OFF: a blanket grant would let a read-only/safe task escalate
+// into a write+execute mode past the worker's --max-risk gate. Instead the switch surfaces as an ask
+// that the mode-switch gate (mode-switch-gate.ts) resolves by risk — no wedge, no capability hole.
 const WORKFLOW_AUTO_APPROVE = {
   alwaysApproveResubmit: true,
   alwaysAllowUpdateTodoList: true,
   alwaysAllowSubtasks: true,
-  alwaysAllowModeSwitch: true,
+  alwaysAllowModeSwitch: false,
 } as const;
 
 /**

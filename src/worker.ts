@@ -17,6 +17,7 @@ import {
 } from "./modes.js";
 import { createCommandGate } from "./command-gate.js";
 import { createPermissionGate, type PermissionVerdict } from "./permission-gate.js";
+import { createModeSwitchGate, isModeSwitchAsk } from "./mode-switch-gate.js";
 import { isCommandAsk } from "./command-policy.js";
 import { createFollowupGate, buildIdleAskQuestion, parseFollowup, followupDisposition } from "./followup-gate.js";
 import { handleStdinAnswer } from "./worker-answer.js";
@@ -344,9 +345,13 @@ function emit(opts: Opts, type: string, data: Record<string, unknown> = {}): voi
 /** Global registry of active followup gates, keyed by task ID. */
 const activeFollowupGates = new Map<number, ReturnType<typeof createFollowupGate>>();
 
-async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> {
+async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: boolean | null): Promise<void> {
   const { mode, source } = resolveMode(task);
   const profile = profileFor(mode);
+  // Our approve/reject presses (command + mode-switch gates) only land with the Bob button patch. A
+  // known-absent patch (false) makes them no-ops, so an "answerable" ask actually wedges — treat it as
+  // unanswerable to trip the short grace instead of the full idle window. Unknown (null) assumes present.
+  const pressesLand = patchPresent !== false;
   console.log(`\n▶ #${task.id} "${task.title}" → mode {${mode}} (${source}, risk:${profile.risk})`);
   emit(opts, "taskStart", { id: task.id, title: task.title, mode, risk: profile.risk });
 
@@ -376,7 +381,12 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   // headless worker, so the idle watchdog trips its short grace instead of waiting out the wall clock.
   // Use the shared isCommandAsk so the watchdog agrees with the gates on BOTH command spellings
   // (command / command_security_warning) — one source of truth instead of re-listing them by hand.
-  const commandAnswerable = classifierOn && !classifierBlocked;
+  const commandAnswerable = classifierOn && !classifierBlocked && pressesLand;
+  // Whether the worker can authorize commands a mode-switch target would run: the permission gate is
+  // active (gray-zone policy) or a sandbox auto-runs everything. False for a no-command dispatch
+  // (`ask`), where the mode-switch gate rejects a switch into a command mode rather than strand Bob.
+  const dispatchGatesCommands =
+    opts.allowAllCommands || (opts.permissionGate && policyHasGrayZone(profile.commandPolicy));
   const followupPolicy = {
     enabled: opts.answerFollowups,
     blocked: classifierBlocked,
@@ -388,6 +398,10 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
   // none, so escalation → short grace → the idle-recovery surfaces it to the board fast.
   const isAnswerableAsk = (ask: string, text?: string): boolean => {
     if (isCommandAsk(ask) && commandAnswerable) return true;
+    // The mode-switch gate (below) presses approve/reject on a switchMode ask — both outcomes resolve
+    // it — so wait for it (full idle window). When the press can't land (patch absent) it's truly
+    // unanswerable, so fall through to the short grace.
+    if (isModeSwitchAsk(ask, text) && pressesLand) return true;
     if (ask === "followup") {
       const disp = followupDisposition(followupPolicy, parseFollowup(text ?? "")?.question ?? text ?? "");
       return disp === "answer" || (disp === "escalate" && opts.emitJson);
@@ -455,6 +469,19 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
         if (opts.notify) notify(`Bob needs command approval on #${task.id}`, question);
       }
     },
+  });
+
+  // Mode-switch gate (mode-switch-gate.ts): resolves a mid-task switch_mode by the dispatch's risk gate
+  // + command-gating reach. On for every dispatch, since a switch can occur from any mode.
+  const modeSwitchGate = createModeSwitchGate({
+    enabled: true,
+    maxRisk: opts.maxRisk,
+    canGateCommands: dispatchGatesCommands,
+    task: { id: task.id, title: task.title },
+    client: { approve: () => client.approve(), reject: () => client.reject() },
+    addNote: repo.addNote,
+    log: (m) => console.log(m),
+    isActive: () => dispatchActive,
   });
 
   // Question handling: when Bob asks a followup mid-task, answer it with Claude
@@ -544,6 +571,12 @@ async function runOne(client: BobClient, task: Task, opts: Opts): Promise<void> 
             commandGate({ ask, text, partial, ts }).catch((e) =>
               console.error(`  ⚠ command gate error on #${task.id}: ${(e as Error).message}`),
             );
+          }
+          // Mode-switch gate: synchronous (no await); a throw here must not skip the followup gate.
+          try {
+            modeSwitchGate({ ask, text, partial, ts });
+          } catch (e) {
+            console.error(`  ⚠ mode-switch gate error on #${task.id}: ${(e as Error).message}`);
           }
           followupGateObj
             .gate({ ask, text, partial, ts })
@@ -931,6 +964,9 @@ async function main(): Promise<void> {
   console.log(
     `bob-worker: risk gate = --max-risk ${opts.maxRisk}; defer=${opts.defer ? `on(${opts.deferIdleMs}ms)` : "off"}.`,
   );
+  // Probe the button patch once and thread it into runOne (both the always-on mode-switch gate and the
+  // command gate press over IPC, which only lands with the patch). null = couldn't probe; assume present.
+  const patchPresent = buttonPatchPresent();
   if (opts.commandClassifier) {
     const be = opts.classifierBackend;
     const dflt = be === "cli" ? "claude-sonnet-4-6" : "claude-haiku-4-5";
@@ -941,7 +977,7 @@ async function main(): Promise<void> {
           ? "ANTHROPIC_API_KEY set"
           : "NO API KEY — gray-zone commands wait for a human";
     console.log(`bob-worker: command classifier = on, backend=${be} (${opts.classifierModel ?? dflt}; ${auth}).`);
-    // Warn when the toggle looks on but can't actually fire (no reachable mode / no patch).
+    // Warn when the classifier toggle looks on but can't actually fire (no mode within the risk gate).
     if (!classifierReachable(opts.maxRisk)) {
       const names =
         Object.entries(MODE_PROFILES)
@@ -953,12 +989,15 @@ async function main(): Promise<void> {
           `modes with gray-zone commands [${names}] exceed the risk gate. ` +
           `Raise --max-risk to at least 'standard' (extension setting bobTasks.maxRisk) for the classifier to take effect.`,
       );
-    } else if (buttonPatchPresent() === false) {
-      console.log(
-        "bob-worker: ⚠ Bob button patch NOT detected — approve/reject presses will be IGNORED " +
-          "and classified commands will stall. Run `node tools/patch-bob-buttons.mjs` and restart Bob.",
-      );
     }
+  }
+  // Hoisted out of the classifier block: the mode-switch gate presses on every dispatch, so a missing
+  // patch stalls mode switches even with the classifier off (when the old nested warning stayed silent).
+  if (patchPresent === false) {
+    console.log(
+      "bob-worker: ⚠ Bob button patch NOT detected — approve/reject presses will be IGNORED, so " +
+        "mode switches (and any classified commands) will stall. Run `node tools/patch-bob-buttons.mjs` and restart Bob.",
+    );
   }
   if (opts.answerFollowups) {
     const noKey = opts.classifierBackend === "api" && !process.env.ANTHROPIC_API_KEY;
@@ -1089,7 +1128,7 @@ async function main(): Promise<void> {
     }
     idled = false;
     try {
-      await runOne(client, task, opts);
+      await runOne(client, task, opts, patchPresent);
     } catch (err) {
       console.error(`  ! error on #${task.id}: ${(err as Error).message}`);
       // Only park genuinely unfinished work — don't clobber a task that already completed
