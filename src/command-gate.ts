@@ -91,7 +91,7 @@ export function createCommandGate(deps: GateDeps): (ev: GateEvent) => Promise<vo
     if (cached) {
       ({ decision, reason } = cached);
       fromCache = true;
-      deps.log(`  ⚡ cached classifier ${decision} (${reason})`);
+      deps.log(`  cached classifier ${decision} (${reason})`);
     } else {
       deps.log(`  ⟲ classifying command (${deps.backend}): ${short}`);
       ({ decision, reason } = await classify(

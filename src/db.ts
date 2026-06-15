@@ -46,7 +46,7 @@ export function getDb(path = defaultDbPath()): DatabaseSync {
   if (db) return db;
   mkdirSync(dirname(path), { recursive: true });
   // The board is per-project state, never source: keep it out of the consuming repo's
-  // git status so it can't land as untracked tasks.db* at a repo root (incident D).
+  // git status so it can't land as untracked tasks.db* at a repo root.
   ensureGitignore(path);
   const { DatabaseSync } = requireModule("node:sqlite") as typeof import("node:sqlite");
   db = new DatabaseSync(path);
@@ -814,7 +814,7 @@ function isUnderRoot(p: string, root: string): boolean {
 }
 
 /**
- * Delete a task, but make "delete is not undo" explicit (incident B): if the task has
+ * Delete a task, but make "delete is not undo" explicit: if the task has
  * recorded artifacts (files written, commits, tests), refuse unless `force`, and with
  * `cleanup` also unlink the orphaned files. Tasks with no side effects delete as before.
  */

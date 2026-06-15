@@ -132,7 +132,7 @@ describe("board question round-trip (needs_input)", () => {
     assert.equal(getQuestion(q.question_id)?.status, "timed_out"); // closed (superseded)
   });
 
-  it("bug #43: a late answer to a SETTLED task is alreadyAnswered and does NOT re-dispatch", () => {
+  it("a late answer to a SETTLED task is alreadyAnswered and does NOT re-dispatch", () => {
     // stall → run completes out-of-band (answer-via-A) → answer the SAME qid via the board
     // (answer-via-B): must report alreadyAnswered and leave the task settled (no second run).
     const id = workedTask("no-double-run");

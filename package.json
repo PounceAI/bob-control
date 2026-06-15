@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Bob Control: MCP server + CLI + worker that runs IBM Bob (and any MCP-capable agent) unattended against a SQLite task board.",
   "author": "Joshua Gilbert",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Joshua-Gilbert/bob-control.git"

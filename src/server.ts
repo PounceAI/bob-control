@@ -103,7 +103,7 @@ server.registerTool(
   async ({ title, description, priority, tags, mode, depends_on, staged }) => {
     try {
       const task = repo.createTask({ title, description, priority, tags, mode, depends_on, staged });
-      // Warn when a pullable task drops onto a live board (bulk-create race, incident A).
+      // Warn when a pullable task drops onto a live board (bulk-create race).
       if (!staged && repo.isBoardArmed() && workerLikelyActive()) {
         return json({
           ...task,

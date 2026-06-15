@@ -87,10 +87,10 @@ test("escalates an unrecognised command (default-deny is the caller's job)", () 
   assert.equal(decide("cargo run"), "escalate");
   assert.equal(decide("docker ps"), "escalate");
   assert.equal(decide("some-unknown-tool --flag"), "escalate");
-  assert.equal(decide("npx some-package"), "escalate", "bare npx no longer auto-runs (review #3)");
+  assert.equal(decide("npx some-package"), "escalate", "bare npx no longer auto-runs");
 });
 
-test("denies inline-eval interpreter forms (arbitrary code hidden in the quoted arg) — review #3", () => {
+test("denies inline-eval interpreter forms (arbitrary code hidden in the quoted arg)", () => {
   assert.equal(decide("node -e \"require('child_process').exec('x')\""), "deny");
   assert.equal(decide("node --eval 'do_evil()'"), "deny");
   assert.equal(decide("node -p process.env"), "deny");
@@ -99,7 +99,7 @@ test("denies inline-eval interpreter forms (arbitrary code hidden in the quoted 
   assert.equal(decide("node scripts/build.js"), "allow");
 });
 
-test("denies eval, permission/ownership changes, and remote access — review #3/#12", () => {
+test("denies eval, permission/ownership changes, and remote access", () => {
   for (const c of [
     "eval rm -rf /",
     "chmod +x payload.sh",
@@ -112,7 +112,7 @@ test("denies eval, permission/ownership changes, and remote access — review #3
   }
 });
 
-test("denies reading secrets / credentials even via an allowlisted reader — review #3/#10", () => {
+test("denies reading secrets / credentials even via an allowlisted reader", () => {
   for (const c of [
     "cat .env",
     "cat .env.local",
@@ -138,7 +138,7 @@ test("a chained command allows only if EVERY segment is allowlisted; any denied 
   assert.equal(decide("git status && make build"), "escalate", "an unknown segment escalates");
 });
 
-test("quote-aware splitting: a separator INSIDE quotes is not a chain break (review #2)", () => {
+test("quote-aware splitting: a separator INSIDE quotes is not a chain break", () => {
   // The whole-string deny floor still catches a real chained deny; quote-awareness only keeps a
   // legitimately-quoted separator from over-splitting and wrongly escalating.
   assert.equal(decide('git commit -m "fix; cleanup the cache"'), "allow");
@@ -167,7 +167,7 @@ test("the allow prefixes exclude the over-broad bare ones (no auto-approve of pu
   assert.ok(!DEFAULT_ALLOW_PREFIXES.includes("git "), "no bare 'git ' (would auto-approve push)");
   assert.ok(!DEFAULT_ALLOW_PREFIXES.includes("npm "), "no bare 'npm ' (would auto-approve install)");
   assert.ok(!DEFAULT_ALLOW_PREFIXES.includes("pip "), "no bare 'pip ' (would auto-approve install)");
-  assert.ok(!DEFAULT_ALLOW_PREFIXES.includes("npx "), "npx no longer auto-runs (review #3)");
+  assert.ok(!DEFAULT_ALLOW_PREFIXES.includes("npx "), "npx no longer auto-runs");
 });
 
 test("isCommandAsk recognises both wire spellings of a command ask", () => {

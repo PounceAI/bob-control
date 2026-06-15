@@ -10,7 +10,7 @@ const ROOT = mkdtempSync(join(tmpdir(), "bob-gi-"));
 const DATA_DIR = join(ROOT, "data");
 const DB = join(DATA_DIR, "tasks.db");
 
-describe("store gitignore (incident D)", () => {
+describe("store gitignore", () => {
   before(() => {
     process.env.BOB_TASKS_DB = DB;
     getDb();

@@ -239,7 +239,7 @@ export async function preserveWipToBranch(
   if (branch) {
     repo.addNote(
       taskId,
-      `💾 Preserved partial work to branch ${branch}; restored the working tree to its pre-task state.`,
+      `Preserved partial work to branch ${branch}; restored the working tree to its pre-task state.`,
       actor,
     );
     return { preserved: true, branch, note: `preserved to ${branch}`, outcome: r };

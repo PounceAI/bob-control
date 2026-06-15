@@ -16,7 +16,7 @@ function clean(): void {
   }
 }
 
-describe("delete safety (incident B)", () => {
+describe("delete safety", () => {
   before(() => {
     process.env.BOB_TASKS_DB = DB;
     clean();

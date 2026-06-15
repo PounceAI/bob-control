@@ -10,8 +10,9 @@
 //      branch validates `data` against a discriminatedUnion("commandName", […])
 //      (the `jls` union) whose members are exactly StartNewTask/CancelTask/
 //      CloseTask/ResumeTask/SendMessage. A PressPrimaryButton/PressSecondaryButton
-//      command fails that parse and is dropped with "[server#onMessage] invalid
-//      paylooooad" — it NEVER reaches the switch. So we add two members to the union.
+//      command fails that parse and is dropped with Bob's own log line
+//      "[server#onMessage] invalid paylooooad" (sic) — it NEVER reaches the switch. So we
+//      add two members to the union.
 //      (Earlier patch versions assumed commandName "is never parsed on intake" — it is.)
 //
 //   2. SWITCH. We add two `case` labels to the `s.on("TaskCommand")` switch:
