@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { resolveMode, looksLikeImplementation, isReadOnlyMode } from "./modes.js";
 
 // Pure router — no DB needed.
-describe("router implementation guard (incident C)", () => {
+describe("router implementation guard", () => {
   it("an implementation task is NOT routed to read-only ask, even when it says 'analyze'", () => {
     const r = resolveMode({
       mode: null,

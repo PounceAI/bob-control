@@ -278,7 +278,7 @@ async function checkpointBeforeDeath(opts: Opts, taskId: number): Promise<string
   if (!opts.checkpoint) return undefined;
   try {
     const r = await preserveWipToBranch(process.cwd(), taskId, "worker");
-    if (r.branch) console.log(`  💾 #${taskId} partial work preserved to ${r.branch}; main restored clean`);
+    if (r.branch) console.log(`  ✓ #${taskId} partial work preserved to ${r.branch}; main restored clean`);
     else if (r.note) console.log(`  ↩ #${taskId} ${r.note}`);
     return r.branch;
   } catch (err) {
@@ -677,7 +677,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
   // One pre-task git snapshot, reused by the judge (when on) AND by the completion
   // gate to compute execution evidence / record file artifacts. The judge needs it
   // only for code modes, but completion evidence + delete-safety want it for every
-  // task (a read-only task that wrote a file must still be recorded — incident B).
+  // task (a read-only task that wrote a file must still be recorded).
   const evidenceBaseline = await captureGitBaseline(process.cwd());
   if (judgeOn) judgeBaseline = evidenceBaseline;
   // Persist a rollback checkpoint once per task (first attempt). Captured for ALL modes — a
@@ -706,7 +706,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
   }
   if (findings.length > 0) {
     repo.addNote(task.id, formatReviewFindings(findings), "bob-review");
-    console.log(`  📋 captured ${findings.length} review finding${findings.length === 1 ? "" : "s"}`);
+    console.log(`  captured ${findings.length} review finding${findings.length === 1 ? "" : "s"}`);
   }
 
   // If Bob parked this task awaiting a human answer on the board (called ask_question →
@@ -1065,7 +1065,7 @@ async function main(): Promise<void> {
     // Sweep stale board questions so a needs_input task whose asker died still times out.
     if (!opts.dryRun) repo.expireOverdueQuestions();
     // Board-level dispatch gate: while the board is disarmed, pull nothing — the curator
-    // is bulk-creating/triaging and will arm when ready (anti-race, incident A). Checked
+    // is bulk-creating/triaging and will arm when ready (anti-race). Checked
     // first so a disarm halts dispatch even mid-drain.
     if (!opts.dryRun && !repo.isBoardArmed()) {
       if (opts.once) {

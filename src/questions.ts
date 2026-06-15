@@ -131,7 +131,7 @@ export function answerQuestion(taskId: number, questionId: string, answer: strin
   if (!q || q.task_id !== taskId) {
     return { ok: false, error: `no question '${questionId}' on task #${taskId}` };
   }
-  // Idempotency backstop (bug #43): a task that already SETTLED (done/analysis_done/cancelled) must
+  // Idempotency backstop: a task that already SETTLED (done/analysis_done/cancelled) must
   // not be resurrected by a late answer — its run is finished, so resuming would re-dispatch redundant
   // work. Checked before the answered/timed_out branches so it holds whether the question is still
   // open or was auto-closed by completeTask, including the cross-channel case where the run ended

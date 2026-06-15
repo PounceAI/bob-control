@@ -27,7 +27,7 @@ function clean(): void {
   }
 }
 
-describe("staging + arming gate (incident A)", () => {
+describe("staging + arming gate", () => {
   before(() => {
     process.env.BOB_TASKS_DB = DB;
     clean();

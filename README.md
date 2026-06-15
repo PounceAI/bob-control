@@ -2,14 +2,12 @@
 
 [![CI](https://github.com/Joshua-Gilbert/bob-control/actions/workflows/ci.yml/badge.svg)](https://github.com/Joshua-Gilbert/bob-control/actions/workflows/ci.yml)
 
-**What it adds to your stack — and why you should care.** An AI coding agent on its own is a
-chat window: you drive it one prompt at a time and babysit every approval. This library turns
-it into an **unattended queue worker** — fill a board and each task gets dispatched, auto-approved
-inside risk guardrails, answered when the agent asks a question, verified (a command check or an
-LLM judge), retried on transient failures, and written back — in dependency order, with no one
-watching. You trade *babysitting one task* for *draining a backlog*, while gating and an acceptance
-judge keep it honest — and IBM Bob and Claude Code can share one board so each does the work it's
-best at. If your stack already has an agent, this is the missing piece that makes it run on its own.
+Bob Control turns an AI coding agent from a one-prompt-at-a-time chat window into an unattended
+queue worker. Fill a board and each task gets dispatched, auto-approved inside risk guardrails,
+answered when the agent asks a question, verified (a command check or an LLM judge), retried on
+transient failures, and written back — in dependency and priority order, with no one watching.
+Gating and an acceptance judge keep it honest, and IBM Bob and Claude Code can share one board so
+each does the work it's best at.
 
 Concretely: an MCP **server** + **CLI** + auto-dispatch **worker** over a SQLite task board.
 The worker pulls each task in dependency and priority order and dispatches it to
@@ -494,6 +492,19 @@ node dist/cli.js create "INVRPT report" --template bug-fix
 
 Built-ins: `bug-fix`, `feature`, `research`, `code-review`, `doc`, `refactor`.
 
+## VS Code / Bob extension
+
+`extension/` packages the worker as an IDE extension ("Bob Tasks") for IBM Bob (and stock VS
+Code). Instead of running `dist/worker.js` from a terminal, it claims and dispatches queued tasks
+from inside the editor, with a status-bar item, native completion/failure toasts, a
+`bobTasks.maxRisk` gate, and defer-while-chatting so it never aborts a live Bob conversation. A
+URI handler (`ibm-bob://local.bob-tasks/start`) lets a process outside the editor — e.g. Claude
+Code in WSL — start or stop the worker without a Command Palette click.
+
+It's independent of the MCP server and CLI: use it if you want a one-click in-editor worker, or
+skip it and run `npm run worker` if you don't. Build/install steps and the full `bobTasks.*`
+settings reference live in [extension/README.md](extension/README.md).
+
 ## Board safety gates
 
 Guardrails for running unattended at scale — so a bulk-create can't race a live worker, and
@@ -607,4 +618,5 @@ src/
   smoke.ts        self-test
 tools/
   patch-bob-buttons.mjs   expose Bob's approve/reject buttons + GetReviewFindings over IPC
+extension/                VS Code / Bob "Bob Tasks" extension — packages the worker (see extension/README.md)
 ```

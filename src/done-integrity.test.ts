@@ -16,7 +16,7 @@ function clean(): void {
   }
 }
 
-describe("done-integrity gate (incident C)", () => {
+describe("done-integrity gate", () => {
   before(() => {
     process.env.BOB_TASKS_DB = DB;
     clean();

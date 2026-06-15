@@ -24,7 +24,7 @@ export function isBuiltInMode(slug: string): slug is BuiltInMode {
 // Keyword router for tasks with no explicit mode. Order matters:
 // review > plan > devsecops > advanced > orchestrator > ask, then code as fallback.
 // `readOnly` rules (review/plan/ask) are suppressed when the task carries an impl verb, so
-// implementation work is never stranded in a no-write mode (see resolveMode + incident C).
+// implementation work is never stranded in a no-write mode (see resolveMode).
 const RULES: { mode: BuiltInMode; re: RegExp; readOnly?: boolean }[] = [
   // Read-only INTENT first: a task that wants findings or a plan (not code written) belongs in the
   // matching read-only mode, not the write-capable `code` fallback — otherwise a review/plan task
@@ -66,10 +66,10 @@ const RULES: { mode: BuiltInMode; re: RegExp; readOnly?: boolean }[] = [
 ];
 
 // Implementation verbs. A task carrying these wants code WRITTEN, so it must NOT be
-// silently routed to read-only `ask` just because it also says "analyze"/"review"
-// (incident C: a PHI-MINIMIZATION task auto-routed to ask, then marked done with no
-// code). When both signals are present, implementation wins — ask is suppressed and the
-// task falls through to `code`.
+// silently routed to read-only `ask` just because it also says "analyze"/"review" — that
+// would yield an analysis with no code that then can't honestly reach 'done'. When both
+// signals are present, implementation wins — ask is suppressed and the task falls through
+// to `code`.
 // Recall-favoring (missing an impl verb is worse than a false match). The (?<![\w-]) stops a
 // verb matching inside a hyphen-compound, e.g. "value-add" must not count as "add".
 const IMPL_VERBS =
@@ -310,7 +310,7 @@ export function resolveMode(task: Pick<Task, "mode" | "title" | "description" | 
   const impl = looksLikeImplementation(hay);
   for (const rule of RULES) {
     // Never route an implementation task to a read-only mode (review/plan/ask) — that produces an
-    // analysis with no code, which then can't honestly reach 'done' (incident C).
+    // analysis with no code, which then can't honestly reach 'done'.
     if (rule.readOnly && impl) continue;
     if (rule.re.test(hay)) return { mode: rule.mode, source: "auto-router" };
   }
