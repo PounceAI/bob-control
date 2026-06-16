@@ -81,9 +81,11 @@ does. Bob doesn't expand `${CLAUDE_PROJECT_DIR}`, so each project needs its own
 node tools/init-project-board.mjs <project-dir>
 ```
 
-It writes a correct `.bob/mcp.json` (server path, `BOB_TASKS_DB`, `cwd`) and creates
-`data/`. The server logs the resolved path on startup (`board: …`) if you want to confirm
-both sides agree.
+It writes a correct `.bob/mcp.json` (server path, `BOB_TASKS_DB`, `cwd`), creates
+`data/`, and drops in `.bob/custom_modes.yaml` defining the `review` / `refactor` /
+`devsecops` modes the router targets (not Bob built-ins, so without the file those
+dispatches fall back to Bob's default mode). The server logs the resolved path on
+startup (`board: …`) if you want to confirm both sides agree.
 
 Prefer one queue across **every** repo instead? Set `BOB_TASKS_PORTABLE=1` on **both**
 sides (the plugin's `.mcp.json` env and Bob's) so both resolve a shared
