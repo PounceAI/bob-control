@@ -1,6 +1,7 @@
 import net from "node:net";
 import { IdleWatchdog } from "./watchdog.js";
 import { BudgetTracker, budgetExceeded, parseApiReqUsage } from "./budget.js";
+import { TaskBinder } from "./task-binder.js";
 
 /**
  * Async client for IBM Bob's Roo Code IPC socket. Wire protocol (from
@@ -145,6 +146,9 @@ export class BobClient {
   private connectSettle: { resolve: () => void; reject: (e: Error) => void } | null = null;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private observer: ((ev: TaskLifecycleEvent) => void) | null = null;
+  // Owns the dispatch→task-id binding, ignoring foreign (chat) tasks so an open Bob chat
+  // can't steal it. Long-lived (not per-dispatch) so foreign chats stay tracked across runs.
+  private binder = new TaskBinder();
   readonly pipe: string;
 
   constructor(pipe?: string) {
@@ -293,15 +297,27 @@ export class BobClient {
       // Only accept a string task id — a malformed/non-string id must not bind or settle a dispatch.
       const taskId: string | undefined = typeof rawTaskId === "string" ? rawTaskId : undefined;
 
-      // Active-dispatch handling: bind id, capture result, settle on terminal.
+      // Track binding for every event (even when idle) so a chat opened between dispatches is
+      // already known-foreign next time and can't steal our binding. See TaskBinder.
+      this.binder.observe(name, taskId);
+
+      // Active-dispatch handling: capture result, settle on terminal.
       if (this.active) {
-        if (!this.active.ourTaskId && taskId && /taskCreated|taskStarted/i.test(name)) {
-          this.active.ourTaskId = taskId;
-        }
+        // TaskBinder owns the bind decision; the rest of the client reads active.ourTaskId
+        // (budget/watchdog/settle/approve), so mirror the bound id onto it.
+        this.active.ourTaskId = this.binder.taskId;
+
+        // Foreign only if BOTH this taskId and our bound id are known and differ — a concurrent
+        // chat (or an orchestrator subtask). A foreign message must not drive our dispatch's
+        // budget/watchdog/result-capture/onEvent (its completion_result, findings, or command-ask
+        // would otherwise be attributed to our task); the lifecycle event still reaches the
+        // observer below, which defer needs. Fail-open: undefined/pre-bind ids count as ours.
+        const isForeignTask = !!(taskId && this.active.ourTaskId && taskId !== this.active.ourTaskId);
+
         // Extract any chat message (say/ask + text) from the payload.
         const arr = Array.isArray(payload) ? payload : [payload];
         const cline = arr.map((p: any) => p?.message ?? p).find((m: any) => m && (m.text || m.say || m.ask));
-        if (cline) {
+        if (cline && !isForeignTask) {
           const ask: string | undefined = cline.ask;
           const say: string | undefined = cline.say ?? cline.ask;
           const text: string = String(cline.text ?? "");
@@ -309,11 +325,6 @@ export class BobClient {
           // `ts` is the message's unique timestamp — the gates + budget tracker dedup on it so a
           // re-emitted ask/usage is handled once while a genuine re-run (new ts) is handled again.
           const ts: number | undefined = typeof cline.ts === "number" ? cline.ts : undefined;
-          // A message whose taskId is KNOWN to differ from our dispatch (a concurrent chat in another
-          // tab, or an orchestrator subtask under its own id) must not drive OUR budget/watchdog — it
-          // could wrongly abort us as 'budget' or trip 'idle' on a foreign prompt. Unknown/undefined
-          // ids and our own id count as ours (fail-open: never abort on someone else's activity).
-          const isForeignTask = !!(taskId && this.active.ourTaskId && taskId !== this.active.ourTaskId);
           if (say === "completion_result" && text.trim()) this.active.lastCompletion = text;
           else if (text.trim()) this.active.lastText = text;
 
@@ -321,7 +332,7 @@ export class BobClient {
           // updates that one frame in place with final token counts under the same ts) and abort cleanly
           // once a runaway dispatch crosses the token ceiling (or turn cap). Keying on the single
           // canonical event avoids double-counting a separate api_req_finished frame.
-          if (!isForeignTask && say === "api_req_started") {
+          if (say === "api_req_started") {
             const usage = parseApiReqUsage(text);
             if (usage) {
               this.active.budget.update(ts, usage);
@@ -340,20 +351,18 @@ export class BobClient {
           // Idle / blocked-on-ask watchdog. A FINAL blocking ask arms the (short) grace when no gate
           // will answer it; any non-ask message (streamed says, tool output) is progress and resets
           // the idle window. Partial ask fragments are ignored so a streaming prompt can't keep
-          // resetting the grace and mask the wedge. Skipped for a foreign task (see isForeignTask).
-          if (!isForeignTask) {
-            if (ask) {
-              if (!partial) {
-                this.active.pendingAsk = ask;
-                this.active.pendingAskText = text;
-                const answerable = this.active.isAnswerableAsk ? this.active.isAnswerableAsk(ask, text) : false;
-                this.active.watchdog?.ask(ask, text, answerable);
-              }
-            } else {
-              this.active.pendingAsk = undefined;
-              this.active.pendingAskText = undefined;
-              this.active.watchdog?.activity();
+          // resetting the grace and mask the wedge.
+          if (ask) {
+            if (!partial) {
+              this.active.pendingAsk = ask;
+              this.active.pendingAskText = text;
+              const answerable = this.active.isAnswerableAsk ? this.active.isAnswerableAsk(ask, text) : false;
+              this.active.watchdog?.ask(ask, text, answerable);
             }
+          } else {
+            this.active.pendingAsk = undefined;
+            this.active.pendingAskText = undefined;
+            this.active.watchdog?.activity();
           }
 
           // Capture submit_review_findings tool calls (review mode)
@@ -376,7 +385,7 @@ export class BobClient {
           }
 
           this.active.onEvent?.(name, { say, ask, text, partial, ts });
-        } else {
+        } else if (!cline && !isForeignTask) {
           // A lifecycle-only event (no message) isn't counted as progress: a wedge on an ask emits
           // no messages, so letting these reset the idle window would mask exactly what we watch for.
           this.active.onEvent?.(name, {});
@@ -405,6 +414,7 @@ export class BobClient {
     a.done = true;
     clearTimeout(a.timer);
     a.watchdog?.stop();
+    this.binder.disarm();
     this.active = null;
     a.settle({
       taskId: a.ourTaskId,
@@ -457,6 +467,7 @@ export class BobClient {
           },
         });
       }
+      this.binder.arm();
       this.active = active;
       active.watchdog?.start();
       const sent = this.send({
