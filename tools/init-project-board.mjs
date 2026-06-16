@@ -49,6 +49,11 @@ if (!existsSync(projectDir) || !statSync(projectDir).isDirectory()) {
 const boardDb = fwd(join(projectDir, "data", "tasks.db"));
 const bobDir = join(projectDir, ".bob");
 const mcpPath = join(bobDir, "mcp.json");
+const modesPath = join(bobDir, "custom_modes.yaml");
+// Bob loads custom modes from the open workspace's .bob/ and ships no built-ins for the
+// review/refactor/devsecops slugs the dispatcher routes to, so each project needs its own
+// copy of the connector's modes or those dispatches fall back to Bob's default mode.
+const modesSrc = join(connectorRoot, ".bob", "custom_modes.yaml");
 
 const entry = {
   type: "stdio",
@@ -92,4 +97,34 @@ writeFileSync(mcpPath, JSON.stringify(config, null, 2) + "\n");
 console.log(`✓ wrote ${fwd(mcpPath)}`);
 console.log(`  board:  ${boardDb}`);
 console.log(`  server: ${serverJs}`);
-console.log(`Next: open ${fwd(projectDir)} in Bob and reload MCP servers (MCP panel), then dispatch as usual.`);
+
+// Scaffold the custom modes. Decoupled from --force (which only governs the bob-tasks MCP
+// entry): an existing custom_modes.yaml is never overwritten — it may hold the project's own
+// modes — so we only check the connector's slugs are present.
+const CONNECTOR_MODE_SLUGS = ["review", "refactor", "devsecops"];
+let modesReady = false;
+if (!existsSync(modesSrc)) {
+  console.warn(`! no ${fwd(modesSrc)} to copy — ${CONNECTOR_MODE_SLUGS.join("/")} will fall back to Bob's default mode.`);
+} else if (existsSync(modesPath)) {
+  // Substring-check the slugs (safe literals; avoids a YAML-parser dependency).
+  const existing = readFileSync(modesPath, "utf8");
+  const missing = CONNECTOR_MODE_SLUGS.filter((s) => !new RegExp(`slug:\\s*${s}\\b`).test(existing));
+  if (missing.length) {
+    console.warn(
+      `! ${fwd(modesPath)} exists but is missing modes: ${missing.join(", ")} — ` +
+        `merge them from ${fwd(modesSrc)} or those dispatches will fall back to Bob's default mode.`,
+    );
+  } else {
+    console.log(`✓ ${fwd(modesPath)} already defines ${CONNECTOR_MODE_SLUGS.join(" / ")} — left as-is.`);
+    modesReady = true;
+  }
+} else {
+  writeFileSync(modesPath, readFileSync(modesSrc, "utf8"));
+  console.log(`✓ wrote ${fwd(modesPath)} (${CONNECTOR_MODE_SLUGS.join(" / ")} modes)`);
+  modesReady = true;
+}
+
+console.log(
+  `Next: open ${fwd(projectDir)} in Bob and reload MCP servers (MCP panel)` +
+    (modesReady ? "; custom modes load automatically." : "."),
+);
