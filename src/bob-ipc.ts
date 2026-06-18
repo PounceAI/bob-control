@@ -46,7 +46,15 @@ export interface DispatchOptions {
    */
   onEvent?: (
     name: string,
-    detail: { say?: string; ask?: string; text?: string; partial?: boolean; ts?: number; taskId?: string },
+    detail: {
+      say?: string;
+      ask?: string;
+      text?: string;
+      partial?: boolean;
+      ts?: number;
+      taskId?: string;
+      isRoot?: boolean;
+    },
   ) => void;
   /**
    * Idle / blocked-on-ask watchdog window (ms). When the dispatch makes no progress for this long
@@ -361,12 +369,15 @@ export class BobClient {
           // Budget backstop (WHOLE tree): accumulate token usage from Bob's per-request 'api_req_started'
           // say (Roo updates that one frame in place with final token counts under the same ts) and abort
           // cleanly once a runaway dispatch crosses the token ceiling (or turn cap). Counting subtasks too
-          // closes the gap where an orchestrator's children burned tokens off-budget. Keying on the single
-          // canonical event avoids double-counting a separate api_req_finished frame.
+          // closes the gap where an orchestrator's children burned tokens off-budget. Key per request:
+          // a re-emit of one frame shares (taskId, ts) → last-wins (no double-count), while the root and a
+          // subtask whose frames land on the same millisecond ts stay distinct (no under-count). Keying on
+          // the single canonical 'started' event also avoids double-counting a separate finished frame.
           if (say === "api_req_started") {
             const usage = parseApiReqUsage(text);
             if (usage) {
-              this.active.budget.update(ts, usage);
+              const budgetKey = taskId !== undefined && ts !== undefined ? `${taskId}:${ts}` : ts;
+              this.active.budget.update(budgetKey, usage);
               const over = budgetExceeded(this.active.budget, {
                 tokenCeiling: this.active.tokenCeiling,
                 turnCap: this.active.turnCap,
@@ -448,11 +459,11 @@ export class BobClient {
           // window) and by inheriting the existing gate opt-in. resolvePressTarget() additionally drops a
           // LATE press once the task un-owns, closing the async-verdict variant.
           const routeToGates = isRoot || (!partial && ask !== undefined && isCommandAsk(ask));
-          if (routeToGates) this.active.onEvent?.(name, { say, ask, text, partial, ts, taskId });
+          if (routeToGates) this.active.onEvent?.(name, { say, ask, text, partial, ts, taskId, isRoot });
         } else if (!cline && isRoot) {
           // A lifecycle-only event (no message) isn't counted as progress: a wedge on an ask emits
           // no messages, so letting these reset the idle window would mask exactly what we watch for.
-          this.active.onEvent?.(name, {});
+          this.active.onEvent?.(name, { isRoot: true });
         }
       }
 

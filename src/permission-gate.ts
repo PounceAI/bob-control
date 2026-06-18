@@ -65,8 +65,11 @@ export function createPermissionGate(deps: PermissionGateDeps): (ev: PermissionE
     // dedup key (a genuine re-emit once active would then be skipped).
     if (deps.isActive && !deps.isActive()) return "ignored";
     // Dedup by ask identity (ts): Bob re-emits one pending ask as it streams (same ts); a genuine
-    // re-run of the same command arrives as a new ts. Fall back to the command text when no ts.
-    const key = ev.ts !== undefined ? `ts:${ev.ts}` : `cmd:${command}`;
+    // re-run of the same command arrives as a new ts. Fall back to the command text when no ts. The
+    // key is scoped by taskId so a root command and a same-text/same-ts SUBTASK command don't collide;
+    // a true re-emit shares taskId+ts and still dedups to one.
+    const scope = ev.taskId ?? "";
+    const key = ev.ts !== undefined ? `${scope}:ts:${ev.ts}` : `${scope}:cmd:${command}`;
     if (handled.has(key)) return "ignored";
     handled.add(key);
 

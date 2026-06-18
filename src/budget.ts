@@ -47,31 +47,34 @@ export function parseApiReqUsage(text: string | undefined): Partial<ApiUsage> | 
 
 /**
  * Accumulates per-request usage across a dispatch. Bob re-emits one api request's say as it streams
- * (same `ts`, growing counts), so we key by `ts` and keep the latest (last-wins) rather than
- * summing the re-emissions; distinct `ts` values are distinct requests (= turns). Messages with no
- * `ts` fold into a single anonymous slot so a re-emission there can't inflate the total either.
+ * (same key, growing counts), so we key each request and keep the latest (last-wins) rather than
+ * summing the re-emissions; distinct keys are distinct requests (= turns). The key is the message's
+ * `ts`, but the caller may pass a COMPOSITE (e.g. `taskId:ts`) so that an orchestrator root and a
+ * subtask whose api_req frames land on the same millisecond `ts` count as two requests, not one
+ * (last-wins would otherwise drop one and undercount the tree). Messages with no key fold into a
+ * single anonymous slot so a re-emission there can't inflate the total either.
  */
 export class BudgetTracker {
-  private byTs = new Map<number, ApiUsage>();
+  private byKey = new Map<string | number, ApiUsage>();
   private anon: ApiUsage | null = null;
-  // Running sums kept in step with byTs/anon so the getters are O(1) — budgetExceeded reads them on
+  // Running sums kept in step with byKey/anon so the getters are O(1) — budgetExceeded reads them on
   // every api-request event, so an O(turns) rebuild per access would be O(turns^2) over a dispatch.
   private sumOut = 0;
   private sumTotal = 0;
   private sumCost = 0;
 
-  update(ts: number | undefined, u: Partial<ApiUsage>): void {
+  update(key: string | number | undefined, u: Partial<ApiUsage>): void {
     const rec: ApiUsage = { tokensIn: u.tokensIn ?? 0, tokensOut: u.tokensOut ?? 0, cost: u.cost ?? 0 };
-    // Last-wins per request (re-emissions of one streaming frame share a ts): back out the prior
+    // Last-wins per request (re-emissions of one streaming frame share a key): back out the prior
     // record for this slot before adding the new one, so the running sums never double-count.
-    const prev = ts === undefined ? this.anon : this.byTs.get(ts);
+    const prev = key === undefined ? this.anon : this.byKey.get(key);
     if (prev) {
       this.sumOut -= prev.tokensOut;
       this.sumTotal -= prev.tokensIn + prev.tokensOut;
       this.sumCost -= prev.cost;
     }
-    if (ts === undefined) this.anon = rec;
-    else this.byTs.set(ts, rec);
+    if (key === undefined) this.anon = rec;
+    else this.byKey.set(key, rec);
     this.sumOut += rec.tokensOut;
     this.sumTotal += rec.tokensIn + rec.tokensOut;
     this.sumCost += rec.cost;
@@ -89,7 +92,7 @@ export class BudgetTracker {
   }
   /** Distinct api requests observed (≈ assistant turns). */
   get turns(): number {
-    return this.byTs.size + (this.anon ? 1 : 0);
+    return this.byKey.size + (this.anon ? 1 : 0);
   }
 }
 

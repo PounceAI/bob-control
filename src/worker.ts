@@ -541,14 +541,19 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
         isAnswerableAsk,
         tokenCeiling,
         turnCap,
-        onEvent: (name, { say, ask, text, partial, ts, taskId }) => {
-          // Capture the ask (see seenAsk). Clear only on a real non-ask message; a message-less
-          // lifecycle event (say/ask/text all absent) isn't progress and mustn't drop it.
-          if (ask) {
-            const t = (text ?? "").trim();
-            if (t) seenAsk = { kind: ask, text: t };
-          } else if (say !== undefined || (text ?? "").trim() !== "") {
-            seenAsk = undefined;
+        onEvent: (name, { say, ask, text, partial, ts, taskId, isRoot }) => {
+          // Capture the ask (see seenAsk). ROOT-only: seenAsk feeds the root dispatch's idle-recovery
+          // needs_input, so a routed SUBTASK command ask (which the gates press/surface themselves)
+          // must not land here — else an idle trip would surface the subtask's command as the root
+          // task's blocker. Clear only on a real non-ask root message; a message-less lifecycle event
+          // (say/ask/text all absent) isn't progress and mustn't drop it.
+          if (isRoot) {
+            if (ask) {
+              const t = (text ?? "").trim();
+              if (t) seenAsk = { kind: ask, text: t };
+            } else if (say !== undefined || (text ?? "").trim() !== "") {
+              seenAsk = undefined;
+            }
           }
 
           if (say && say !== lastSay) {

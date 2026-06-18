@@ -223,3 +223,36 @@ test("a genuine second spawn (new ts) re-arms and adopts the next child", () => 
   assert.ok(b.isOwned("subA"));
   assert.ok(b.isOwned("subB"));
 });
+
+test("two newTask spawns BEFORE either child is created adopt BOTH children (not just the first)", () => {
+  // A single one-shot boolean would adopt subA and orphan subB; the pending-count adopts both.
+  const b = new TaskBinder();
+  b.arm();
+  b.observe(CREATE, "root");
+  b.noteSpawnFrom("root", 1);
+  b.noteSpawnFrom("root", 2); // second spawn announced before either child's create arrives
+  b.observe(CREATE, "subA");
+  b.observe(CREATE, "subB");
+  assert.ok(b.isOwned("subA"));
+  assert.ok(b.isOwned("subB")); // would be foreign (orphaned) under a one-shot boolean
+  b.observe(CREATE, "subC");
+  assert.equal(b.isOwned("subC"), false); // only the two announced spawns are adopted
+});
+
+test("isOwned reads false between dispatches (disarmed) so a resumed prior task doesn't suppress defer", () => {
+  // Regression: deriving the observer's isOwn from a persistent owned set must not outlive the
+  // dispatch. After disarm() (owned is cleared only by the next arm()), a stale owned id must read
+  // NOT-owned, or the defer signal would ignore a user resuming the just-finished task.
+  const b = new TaskBinder();
+  b.arm();
+  b.observe(CREATE, "root");
+  b.noteSpawnFrom("root", 1);
+  b.observe(CREATE, "sub");
+  assert.ok(b.isOwned("root"));
+  assert.ok(b.isOwned("sub"));
+  b.disarm(); // dispatch ended
+  assert.equal(b.isOwned("root"), false); // stale between dispatches → reported foreign → defer records it
+  assert.equal(b.isOwned("sub"), false);
+  b.arm(); // next dispatch starts clean
+  assert.equal(b.isOwned("root"), false);
+});

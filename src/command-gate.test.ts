@@ -8,6 +8,7 @@ import { VerdictCache } from "./verdict-cache.js";
 // log line, and note, plus a stub classifier whose verdict the test controls.
 function harness(over: Partial<GateDeps> = {}, verdict: Classification = { decision: "approve", reason: "ok" }) {
   const calls = { approve: 0, reject: 0 };
+  const pressedTaskIds: Array<string | undefined> = []; // the taskId each approve/reject targeted
   const logs: string[] = [];
   const notes: Array<{ id: number; note: string; author?: string }> = [];
   const classifyArgs: any[] = [];
@@ -17,7 +18,16 @@ function harness(over: Partial<GateDeps> = {}, verdict: Classification = { decis
     backend: "cli",
     task: { id: 7, title: "build the thing" },
     cwd: "/repo",
-    client: { approve: () => calls.approve++, reject: () => calls.reject++ },
+    client: {
+      approve: (id) => {
+        calls.approve++;
+        pressedTaskIds.push(id);
+      },
+      reject: (id) => {
+        calls.reject++;
+        pressedTaskIds.push(id);
+      },
+    },
     addNote: (id, note, author) => notes.push({ id, note, author }),
     log: (m) => logs.push(m),
     classify: (async (command, ctx, deps) => {
@@ -27,7 +37,7 @@ function harness(over: Partial<GateDeps> = {}, verdict: Classification = { decis
     cache: new VerdictCache(), // Each test gets a fresh cache
     ...over,
   });
-  return { gate, calls, logs, notes, classifyArgs };
+  return { gate, calls, logs, notes, classifyArgs, pressedTaskIds };
 }
 
 const cmd = (text: string, ask = "command"): GateEvent => ({ ask, text });
@@ -47,6 +57,15 @@ test("deny verdict presses reject", async () => {
   await h.gate(cmd("rm -rf /"));
   assert.deepEqual(h.calls, { approve: 0, reject: 1 });
   assert.match(h.logs.join("\n"), /denied/);
+});
+
+test("the press carries the ask's taskId (a subtask command presses that subtask)", async () => {
+  // Guards that ev.taskId flows classifier -> approve(taskId), so the press lands on the subtask's
+  // webview instance rather than the root via the patch's sole-runner fallback.
+  const h = harness({}, { decision: "approve", reason: "ok" });
+  await h.gate({ ask: "command", text: "npm test", taskId: "sub-9" });
+  assert.equal(h.calls.approve, 1);
+  assert.deepEqual(h.pressedTaskIds, ["sub-9"]);
 });
 
 test("ask verdict also rejects — only an explicit approve runs the command", async () => {

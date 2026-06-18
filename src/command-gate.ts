@@ -154,8 +154,11 @@ export function createCommandGate(deps: GateDeps): (ev: GateEvent) => Promise<vo
     // those share a ts and are handled once. A genuine RE-RUN of the same command is a
     // NEW ask with a new ts, so it's handled (and pressed) again. (The command +
     // command_security_warning for one command share a ts too, so they dedup to one.)
-    // Fall back to command text only when no ts is available.
-    const key = ev.ts !== undefined ? `ts:${ev.ts}` : `cmd:${command}`;
+    // Fall back to command text only when no ts is available. The key is scoped by taskId so a
+    // root command and a same-text/same-ts SUBTASK command don't collide (they're distinct prompts
+    // on different tasks); a true re-emit shares taskId+ts and still dedups to one.
+    const scope = ev.taskId ?? "";
+    const key = ev.ts !== undefined ? `${scope}:ts:${ev.ts}` : `${scope}:cmd:${command}`;
     if (handled.has(key)) return Promise.resolve();
     handled.add(key);
     // Chain onto the serial queue; a failure in one must not break the chain.

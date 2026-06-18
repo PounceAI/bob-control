@@ -4,6 +4,7 @@ import { createPermissionGate, type PermissionGateDeps, type PermissionEvent } f
 
 function harness(over: Partial<PermissionGateDeps> = {}) {
   const calls = { approve: 0, reject: 0, cancelActive: 0 };
+  const pressedTaskIds: Array<string | undefined> = []; // the taskId each approve/reject targeted
   const logs: string[] = [];
   const notes: Array<{ id: number; note: string; author?: string }> = [];
   const surfaced: Array<{ command: string; cwd: string; reason: string }> = [];
@@ -12,8 +13,14 @@ function harness(over: Partial<PermissionGateDeps> = {}) {
     task: { id: 7, title: "build the thing" },
     cwd: "/repo",
     client: {
-      approve: () => calls.approve++,
-      reject: () => calls.reject++,
+      approve: (id) => {
+        calls.approve++;
+        pressedTaskIds.push(id);
+      },
+      reject: (id) => {
+        calls.reject++;
+        pressedTaskIds.push(id);
+      },
       cancelActive: () => calls.cancelActive++,
     },
     addNote: (id, note, author) => notes.push({ id, note, author }),
@@ -22,7 +29,7 @@ function harness(over: Partial<PermissionGateDeps> = {}) {
     policy: { repoRoot: "/repo" },
     ...over,
   });
-  return { gate, calls, logs, notes, surfaced };
+  return { gate, calls, logs, notes, surfaced, pressedTaskIds };
 }
 
 const cmd = (text: string, extra: Partial<PermissionEvent> = {}): PermissionEvent => ({
@@ -39,6 +46,22 @@ test("an allowlisted command (pytest) is auto-approved, no prompt, no surface", 
   assert.equal(h.calls.reject, 0);
   assert.equal(h.surfaced.length, 0, "an allowed command never surfaces needs_input");
   assert.match(h.notes[0].note, /APPROVED `uv run pytest tests\/`/);
+});
+
+test("the press targets the ask's taskId — a subtask command presses THAT subtask (approve)", () => {
+  // Guards the worker.onEvent -> gate -> approve(taskId) wiring: an approve must carry the subtask's
+  // id so the button patch presses the subtask's own webview, not the root / sole-runner fallback.
+  const h = harness();
+  h.gate(cmd("uv run pytest tests/", { taskId: "sub-1" }));
+  assert.equal(h.calls.approve, 1);
+  assert.deepEqual(h.pressedTaskIds, ["sub-1"]);
+});
+
+test("the press targets the ask's taskId on a deny (reject) too", () => {
+  const h = harness();
+  h.gate(cmd("git push origin main", { taskId: "sub-2" }));
+  assert.equal(h.calls.reject, 1);
+  assert.deepEqual(h.pressedTaskIds, ["sub-2"]);
 });
 
 test("a denied command (git push) surfaces a structured needs_input and ends the dispatch — no hang", () => {
