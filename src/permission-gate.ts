@@ -74,7 +74,7 @@ export function createPermissionGate(deps: PermissionGateDeps): (ev: PermissionE
     const { decision, reason } = evaluate(command, deps.policy ?? {});
 
     if (decision === "allow") {
-      deps.client.approve();
+      deps.client.approve(ev.taskId);
       deps.log(`  ✓ permission: auto-approved (${reason}): ${short}`);
       deps.addNote(deps.task.id, `Permission gate APPROVED \`${short}\`: ${reason}`, "permission-gate");
       return "handled";
@@ -87,7 +87,7 @@ export function createPermissionGate(deps: PermissionGateDeps): (ev: PermissionE
     }
 
     // deny, OR escalate with no classifier → default-deny: reject, surface, end the dispatch.
-    deps.client.reject();
+    deps.client.reject(ev.taskId);
     const why = decision === "deny" ? reason : `default-deny: ${reason}`;
     deps.log(`  ⛔ permission: denied (${why}) → needs_input + ending dispatch: ${short}`);
     deps.addNote(deps.task.id, `Permission gate DENIED \`${short}\`: ${why}`, "permission-gate");

@@ -2,6 +2,7 @@ import net from "node:net";
 import { IdleWatchdog } from "./watchdog.js";
 import { BudgetTracker, budgetExceeded, parseApiReqUsage } from "./budget.js";
 import { TaskBinder } from "./task-binder.js";
+import { isCommandAsk } from "./command-policy.js";
 
 /**
  * Async client for IBM Bob's Roo Code IPC socket. Wire protocol (from
@@ -45,7 +46,7 @@ export interface DispatchOptions {
    */
   onEvent?: (
     name: string,
-    detail: { say?: string; ask?: string; text?: string; partial?: boolean; ts?: number },
+    detail: { say?: string; ask?: string; text?: string; partial?: boolean; ts?: number; taskId?: string },
   ) => void;
   /**
    * Idle / blocked-on-ask watchdog window (ms). When the dispatch makes no progress for this long
@@ -430,10 +431,19 @@ export class BobClient {
             }
           }
 
-          // onEvent runs the worker's approve/reject/answer gates; keep it ROOT-only so a subtask's
-          // prompt is never auto-pressed (deliberately deferred). Subtask events still drove budget +
-          // the idle window above.
-          if (isRoot) this.active.onEvent?.(name, { say, ask, text, partial, ts });
+          // onEvent runs the worker's approve/reject/answer gates. Route every ROOT event (as before),
+          // PLUS an owned SUBTASK's COMMAND permission ask — so a `pytest`-style prompt raised inside an
+          // orchestrator subtask is pressed/denied by the same gates instead of stalling until the idle
+          // watchdog. The press carries `taskId`, so it lands on the subtask's own webview instance.
+          // Guard (the safety property): we're inside `cline && isOwnTree`, so a non-root here is an
+          // adopted, owned task — a genuine user chat (no newTask provenance) is never owned, and a chat
+          // mis-adopted in the create race is un-owned the instant it completes top-level (Increment 1).
+          // ONLY command asks cross over: a subtask's followup/mode-switch ask is deliberately NOT routed
+          // (avoids auto-answering a user's conversation). Residual: a chat mis-adopted in the sub-second
+          // window before its top-level completion could be pressed — bounded by the gate's conservatism
+          // (allowlist-approve / deny+surface) and the tininess of the race.
+          const routeToGates = isRoot || (!partial && ask !== undefined && isCommandAsk(ask));
+          if (routeToGates) this.active.onEvent?.(name, { say, ask, text, partial, ts, taskId });
         } else if (!cline && isRoot) {
           // A lifecycle-only event (no message) isn't counted as progress: a wedge on an ask emits
           // no messages, so letting these reset the idle window would mask exactly what we watch for.
@@ -573,29 +583,33 @@ export class BobClient {
    * secondary = reject. Requires the Bob IPC button patch (tools/patch-bob-buttons.mjs)
    * — without it Bob's IPC switch ignores these commandNames.
    *
-   * We send our Bob task id as the command `data`: the patch presses ONLY the webview
+   * We send a Bob task id as the command `data`: the patch presses ONLY the webview
    * instance whose `getCurrentTask().taskId` matches it (else the sole running instance),
    * so the press lands on the instance actually showing the prompt and never on an idle
    * one (an idle-sidebar press aborts a --new-tab task). If no instance owns the task,
    * the patch no-ops rather than guessing.
+   *
+   * `taskId` defaults to the bound root; pass an owned SUBTASK's id to press the instance
+   * showing that subtask's prompt (an orchestrator's command ask), which is more precise than
+   * relying on the patch's sole-runner fallback.
    */
-  approve(): void {
+  approve(taskId?: string): void {
     if (!this.active) return; // no dispatch in flight — don't press a stray button
     this.send({
       type: "TaskCommand",
       origin: "client",
       clientId: this.clientId,
-      data: { commandName: "PressPrimaryButton", data: this.active.ourTaskId },
+      data: { commandName: "PressPrimaryButton", data: taskId ?? this.active.ourTaskId },
     });
   }
 
-  reject(): void {
+  reject(taskId?: string): void {
     if (!this.active) return; // no dispatch in flight — don't press a stray button
     this.send({
       type: "TaskCommand",
       origin: "client",
       clientId: this.clientId,
-      data: { commandName: "PressSecondaryButton", data: this.active.ourTaskId },
+      data: { commandName: "PressSecondaryButton", data: taskId ?? this.active.ourTaskId },
     });
   }
 

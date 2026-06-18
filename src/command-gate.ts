@@ -7,10 +7,12 @@ import { classifyCommand } from "./classify.js";
 import { isCommandAsk } from "./command-policy.js";
 import { getSharedCache, type VerdictCache } from "./verdict-cache.js";
 
-/** The subset of BobClient the gate presses. */
+/** The subset of BobClient the gate presses. `taskId` targets the webview instance whose current
+ *  task matches it (the button patch) — the bound root by default, or an orchestrator SUBTASK when
+ *  the ask came from one. Omit to press the root (current behavior). */
 export interface GateClient {
-  approve(): void;
-  reject(): void;
+  approve(taskId?: string): void;
+  reject(taskId?: string): void;
 }
 
 /** A dispatch event, narrowed to the fields the gate reads. */
@@ -21,6 +23,9 @@ export interface GateEvent {
   /** The message's unique timestamp — used to dedup a re-emitted ask while still
    *  handling a genuine re-run of the same command (which arrives as a new ts). */
   ts?: number;
+  /** The task id that raised this ask — the bound root, or an owned subtask. Carried so the press
+   *  lands on that task's own webview instance instead of relying on the sole-runner fallback. */
+  taskId?: string;
 }
 
 export interface GateDeps {
@@ -72,7 +77,7 @@ export function createCommandGate(deps: GateDeps): (ev: GateEvent) => Promise<vo
   let queue: Promise<void> = Promise.resolve();
 
   /** Classify (or reuse a cached verdict for) one command and press its button. */
-  async function handleCommand(command: string): Promise<void> {
+  async function handleCommand(command: string, taskId?: string): Promise<void> {
     const short = command.replace(/\s+/g, " ").slice(0, 60);
 
     if (deps.blocked) {
@@ -118,10 +123,10 @@ export function createCommandGate(deps: GateDeps): (ev: GateEvent) => Promise<vo
     }
 
     if (decision === "approve") {
-      deps.client.approve();
+      deps.client.approve(taskId);
       deps.log(`  ✓ classifier approved (${reason})${fromCache ? " [cached]" : ""}`);
     } else {
-      deps.client.reject();
+      deps.client.reject(taskId);
       deps.log(
         `  ⛔ classifier ${decision === "deny" ? "denied" : "deferred→rejected"} (${reason})${fromCache ? " [cached]" : ""}`,
       );
@@ -154,7 +159,7 @@ export function createCommandGate(deps: GateDeps): (ev: GateEvent) => Promise<vo
     if (handled.has(key)) return Promise.resolve();
     handled.add(key);
     // Chain onto the serial queue; a failure in one must not break the chain.
-    const work = queue.then(() => handleCommand(command));
+    const work = queue.then(() => handleCommand(command, ev.taskId));
     queue = work.catch(() => {});
     return work;
   };

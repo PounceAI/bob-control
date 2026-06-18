@@ -432,7 +432,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
     cliPath: opts.classifierCli,
     task: { id: task.id, title: task.title },
     cwd: process.cwd(),
-    client: { approve: () => client.approve(), reject: () => client.reject() },
+    client: { approve: (id) => client.approve(id), reject: (id) => client.reject(id) },
     addNote: repo.addNote,
     log: (m) => console.log(m),
     isActive: () => dispatchActive,
@@ -451,8 +451,8 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
     task: { id: task.id, title: task.title },
     cwd: repoRoot,
     client: {
-      approve: () => client.approve(),
-      reject: () => client.reject(),
+      approve: (id) => client.approve(id),
+      reject: (id) => client.reject(id),
       cancelActive: () => client.cancelActive(),
     },
     addNote: repo.addNote,
@@ -541,7 +541,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
         isAnswerableAsk,
         tokenCeiling,
         turnCap,
-        onEvent: (name, { say, ask, text, partial, ts }) => {
+        onEvent: (name, { say, ask, text, partial, ts, taskId }) => {
           // Capture the ask (see seenAsk). Clear only on a real non-ask message; a message-less
           // lifecycle event (say/ask/text all absent) isn't progress and mustn't drop it.
           if (ask) {
@@ -560,16 +560,18 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
           // Deterministic permission gate FIRST (no LLM/human): it approves allowlisted commands and
           // rejects+surfaces (needs_input) + ends the dispatch on a deny/unknown. Only an unrecognised
           // command WITH the classifier enabled is handed on to the LLM command-gate.
+          // `taskId` (the task that raised the ask — the root, or an owned subtask) flows to the
+          // command gates so an approve/reject presses that task's own webview instance.
           let pv: PermissionVerdict = "ignored";
           try {
-            pv = permissionGate({ ask, text, partial, ts });
+            pv = permissionGate({ ask, text, partial, ts, taskId });
           } catch (e) {
             console.error(`  ⚠ permission gate error on #${task.id}: ${(e as Error).message}`);
           }
           // .catch each gate: a press/answer that throws (e.g. an IPC write on a dropped pipe, or an
           // answerer failure) must not become an unhandled rejection that crashes the worker.
           if (pv === "escalate") {
-            commandGate({ ask, text, partial, ts }).catch((e) =>
+            commandGate({ ask, text, partial, ts, taskId }).catch((e) =>
               console.error(`  ⚠ command gate error on #${task.id}: ${(e as Error).message}`),
             );
           }
