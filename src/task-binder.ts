@@ -17,15 +17,31 @@
 const MAX_FOREIGN = 256;
 
 export class TaskBinder {
-  // Live task ids that are not the current dispatch's task. Bounded by MAX_FOREIGN: terminal
+  // Live task ids that are not part of our dispatch's tree. Bounded by MAX_FOREIGN: terminal
   // events delete entries, and overflow evicts the oldest, so it can't grow without bound.
   private foreign = new Set<string>();
+  // Our dispatch's task TREE: the bound root plus any subtask it spawned via a `newTask` tool call
+  // (see noteSpawnFrom). Membership is what makes a subtask "ours". A genuine concurrent user chat
+  // has no such provenance, so it never lands here — which is why we can safely treat owned tasks
+  // as not-foreign (don't defer for them; later, press their prompts) without auto-acting on a
+  // user's own chat.
+  private owned = new Set<string>();
   private our: string | null = null;
   private armed = false;
+  // One-shot: an owned task just announced a `newTask` spawn, so the NEXT new task id is its child.
+  private expectingChild = false;
+  // ts of the newTask message that armed expectingChild. A re-emitted/streamed-again spawn frame
+  // carries the SAME ts, so we ignore it rather than re-arm the one-shot after the child already
+  // arrived (which would leave a trap that adopts an unrelated later create). A genuine second spawn
+  // has a new ts and re-arms correctly.
+  private lastSpawnTs: number | undefined;
 
   /** Begin binding a new dispatch. Foreign set persists — open chats stay known. */
   arm(): void {
     this.our = null;
+    this.owned.clear();
+    this.expectingChild = false;
+    this.lastSpawnTs = undefined;
     this.armed = true;
   }
 
@@ -34,17 +50,54 @@ export class TaskBinder {
     this.armed = false;
   }
 
+  /**
+   * An owned task emitted a `newTask` tool call (orchestrator spawning a subtask). Arm a one-shot so
+   * the next taskCreated is adopted into our tree. Only an OWNED task can spawn an owned child, so a
+   * user's own chat (never in `owned`) can't trick us into adopting one of its tasks. `ts` dedups a
+   * re-emitted spawn frame so it can't re-arm the one-shot after its child already arrived.
+   */
+  noteSpawnFrom(taskId: string | undefined, ts?: number): void {
+    if (!taskId) return;
+    if (!this.armed || !this.owned.has(taskId)) return;
+    if (ts !== undefined && ts === this.lastSpawnTs) return; // same spawn frame re-emitted — don't re-arm
+    this.lastSpawnTs = ts;
+    this.expectingChild = true;
+  }
+
+  /** True if the task id is part of our dispatch's tree (the bound root or an adopted subtask). */
+  isOwned(taskId: string | undefined): boolean {
+    return taskId !== undefined && this.owned.has(taskId);
+  }
+
+  /**
+   * Drop an adopted subtask from the tree on its terminal, so `owned` stays bounded by the live
+   * subtask count instead of growing for the whole dispatch. Also used to undo a mis-adoption (a task
+   * that ended as a top-level task, not our subtask — the adoption race). Never drops the bound root
+   * (cleared only by the next arm()); no-op for unknown ids.
+   */
+  releaseChild(taskId: string | undefined): void {
+    if (!taskId || taskId === this.our) return;
+    this.owned.delete(taskId);
+  }
+
   /** Feed one lifecycle event (taskCreated/taskStarted/taskCompleted/taskAborted). */
   observe(name: string, taskId: string | undefined): void {
     if (!taskId) return;
     const created = /taskCreated|taskStarted/i.test(name);
     const ended = /taskCompleted|taskAborted/i.test(name);
-    // Bind the first create/start of an armed dispatch that isn't an already-known chat.
+    // Bind the root: the first create/start of an armed dispatch that isn't an already-known chat.
     if (this.armed && this.our === null && created && !this.foreign.has(taskId)) {
       this.our = taskId;
+      this.owned.add(taskId);
     }
-    // Everything that isn't our bound task is foreign; terminal events clear it.
-    const isOurs = this.armed && taskId === this.our;
+    // Adopt a subtask: an owned task just announced a `newTask` spawn (noteSpawnFrom) and here is the
+    // next new id — a child of our tree, not a foreign chat. One-shot, consumed on this create.
+    else if (this.armed && this.expectingChild && created && !this.owned.has(taskId) && !this.foreign.has(taskId)) {
+      this.owned.add(taskId);
+      this.expectingChild = false;
+    }
+    // Everything outside our tree is foreign; terminal events clear it.
+    const isOurs = this.armed && this.owned.has(taskId);
     if (created && !isOurs) {
       this.foreign.add(taskId);
       if (this.foreign.size > MAX_FOREIGN) {

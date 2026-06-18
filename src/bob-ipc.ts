@@ -107,7 +107,8 @@ export interface TaskLifecycleEvent {
   /** e.g. taskCreated | taskStarted | taskCompleted | taskAborted */
   name: string;
   taskId: string;
-  /** True if this event belongs to the worker's own in-flight dispatch. */
+  /** True if this event belongs to the worker's own dispatch tree (the bound root or a subtask it
+   *  spawned). Subtasks count as own so an orchestrator's children don't read as external chat. */
   isOwn: boolean;
 }
 
@@ -135,6 +136,24 @@ interface ActiveDispatch {
 /** Default to the node-ipc-mangled doubled pipe that Bob actually registers. */
 export function resolvePipe(p?: string): string {
   return p ?? process.env.BOB_IPC_PIPE ?? "\\\\.\\pipe\\pipe\\bob-ipc";
+}
+
+/**
+ * A taskCompleted payload is positional: [taskId, {tokens…}, {tool counts…}, {isSubtask:boolean}].
+ * Return the isSubtask flag if present, else undefined. taskAborted carries just [taskId], so it
+ * yields undefined there. Callers MUST handle undefined explicitly rather than treat it as a value:
+ * the terminal-release below releases on `taskAborted` OR `isSubtask === false`, so a taskCompleted
+ * that omits the flag (undefined) is intentionally NOT released — a real subtask is popped by its
+ * later taskAborted, and the owned set clears on the next arm() regardless.
+ */
+export function parseIsSubtask(payload: unknown): boolean | undefined {
+  if (!Array.isArray(payload)) return undefined;
+  for (const el of payload) {
+    if (el && typeof el === "object" && "isSubtask" in el) {
+      return (el as { isSubtask?: unknown }).isSubtask === true;
+    }
+  }
+  return undefined;
 }
 
 export class BobClient {
@@ -307,17 +326,23 @@ export class BobClient {
         // (budget/watchdog/settle/approve), so mirror the bound id onto it.
         this.active.ourTaskId = this.binder.taskId;
 
-        // Foreign only if BOTH this taskId and our bound id are known and differ — a concurrent
-        // chat (or an orchestrator subtask). A foreign message must not drive our dispatch's
-        // budget/watchdog/result-capture/onEvent (its completion_result, findings, or command-ask
-        // would otherwise be attributed to our task); the lifecycle event still reaches the
-        // observer below, which defer needs. Fail-open: undefined/pre-bind ids count as ours.
-        const isForeignTask = !!(taskId && this.active.ourTaskId && taskId !== this.active.ourTaskId);
+        // Two scopes, not one foreign/ours flag (see TaskBinder for the owned tree):
+        //   • isRoot — the bound root. Fail-open: an undefined or pre-bind id counts as root, so the
+        //     first frames before binding aren't dropped. Result-capture, the blocking-ask grace, and
+        //     the worker's onEvent gates are ROOT-only.
+        //   • isOwnTree — anywhere in our dispatch's tree: the root OR an adopted subtask/grandchild.
+        //     Budget, idle-progress, and newTask-adoption span the WHOLE tree.
+        // A genuine concurrent user chat is neither (no newTask provenance → never owned), so its
+        // messages fall through untouched and still defer. The split fixes two orchestrator hazards:
+        // a busy subtask emits no root events, so a root-only idle reset let the watchdog cancel a
+        // healthy dispatch, and a subtask's tokens escaped the budget ceiling entirely.
+        const isRoot = !(taskId && this.active.ourTaskId && taskId !== this.active.ourTaskId);
+        const isOwnTree = isRoot || this.binder.isOwned(taskId);
 
         // Extract any chat message (say/ask + text) from the payload.
         const arr = Array.isArray(payload) ? payload : [payload];
         const cline = arr.map((p: any) => p?.message ?? p).find((m: any) => m && (m.text || m.say || m.ask));
-        if (cline && !isForeignTask) {
+        if (cline && isOwnTree) {
           const ask: string | undefined = cline.ask;
           const say: string | undefined = cline.say ?? cline.ask;
           const text: string = String(cline.text ?? "");
@@ -325,12 +350,17 @@ export class BobClient {
           // `ts` is the message's unique timestamp — the gates + budget tracker dedup on it so a
           // re-emitted ask/usage is handled once while a genuine re-run (new ts) is handled again.
           const ts: number | undefined = typeof cline.ts === "number" ? cline.ts : undefined;
-          if (say === "completion_result" && text.trim()) this.active.lastCompletion = text;
-          else if (text.trim()) this.active.lastText = text;
+          // Result capture is ROOT-only: a subtask's completion_result is its own answer back to the
+          // orchestrator, not the dispatch's result, and would clobber lastCompletion/lastText.
+          if (isRoot) {
+            if (say === "completion_result" && text.trim()) this.active.lastCompletion = text;
+            else if (text.trim()) this.active.lastText = text;
+          }
 
-          // Budget backstop: accumulate token usage from Bob's per-request 'api_req_started' say (Roo
-          // updates that one frame in place with final token counts under the same ts) and abort cleanly
-          // once a runaway dispatch crosses the token ceiling (or turn cap). Keying on the single
+          // Budget backstop (WHOLE tree): accumulate token usage from Bob's per-request 'api_req_started'
+          // say (Roo updates that one frame in place with final token counts under the same ts) and abort
+          // cleanly once a runaway dispatch crosses the token ceiling (or turn cap). Counting subtasks too
+          // closes the gap where an orchestrator's children burned tokens off-budget. Keying on the single
           // canonical event avoids double-counting a separate api_req_finished frame.
           if (say === "api_req_started") {
             const usage = parseApiReqUsage(text);
@@ -348,28 +378,42 @@ export class BobClient {
             }
           }
 
-          // Idle / blocked-on-ask watchdog. A FINAL blocking ask arms the (short) grace when no gate
-          // will answer it; any non-ask message (streamed says, tool output) is progress and resets
-          // the idle window. Partial ask fragments are ignored so a streaming prompt can't keep
-          // resetting the grace and mask the wedge.
+          // Idle / blocked-on-ask watchdog.
+          //   • A FINAL blocking ask arms the (short) grace — ROOT-only, since answering/pressing a
+          //     subtask's prompt is out of scope here. A subtask that wedges on an ask still recovers:
+          //     its last pre-ask message reset the window, which then elapses to a (full-window) trip.
+          //   • Any non-ask message ANYWHERE in the tree is progress and resets the idle window. This is
+          //     the starvation fix — a long subtask emits no root events, so the old root-only reset let
+          //     the watchdog cancel a healthy orchestrator mid-run. ASSUMPTION (behavioral, not protocol-
+          //     enforced): orchestrators delegate sequentially — the root is paused while a subtask runs
+          //     — so subtask progress and a live root ask don't overlap. If they ever did, a subtask's
+          //     activity() would clear the root's armed grace; worst case is then one FULL idle window
+          //     before the trip (delayed recovery), never indefinite starvation, since progress did stop.
+          // Partial ask fragments are ignored so a streaming prompt can't keep resetting the grace.
           if (ask) {
-            if (!partial) {
+            if (isRoot && !partial) {
               this.active.pendingAsk = ask;
               this.active.pendingAskText = text;
               const answerable = this.active.isAnswerableAsk ? this.active.isAnswerableAsk(ask, text) : false;
               this.active.watchdog?.ask(ask, text, answerable);
             }
           } else {
-            this.active.pendingAsk = undefined;
-            this.active.pendingAskText = undefined;
+            if (isRoot) {
+              this.active.pendingAsk = undefined;
+              this.active.pendingAskText = undefined;
+            }
             this.active.watchdog?.activity();
           }
 
-          // Capture submit_review_findings tool calls (review mode)
+          // Tool calls we react to. (a) submit_review_findings (review mode): capture findings — ROOT
+          // only, as a form of result capture. (b) newTask (orchestrator): note the spawn so the binder
+          // adopts the child that follows. Adoption spans the WHOLE tree so a subtask's own newTask (a
+          // grandchild) is adopted too; only an owned task's spawn arms it (noteSpawnFrom), so a user
+          // chat can't inject one.
           if (say === "tool" && text && !partial) {
             try {
               const parsed = JSON.parse(text);
-              if (parsed.tool === "submit_review_findings" && Array.isArray(parsed.issues)) {
+              if (isRoot && parsed.tool === "submit_review_findings" && Array.isArray(parsed.issues)) {
                 // Append, don't overwrite: Bob may emit findings across multiple
                 // submit_review_findings calls (e.g. high-severity then low) — last-wins
                 // assignment would silently drop the earlier batches. Capped so a flood can't grow
@@ -378,14 +422,19 @@ export class BobClient {
                   0,
                   MAX_REVIEW_FINDINGS,
                 );
+              } else if (parsed.tool === "newTask") {
+                this.binder.noteSpawnFrom(taskId, ts);
               }
             } catch {
               // Ignore parse errors; text may be incomplete or not JSON
             }
           }
 
-          this.active.onEvent?.(name, { say, ask, text, partial, ts });
-        } else if (!cline && !isForeignTask) {
+          // onEvent runs the worker's approve/reject/answer gates; keep it ROOT-only so a subtask's
+          // prompt is never auto-pressed (deliberately deferred). Subtask events still drove budget +
+          // the idle window above.
+          if (isRoot) this.active.onEvent?.(name, { say, ask, text, partial, ts });
+        } else if (!cline && isRoot) {
           // A lifecycle-only event (no message) isn't counted as progress: a wedge on an ask emits
           // no messages, so letting these reset the idle window would mask exactly what we watch for.
           this.active.onEvent?.(name, {});
@@ -395,12 +444,24 @@ export class BobClient {
       // Report every lifecycle event (even while idle), flagging whether it's
       // our own dispatch so callers can detect external chat activity.
       if (taskId && this.observer && /taskCreated|taskStarted|taskCompleted|taskAborted/i.test(name)) {
-        const isOwn = !!(this.active && this.active.ourTaskId && taskId === this.active.ourTaskId);
+        // Own = anywhere in our dispatch's task tree (the bound root or an adopted subtask), so an
+        // orchestrator's subtasks don't read as external chat activity and spuriously trip defer. A
+        // genuine user chat has no newTask provenance, isn't owned, and still defers correctly.
+        const isOwn = this.binder.isOwned(taskId);
         this.observer({ name, taskId, isOwn });
       }
 
-      // Only settle for our task; ignore a prior task aborting on tab reuse.
       const terminal = /taskCompleted|taskAborted/i.test(name);
+      // Bound the owned tree and self-correct a mis-adoption when an ADOPTED subtask (an owned task
+      // that isn't our root) reaches a terminal. A real subtask's FINAL terminal is taskAborted (the
+      // orchestrator pops it after it completes), so release only then — a post-completion event of
+      // this id still reads isOwn=true above and can't bump the defer idle-window. A task that
+      // COMPLETED as top-level (isSubtask:false) but isn't our root was wrongly adopted in the
+      // newTask→create race; un-own it so defer treats it correctly from here.
+      if (terminal && taskId && taskId !== this.binder.taskId && this.binder.isOwned(taskId)) {
+        if (/taskAborted/i.test(name) || parseIsSubtask(payload) === false) this.binder.releaseChild(taskId);
+      }
+      // Only settle for our task; ignore a prior task aborting on tab reuse.
       if (this.active && terminal && this.active.ourTaskId && taskId === this.active.ourTaskId) {
         this.finish(/taskAborted/i.test(name) ? "aborted" : "completed");
       }

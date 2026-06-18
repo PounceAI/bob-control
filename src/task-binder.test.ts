@@ -108,3 +108,118 @@ test("under a flood of foreign chats, recent ids stay foreign (set is bounded, n
   b.observe(CREATE, "ours");
   assert.equal(b.taskId, "ours");
 });
+
+// ── Owned subtask tree (orchestrator) ─────────────────────────────────────────────────────────
+
+test("adopts a subtask spawned (newTask) by our task into the owned tree", () => {
+  const b = new TaskBinder();
+  b.arm();
+  b.observe(CREATE, "root");
+  assert.equal(b.taskId, "root");
+  assert.ok(b.isOwned("root"));
+  b.noteSpawnFrom("root"); // our task fired the newTask tool
+  b.observe(CREATE, "sub"); // its child arrives next
+  assert.ok(b.isOwned("sub")); // adopted as ours
+  assert.equal(b.taskId, "root"); // root binding unchanged — a subtask never rebinds the dispatch
+});
+
+test("a chat with no newTask provenance is NOT adopted (the safety property)", () => {
+  const b = new TaskBinder();
+  b.arm();
+  b.observe(CREATE, "root");
+  b.observe(CREATE, "chat"); // appears mid-dispatch, but no spawn announced
+  assert.equal(b.isOwned("chat"), false); // stays foreign — we must never auto-act on a user chat
+});
+
+test("noteSpawnFrom from a non-owned task does nothing (can't be tricked by a chat)", () => {
+  const b = new TaskBinder();
+  b.arm();
+  b.observe(CREATE, "root");
+  b.noteSpawnFrom("chat"); // a foreign task 'spawning' must not arm adoption
+  b.observe(CREATE, "chat");
+  assert.equal(b.isOwned("chat"), false);
+});
+
+test("the spawn expectation is one-shot: only the immediate next create is adopted", () => {
+  const b = new TaskBinder();
+  b.arm();
+  b.observe(CREATE, "root");
+  b.noteSpawnFrom("root");
+  b.observe(CREATE, "sub1"); // adopted
+  b.observe(CREATE, "sub2"); // not adopted — expectation already consumed
+  assert.ok(b.isOwned("sub1"));
+  assert.equal(b.isOwned("sub2"), false);
+});
+
+test("a subtask spawning a grandchild extends the tree (owned task can spawn)", () => {
+  const b = new TaskBinder();
+  b.arm();
+  b.observe(CREATE, "root");
+  b.noteSpawnFrom("root");
+  b.observe(CREATE, "sub");
+  b.noteSpawnFrom("sub"); // the subtask (owned) spawns its own child
+  b.observe(CREATE, "grandchild");
+  assert.ok(b.isOwned("grandchild"));
+});
+
+test("arm() clears the owned tree for the next dispatch", () => {
+  const b = new TaskBinder();
+  b.arm();
+  b.observe(CREATE, "root");
+  b.noteSpawnFrom("root");
+  b.observe(CREATE, "sub");
+  b.observe(DONE, "sub"); // subtask done; root unaffected
+  assert.equal(b.taskId, "root");
+  b.disarm();
+  b.arm();
+  assert.equal(b.taskId, null);
+  assert.equal(b.isOwned("root"), false);
+  assert.equal(b.isOwned("sub"), false);
+});
+
+test("noteSpawnFrom while unarmed is a no-op", () => {
+  const b = new TaskBinder();
+  b.noteSpawnFrom("anything");
+  b.arm();
+  b.observe(CREATE, "x"); // would be the root, not an adopted child
+  assert.equal(b.taskId, "x");
+  assert.ok(b.isOwned("x"));
+});
+
+test("releaseChild drops an adopted subtask but never the bound root", () => {
+  const b = new TaskBinder();
+  b.arm();
+  b.observe(CREATE, "root");
+  b.noteSpawnFrom("root");
+  b.observe(CREATE, "sub");
+  assert.ok(b.isOwned("sub"));
+  b.releaseChild("sub");
+  assert.equal(b.isOwned("sub"), false); // subtask popped → owned stays bounded
+  b.releaseChild("root"); // must NOT drop the root
+  assert.ok(b.isOwned("root"));
+  assert.equal(b.taskId, "root");
+});
+
+test("a re-emitted newTask frame (same ts) does not re-arm the adoption one-shot", () => {
+  const b = new TaskBinder();
+  b.arm();
+  b.observe(CREATE, "root");
+  b.noteSpawnFrom("root", 7); // spawn announced (ts 7)
+  b.observe(CREATE, "sub"); // child adopted, one-shot consumed
+  assert.ok(b.isOwned("sub"));
+  b.noteSpawnFrom("root", 7); // SAME frame re-emitted — must not re-arm
+  b.observe(CREATE, "chat"); // so an unrelated create is NOT mis-adopted
+  assert.equal(b.isOwned("chat"), false);
+});
+
+test("a genuine second spawn (new ts) re-arms and adopts the next child", () => {
+  const b = new TaskBinder();
+  b.arm();
+  b.observe(CREATE, "root");
+  b.noteSpawnFrom("root", 1);
+  b.observe(CREATE, "subA");
+  b.noteSpawnFrom("root", 2); // different ts → real second spawn
+  b.observe(CREATE, "subB");
+  assert.ok(b.isOwned("subA"));
+  assert.ok(b.isOwned("subB"));
+});
