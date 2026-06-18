@@ -231,7 +231,10 @@ test("a subtask spawning its own newTask adopts the grandchild into the tree (ne
  * test can assert which task id was targeted. This proves the bob-ipc routing + approve(taskId)
  * targeting; the gate decision logic itself is unit-tested in permission-gate/command-gate tests.
  */
-async function runAutoApproving(events: Array<ReturnType<typeof taskEvent>>): Promise<{
+async function runAutoApproving(
+  events: Array<ReturnType<typeof taskEvent>>,
+  onCommand?: (client: BobClient, taskId: string | undefined) => void,
+): Promise<{
   result: DispatchResult;
   presses: Array<{ cmd: string; target: unknown }>;
   commandAsks: Array<string | undefined>;
@@ -275,7 +278,10 @@ async function runAutoApproving(events: Array<ReturnType<typeof taskEvent>>): Pr
       onEvent: (_name, { ask, taskId }) => {
         if (ask === "command") {
           commandAsks.push(taskId);
-          client.approve(taskId); // stand in for the permission gate auto-approving
+          // Default stands in for the permission gate auto-approving; a test may override to exercise
+          // the press-target guard (e.g. press a non-owned id).
+          if (onCommand) onCommand(client, taskId);
+          else client.approve(taskId);
         }
       },
     });
@@ -337,4 +343,30 @@ test("a chat mis-adopted in the race is NOT pressed once it self-corrects (un-ow
   assert.equal(result.status, "completed");
   assert.deepEqual(commandAsks, []); // the un-owned chat's command ask is not routed
   assert.equal(presses.length, 0);
+});
+
+test("a press to a non-owned task id is dropped at the choke point (late/stale verdict guard)", async () => {
+  // Defense in depth (resolvePressTarget): even if a gate's verdict presses an id that is no longer in
+  // the owned tree — e.g. an async classifier approve that resolves after the task completed/
+  // self-corrected — approve()/reject() drop it. A legitimate owned-subtask press still goes through.
+  const { result, presses } = await runAutoApproving(
+    [
+      taskEvent("taskCreated", ["root"]),
+      taskEvent("taskStarted", ["root"]),
+      msg("root", { say: "tool", text: JSON.stringify({ tool: "newTask", mode: "Code", content: "go" }), ts: 1 }),
+      taskEvent("taskCreated", ["sub"]),
+      taskEvent("taskStarted", ["sub"]),
+      msg("sub", { ask: "command", text: "pytest -q", ts: 2 }),
+      taskEvent("taskCompleted", ["sub", {}, {}, { isSubtask: true }]),
+      taskEvent("taskCompleted", ["root", {}, {}, { isSubtask: false }]),
+    ],
+    (client, taskId) => {
+      client.approve("ghost-never-owned"); // never adopted → must be dropped
+      client.approve(taskId); // the real owned subtask → goes through
+    },
+  );
+
+  assert.equal(result.status, "completed");
+  assert.equal(presses.length, 1); // the ghost press was dropped, the owned one sent
+  assert.equal(presses[0].target, "sub");
 });

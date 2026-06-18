@@ -439,9 +439,14 @@ export class BobClient {
           // adopted, owned task — a genuine user chat (no newTask provenance) is never owned, and a chat
           // mis-adopted in the create race is un-owned the instant it completes top-level (Increment 1).
           // ONLY command asks cross over: a subtask's followup/mode-switch ask is deliberately NOT routed
-          // (avoids auto-answering a user's conversation). Residual: a chat mis-adopted in the sub-second
-          // window before its top-level completion could be pressed — bounded by the gate's conservatism
-          // (allowlist-approve / deny+surface) and the tininess of the race.
+          // (avoids auto-answering a user's conversation). Residual (irreducible worker-side — Bob gives
+          // no parent id at create time, so a create-race mis-adoption can't be told from a real subtask
+          // until it self-corrects): a chat mis-adopted in the sub-second window BEFORE its top-level
+          // completion could be pressed. If that command is allowlisted OR classifier-approved it would be
+          // AUTO-RUN (not merely rejected) in the user's chat. Bounded by the tininess of the race (the
+          // user must start a chat AND have its first action be a command ask within the newTask→create
+          // window) and by inheriting the existing gate opt-in. resolvePressTarget() additionally drops a
+          // LATE press once the task un-owns, closing the async-verdict variant.
           const routeToGates = isRoot || (!partial && ask !== undefined && isCommandAsk(ask));
           if (routeToGates) this.active.onEvent?.(name, { say, ask, text, partial, ts, taskId });
         } else if (!cline && isRoot) {
@@ -594,23 +599,41 @@ export class BobClient {
    * relying on the patch's sole-runner fallback.
    */
   approve(taskId?: string): void {
-    if (!this.active) return; // no dispatch in flight — don't press a stray button
+    const target = this.resolvePressTarget(taskId);
+    if (target === undefined) return; // no dispatch in flight, or target no longer ours — drop the press
     this.send({
       type: "TaskCommand",
       origin: "client",
       clientId: this.clientId,
-      data: { commandName: "PressPrimaryButton", data: taskId ?? this.active.ourTaskId },
+      data: { commandName: "PressPrimaryButton", data: target },
     });
   }
 
   reject(taskId?: string): void {
-    if (!this.active) return; // no dispatch in flight — don't press a stray button
+    const target = this.resolvePressTarget(taskId);
+    if (target === undefined) return; // no dispatch in flight, or target no longer ours — drop the press
     this.send({
       type: "TaskCommand",
       origin: "client",
       clientId: this.clientId,
-      data: { commandName: "PressSecondaryButton", data: taskId ?? this.active.ourTaskId },
+      data: { commandName: "PressSecondaryButton", data: target },
     });
+  }
+
+  /**
+   * Validate a press target at PRESS time (the single choke point for approve/reject). Returns the id
+   * to press, or `undefined` to DROP the press. Drops when no dispatch is in flight, or when a non-root
+   * id is no longer in the owned tree — so a verdict that lands LATE (an async classifier approve that
+   * resolves after the subtask completed, or a mis-adopted chat that self-corrected) can't land a press
+   * on a now-foreign task. The bound root is always owned during an active dispatch, so a legitimate
+   * root/subtask press is never blocked. `null` (pre-bind root) is still sendable (the patch's
+   * sole-runner fallback), distinct from `undefined` (drop).
+   */
+  private resolvePressTarget(taskId?: string): string | null | undefined {
+    if (!this.active) return undefined;
+    const target = taskId ?? this.active.ourTaskId;
+    if (target && target !== this.active.ourTaskId && !this.binder.isOwned(target)) return undefined;
+    return target;
   }
 
   /**
