@@ -25,6 +25,7 @@ import { BobClient, resolvePipe, type DispatchResult } from "./bob-ipc.js";
 import { formatReviewFindings, parseReviewFindings } from "./review-findings.js";
 import { createPollLoop, defaultVerify, defaultCaptureSnapshot, type VerifyResult } from "./bob-polls.js";
 import { ExternalActivity } from "./defer.js";
+import { PollStatusLatch } from "./worker-status.js";
 import { notify } from "./notify.js";
 import { shouldRetry, executeRetry } from "./retry-policy.js";
 import {
@@ -1058,9 +1059,11 @@ async function main(): Promise<void> {
           : "gate OFF (commands fall back to the idle-watchdog backstop)"
     }.`,
   );
-  let idled = false;
-  let deferring = false;
-  let disarmed = false;
+  // One latch for the worker's between-dispatch status so each state is announced once and
+  // re-announced when re-entered. Replaces three separate idled/deferring/disarmed booleans, whose
+  // independent resets let the status stick (resume cleared `deferring` but not `idled`, so idle was
+  // never re-emitted and the UI stuck on "running"). See worker-status.ts.
+  const pollStatus = new PollStatusLatch();
   while (!stopping) {
     // Sweep stale board questions so a needs_input task whose asker died still times out.
     if (!opts.dryRun) repo.expireOverdueQuestions();
@@ -1073,35 +1076,31 @@ async function main(): Promise<void> {
         console.log("bob-worker: board disarmed — nothing to dispatch (--once); exiting.");
         break;
       }
-      if (!disarmed) {
+      if (pollStatus.enter("disarmed")) {
         console.log("bob-worker: board disarmed — dispatch paused (arm the board to resume).");
         emit(opts, "idle", { disarmed: true });
-        disarmed = true;
       }
       await sleep(opts.pollMs);
       continue;
     }
-    if (disarmed) {
+    if (pollStatus.is("disarmed")) {
+      // Board re-armed; the next status (defer/idle/active) re-announces below since it differs.
       console.log("bob-worker: board armed — resuming.");
-      disarmed = false;
-      idled = false;
     }
 
     // Defer while the user is chatting with Bob, checked before any dispatch so a
     // live conversation is never aborted by our same-tab StartNewTask.
     if (opts.defer && !opts.dryRun && external.shouldDefer(opts.deferIdleMs)) {
-      if (!deferring) {
+      if (pollStatus.enter("deferred")) {
         console.log("bob-worker: deferring — Bob chat active (Ctrl-C to stop).");
         emit(opts, "deferred", {});
-        deferring = true;
       }
       await sleep(opts.pollMs);
       continue;
     }
-    if (deferring) {
+    if (pollStatus.is("deferred")) {
       console.log("bob-worker: chat idle — resuming.");
       emit(opts, "resumed", {});
-      deferring = false;
     }
 
     const { task, gated, blocked } = pickEligible(opts);
@@ -1116,17 +1115,18 @@ async function main(): Promise<void> {
         console.log(`bob-worker: no eligible pending tasks — exiting (--once)${gatedMsg}${blockedMsg}.`);
         break;
       }
-      if (!idled) {
+      // enter("idle") is true after any other status (active/deferred/disarmed) too, so the status
+      // line returns to idle once a dispatch or a defer ends — the fix for the stuck-"running" bug.
+      if (pollStatus.enter("idle")) {
         console.log(
           `bob-worker: no eligible tasks — idle-polling every ${opts.pollMs}ms${gatedMsg}${blockedMsg}. (Ctrl-C to stop)`,
         );
         emit(opts, "idle", { gated, blocked });
-        idled = true;
       }
       await sleep(opts.pollMs);
       continue;
     }
-    idled = false;
+    pollStatus.enter("active");
     try {
       await runOne(client, task, opts, patchPresent);
     } catch (err) {
