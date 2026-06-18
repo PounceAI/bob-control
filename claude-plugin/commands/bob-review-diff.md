@@ -1,12 +1,14 @@
 ---
-description: Send the diff you just made to Bob for a read-only (ask-mode) code review
+description: Send the diff you just made to Bob for a read-only code review (Bob's native review mode)
 argument-hint: "[optional: a focus note, or a git ref range like main...HEAD]"
 allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), mcp__bob-tasks__create_task, mcp__bob-tasks__get_task, mcp__bob-tasks__list_tasks, mcp__bob-tasks__await_task, mcp__bob-tasks__board_status
 ---
 
 You are the **foreman**. The user wants **Bob** to code-review the changes that were just
-made in this repo (typically the ones *you* made this session). Bob reviews in read-only
-`ask` mode — it never edits; it returns a findings list.
+made in this repo (typically the ones *you* made this session). Bob reviews in its read-only
+`review` mode — it never edits; it returns a structured findings list. Under headless dispatch the
+worker parses those findings onto the **board** (the task `result` plus a `bob-review` note), so
+they come back to you — you don't need Bob's webview panel.
 
 Optional argument (focus note, or an explicit git ref range):
 
@@ -29,8 +31,10 @@ Do this:
      and state clearly in the task that it was truncated (and to what).
 
 2. **File the review task** with `create_task`:
-   - **mode**: `review` — Bob's **native code-review mode**. It runs read-only and writes
-     structured issues to Bob's **findings panel**, many with a suggested `fixed_diff`.
+   - **mode**: `review` — Bob's **native code-review mode**. It runs read-only and returns
+     structured findings (severity / location / category, many with a suggested `fixed_diff`);
+     under headless dispatch the worker writes them to the **board** (task `result` + a
+     `bob-review` note), not Bob's webview panel.
    - **title**: `Code review: <short summary of the change>` (imperative, specific).
    - **tags**: `['code-review', 'review']`.
    - **priority**: `high` if the user signals urgency, else `medium`.
@@ -46,8 +50,7 @@ Do this:
    and Bob settles it**, so the review comes back in this same turn:
    - `analysis_done` (or `done`) → the full review is in the task **`result`** plus a structured
      **`bob-review` note** (severity / location / category, with any `fixed_diff`). Surface the
-     findings. **Note:** under headless dispatch review mode returns the review as completion
-     text, not to Bob's webview panel — the board is the source of truth.
+     findings, correctness issues first.
    - `waiting` (poll window elapsed) → call `await_task` again; keep waiting while Bob works. If
      it stays `waiting` across several calls, **no worker is draining the board** — tell the user
      it's **queued as #id** and to start the worker (`npm run worker`) or check `/bob-board`.

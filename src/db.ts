@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Task, TaskNote, TaskStatus, TaskPriority, TaskArtifact, ArtifactKind, TaskCheckpoint } from "./types.js";
-import { CLAIMABLE_STATUS, isCompleted, TASK_STATUSES } from "./types.js";
+import { CLAIMABLE_STATUS, isCompleted, isFinished, TASK_STATUSES } from "./types.js";
 import { estimateTaskScope } from "./scope.js";
 import { looksLikeImplementation } from "./modes.js";
 
@@ -506,6 +506,41 @@ export function listTasks(opts: ListTasksOptions = {}): Task[] {
     if (opts.limit) rows = rows.slice(0, opts.limit);
   }
   return rows;
+}
+
+/** A task narrowed to the fields needed to dedup or glance at the board — no description, result, or
+ *  timestamps. board_status returns these inline as open_tasks. */
+export interface OpenTaskRow {
+  id: number;
+  title: string;
+  status: TaskStatus;
+  mode: string | null;
+  tags: string[];
+  priority: TaskPriority;
+}
+
+/**
+ * The live (non-terminal) tasks as compact rows, capped at `cap`. Live = not isFinished:
+ * staged / pending / in_progress / needs_input / blocked — the set to dedup a new task against.
+ * When more than `cap` are live it keeps the most recently created (the likeliest dedup targets)
+ * and sets `truncated` so the caller can fall back to listTasks. Tags are copied, not aliased.
+ * Takes an already-loaded task array (board_status loads every task for its counts) so it adds no query.
+ */
+export function selectOpenTasks(tasks: Task[], cap: number): { open_tasks: OpenTaskRow[]; truncated: boolean } {
+  const open = tasks.filter((t) => !isFinished(t.status));
+  // listTasks hands us oldest-first; a just-filed near-duplicate (what a dedup scan is hunting) is
+  // newest, so when we must drop some, keep the most recently created rather than head-slicing it off.
+  const kept =
+    open.length > cap ? [...open].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, cap) : open;
+  const open_tasks = kept.map((t) => ({
+    id: t.id,
+    title: t.title,
+    status: t.status,
+    mode: t.mode,
+    tags: [...t.tags], // copy so a caller mutating a row can't corrupt the live Task's tags
+    priority: t.priority,
+  }));
+  return { open_tasks, truncated: open.length > cap };
 }
 
 // ---------------------------------------------------------------------------
