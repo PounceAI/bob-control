@@ -542,11 +542,9 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
         tokenCeiling,
         turnCap,
         onEvent: (name, { say, ask, text, partial, ts, taskId, isRoot }) => {
-          // Capture the ask (see seenAsk). ROOT-only: seenAsk feeds the root dispatch's idle-recovery
-          // needs_input, so a routed SUBTASK command ask (which the gates press/surface themselves)
-          // must not land here — else an idle trip would surface the subtask's command as the root
-          // task's blocker. Clear only on a real non-ask root message; a message-less lifecycle event
-          // (say/ask/text all absent) isn't progress and mustn't drop it.
+          // Capture the ask for the root's idle-recovery needs_input — ROOT-only, so a routed subtask
+          // command ask (the gates handle it) isn't mis-surfaced as the root's blocker. Clear only on a
+          // real non-ask root message; a message-less lifecycle event isn't progress and mustn't drop it.
           if (isRoot) {
             if (ask) {
               const t = (text ?? "").trim();
@@ -565,8 +563,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
           // Deterministic permission gate FIRST (no LLM/human): it approves allowlisted commands and
           // rejects+surfaces (needs_input) + ends the dispatch on a deny/unknown. Only an unrecognised
           // command WITH the classifier enabled is handed on to the LLM command-gate.
-          // `taskId` (the task that raised the ask — the root, or an owned subtask) flows to the
-          // command gates so an approve/reject presses that task's own webview instance.
+          // taskId (the task that raised the ask) flows to the gates so a press targets its own instance.
           let pv: PermissionVerdict = "ignored";
           try {
             pv = permissionGate({ ask, text, partial, ts, taskId });
@@ -1066,10 +1063,8 @@ async function main(): Promise<void> {
           : "gate OFF (commands fall back to the idle-watchdog backstop)"
     }.`,
   );
-  // One latch for the worker's between-dispatch status so each state is announced once and
-  // re-announced when re-entered. Replaces three separate idled/deferring/disarmed booleans, whose
-  // independent resets let the status stick (resume cleared `deferring` but not `idled`, so idle was
-  // never re-emitted and the UI stuck on "running"). See worker-status.ts.
+  // One latch for the between-dispatch status (announce once per entry, re-announce on return). See
+  // worker-status.ts for why three separate booleans drifted and stuck the status on "running".
   const pollStatus = new PollStatusLatch();
   while (!stopping) {
     // Sweep stale board questions so a needs_input task whose asker died still times out.
@@ -1122,8 +1117,8 @@ async function main(): Promise<void> {
         console.log(`bob-worker: no eligible pending tasks — exiting (--once)${gatedMsg}${blockedMsg}.`);
         break;
       }
-      // enter("idle") is true after any other status (active/deferred/disarmed) too, so the status
-      // line returns to idle once a dispatch or a defer ends — the fix for the stuck-"running" bug.
+      // enter("idle") returns true after any other status too, so idle is re-announced once a
+      // dispatch or defer ends (see worker-status.ts).
       if (pollStatus.enter("idle")) {
         console.log(
           `bob-worker: no eligible tasks — idle-polling every ${opts.pollMs}ms${gatedMsg}${blockedMsg}. (Ctrl-C to stop)`,

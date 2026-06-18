@@ -1,8 +1,7 @@
-// Shared in-process IPC test harness for the BobClient integration tests (bob-ipc-foreign.test.ts,
-// bob-ipc-subtask.test.ts). Encodes Bob's wire protocol once — the "\f" frame delimiter, the
-// {type:"TaskEvent",data:{eventName,payload}} envelope, the Ack/StartNewTask handshake — so a
-// wire-format change is a single edit and the two suites can't drift apart. Drives a real net pipe;
-// events are flushed synchronously once StartNewTask is seen, so assertions are timer-free.
+// Shared in-process IPC test harness for the BobClient integration suites. Encodes Bob's wire
+// protocol once — the "\f" delimiter, the {type:"TaskEvent",data:{eventName,payload}} envelope, the
+// Ack/StartNewTask handshake — so it lives in one place. Real net pipe; events flush synchronously on
+// StartNewTask, so assertions are timer-free.
 import net from "node:net";
 import os from "node:os";
 import { BobClient, type TaskLifecycleEvent, type DispatchResult } from "./bob-ipc.js";
@@ -59,19 +58,16 @@ export interface RunOptions {
   tokenCeiling?: number;
   turnCap?: number;
   /**
-   * Invoked for every command ask onEvent surfaces — stands in for the worker's permission gate.
-   * Omit to observe WITHOUT pressing (the default); pass e.g. `(c, id) => c.approve(id)` to exercise
-   * the press path. Receives the live client so the test can press a specific task id.
+   * Called for each command ask (stands in for the permission gate). Omit to observe without pressing;
+   * pass e.g. `(c, id) => c.approve(id)` to exercise the press path.
    */
   onCommand?: (client: BobClient, taskId: string | undefined) => void;
 }
 
 /**
- * Drive a sequence of pre-canned Bob events through one dispatch over a real in-process pipe and
- * return everything a test asserts on: the settled result, the lifecycle events the defer-observer
- * saw (with isOwn), the events the worker's onEvent gate callback received, and any button presses
- * the client sent back. Parses incoming frames properly (DELIM-split) so a press sent mid-flush is
- * captured. Synchronous flush + no timers → deterministic.
+ * Run one dispatch over a fresh pipe, flushing `events` on StartNewTask, and return what tests assert
+ * on: the settled result, the observer's lifecycle events (with isOwn), the onEvent callbacks, and the
+ * button presses the client sent back (captured by DELIM-splitting incoming frames).
  */
 export async function runDispatch(events: TaskEventFrame[], opts: RunOptions = {}): Promise<RunResult> {
   const path = pipePath();

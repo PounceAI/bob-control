@@ -1,9 +1,7 @@
-// The worker surfaces exactly one "between-dispatch" status at a time. Tracking each with its own
-// boolean (idled / deferring / disarmed) let them drift: a resume from defer cleared `deferring`
-// but not `idled`, so the loop never re-announced idle and the extension's status line stuck on
-// "running". A single current-status latch can't desync that way — returning to a status after a
-// different one always re-announces it. Extracted from worker.ts so the loop's status transitions
-// are unit-testable against the real implementation rather than a copy.
+// The worker surfaces exactly one "between-dispatch" status at a time. Three separate booleans
+// (idled/deferring/disarmed) drifted: a resume from defer cleared `deferring` but not `idled`, so the
+// loop never re-announced idle and the status line stuck on "running". One current-status latch can't
+// desync — returning to a status after a different one always re-announces it.
 
 /**
  * The mutually-exclusive status the worker shows while polling between dispatches. "active" means a

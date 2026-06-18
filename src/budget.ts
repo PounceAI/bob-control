@@ -46,13 +46,10 @@ export function parseApiReqUsage(text: string | undefined): Partial<ApiUsage> | 
 }
 
 /**
- * Accumulates per-request usage across a dispatch. Bob re-emits one api request's say as it streams
- * (same key, growing counts), so we key each request and keep the latest (last-wins) rather than
- * summing the re-emissions; distinct keys are distinct requests (= turns). The key is the message's
- * `ts`, but the caller may pass a COMPOSITE (e.g. `taskId:ts`) so that an orchestrator root and a
- * subtask whose api_req frames land on the same millisecond `ts` count as two requests, not one
- * (last-wins would otherwise drop one and undercount the tree). Messages with no key fold into a
- * single anonymous slot so a re-emission there can't inflate the total either.
+ * Accumulates per-request usage. A request's say is re-emitted as it streams (same key, growing
+ * counts), so we key each and keep the latest (last-wins); distinct keys = distinct requests (turns).
+ * The key is the message `ts`, or a `taskId:ts` composite so a root and a subtask sharing a ms ts
+ * count as two, not one. Keyless messages fold into one anonymous slot.
  */
 export class BudgetTracker {
   private byKey = new Map<string | number, ApiUsage>();

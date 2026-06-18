@@ -20,23 +20,17 @@ export class TaskBinder {
   // Live task ids that are not part of our dispatch's tree. Bounded by MAX_FOREIGN: terminal
   // events delete entries, and overflow evicts the oldest, so it can't grow without bound.
   private foreign = new Set<string>();
-  // Our dispatch's task TREE: the bound root plus any subtask it spawned via a `newTask` tool call
-  // (see noteSpawnFrom). Membership is what makes a subtask "ours". A genuine concurrent user chat
-  // has no such provenance, so it never lands here — which is why we can safely treat owned tasks
-  // as not-foreign (don't defer for them; later, press their prompts) without auto-acting on a
-  // user's own chat.
+  // Our dispatch's task TREE: the bound root + subtasks it spawned via `newTask` (noteSpawnFrom).
+  // Membership = "ours". A user chat has no such provenance, so treating owned tasks as not-foreign
+  // (no defer; press their prompts) can't auto-act on a user's own chat.
   private owned = new Set<string>();
   private our: string | null = null;
   private armed = false;
-  // Count of announced-but-not-yet-created subtask spawns (`newTask` tool calls). Each adopts the
-  // NEXT new task id into our tree. A COUNT, not a one-shot boolean, so an orchestrator that fires
-  // several newTask calls before their children are created adopts each child rather than orphaning
-  // all but the first.
+  // Announced-but-not-yet-created subtask spawns; each adopts the next new task id. A count (not a
+  // boolean) so several newTask calls before their creates adopt every child, not just the first.
   private pendingChildren = 0;
-  // ts of every newTask frame already counted. A re-emitted/streamed-again spawn frame carries the
-  // SAME ts, so we skip it rather than count it twice (which would leave a trap that adopts an
-  // unrelated later create). A genuine second spawn has a new ts and is counted. (A frame with no
-  // numeric ts can't be re-emit-deduped; in practice Bob always sends a numeric ts — see noteSpawnFrom.)
+  // ts of every newTask frame already counted, so a re-emit (same ts) isn't counted twice; a genuine
+  // second spawn has a new ts. (Undefined ts can't be deduped; Bob always sends one — see noteSpawnFrom.)
   private spawnTsSeen = new Set<number>();
 
   /** Begin binding a new dispatch. Foreign set persists — open chats stay known. */
@@ -54,11 +48,8 @@ export class TaskBinder {
   }
 
   /**
-   * An owned task emitted a `newTask` tool call (orchestrator spawning a subtask). Count a pending
-   * adoption so the next taskCreated joins our tree. Only an OWNED task can spawn an owned child, so a
-   * user's own chat (never in `owned`) can't trick us into adopting one of its tasks. `ts` dedups a
-   * re-emitted spawn frame so it isn't counted twice (which would leave a stale pending adoption that
-   * grabs an unrelated later create).
+   * An owned task emitted a `newTask` tool call: count a pending adoption so the next taskCreated joins
+   * the tree. Only an owned task can spawn (a user chat is never in `owned`); `ts` dedups a re-emit.
    */
   noteSpawnFrom(taskId: string | undefined, ts?: number): void {
     if (!taskId) return;
@@ -71,20 +62,17 @@ export class TaskBinder {
   }
 
   /**
-   * True if the task id is part of our dispatch's tree (the bound root or an adopted subtask). Gated
-   * on `armed`: between dispatches (after disarm(), before the next arm() clears `owned`) ownership is
-   * meaningless, and a stale owned id must NOT read as ours — else the observer would flag a resumed
-   * prior-dispatch task isOwn=true and suppress defer for it (a same-tab clobber).
+   * True if the task id is in our dispatch's tree (root or adopted subtask). Gated on `armed`: between
+   * dispatches `owned` is stale, so a resumed prior task must read NOT-owned — else the observer would
+   * flag it isOwn=true and suppress defer (a same-tab clobber).
    */
   isOwned(taskId: string | undefined): boolean {
     return this.armed && taskId !== undefined && this.owned.has(taskId);
   }
 
   /**
-   * Drop an adopted subtask from the tree on its terminal, so `owned` stays bounded by the live
-   * subtask count instead of growing for the whole dispatch. Also used to undo a mis-adoption (a task
-   * that ended as a top-level task, not our subtask — the adoption race). Never drops the bound root
-   * (cleared only by the next arm()); no-op for unknown ids.
+   * Drop an adopted subtask on its terminal so `owned` stays bounded; also undoes a create-race
+   * mis-adoption. Never drops the root (cleared by arm()); no-op for unknown ids.
    */
   releaseChild(taskId: string | undefined): void {
     if (!taskId || taskId === this.our) return;
@@ -101,8 +89,7 @@ export class TaskBinder {
       this.our = taskId;
       this.owned.add(taskId);
     }
-    // Adopt a subtask: an owned task announced a `newTask` spawn (noteSpawnFrom) and here is the next
-    // new id — a child of our tree, not a foreign chat. Consumes one pending adoption.
+    // Adopt a subtask: a pending newTask spawn (noteSpawnFrom) and here's the next new id. Consumes one.
     else if (
       this.armed &&
       this.pendingChildren > 0 &&

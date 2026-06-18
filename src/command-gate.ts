@@ -150,13 +150,9 @@ export function createCommandGate(deps: GateDeps): (ev: GateEvent) => Promise<vo
     if (!isCommandAsk(ev.ask)) return Promise.resolve();
     const command = (ev.text ?? "").trim();
     if (!command) return Promise.resolve();
-    // Dedup by ASK IDENTITY (ts): Bob re-emits the same pending ask as it streams —
-    // those share a ts and are handled once. A genuine RE-RUN of the same command is a
-    // NEW ask with a new ts, so it's handled (and pressed) again. (The command +
-    // command_security_warning for one command share a ts too, so they dedup to one.)
-    // Fall back to command text only when no ts is available. The key is scoped by taskId so a
-    // root command and a same-text/same-ts SUBTASK command don't collide (they're distinct prompts
-    // on different tasks); a true re-emit shares taskId+ts and still dedups to one.
+    // Dedup by ask identity (ts): a re-emitted/streaming ask shares a ts (handled once); a genuine
+    // re-run gets a new ts (handled again). (command + command_security_warning share a ts → one.)
+    // Fall back to command text when no ts. Scope by taskId so root + same-text/same-ts subtask don't collide.
     const scope = ev.taskId ?? "";
     const key = ev.ts !== undefined ? `${scope}:ts:${ev.ts}` : `${scope}:cmd:${command}`;
     if (handled.has(key)) return Promise.resolve();

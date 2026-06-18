@@ -148,12 +148,9 @@ export function resolvePipe(p?: string): string {
 }
 
 /**
- * A taskCompleted payload is positional: [taskId, {tokens…}, {tool counts…}, {isSubtask:boolean}].
- * Return the isSubtask flag if present, else undefined. taskAborted carries just [taskId], so it
- * yields undefined there. Callers MUST handle undefined explicitly rather than treat it as a value:
- * the terminal-release below releases on `taskAborted` OR `isSubtask === false`, so a taskCompleted
- * that omits the flag (undefined) is intentionally NOT released — a real subtask is popped by its
- * later taskAborted, and the owned set clears on the next arm() regardless.
+ * taskCompleted payload is positional: [taskId, {tokens}, {tool counts}, {isSubtask}]. Returns the
+ * flag if present, else undefined (taskAborted carries just [taskId]). Callers must treat undefined
+ * as "unknown", not false — the terminal-release releases on taskAborted OR isSubtask===false.
  */
 export function parseIsSubtask(payload: unknown): boolean | undefined {
   if (!Array.isArray(payload)) return undefined;
@@ -335,16 +332,10 @@ export class BobClient {
         // (budget/watchdog/settle/approve), so mirror the bound id onto it.
         this.active.ourTaskId = this.binder.taskId;
 
-        // Two scopes, not one foreign/ours flag (see TaskBinder for the owned tree):
-        //   • isRoot — the bound root. Fail-open: an undefined or pre-bind id counts as root, so the
-        //     first frames before binding aren't dropped. Result-capture, the blocking-ask grace, and
-        //     the worker's onEvent gates are ROOT-only.
-        //   • isOwnTree — anywhere in our dispatch's tree: the root OR an adopted subtask/grandchild.
-        //     Budget, idle-progress, and newTask-adoption span the WHOLE tree.
-        // A genuine concurrent user chat is neither (no newTask provenance → never owned), so its
-        // messages fall through untouched and still defer. The split fixes two orchestrator hazards:
-        // a busy subtask emits no root events, so a root-only idle reset let the watchdog cancel a
-        // healthy dispatch, and a subtask's tokens escaped the budget ceiling entirely.
+        // Two scopes (see TaskBinder): isRoot = the bound root, fail-open for undefined/pre-bind ids;
+        // isOwnTree = root or an adopted subtask/grandchild. Result-capture, ask-grace and onEvent are
+        // root-only; budget, idle-progress and newTask-adoption span the tree. A user chat is neither
+        // (no newTask provenance), so it falls through and still defers.
         const isRoot = !(taskId && this.active.ourTaskId && taskId !== this.active.ourTaskId);
         const isOwnTree = isRoot || this.binder.isOwned(taskId);
 
@@ -356,23 +347,16 @@ export class BobClient {
           const say: string | undefined = cline.say ?? cline.ask;
           const text: string = String(cline.text ?? "");
           const partial = !!cline.partial;
-          // `ts` is the message's unique timestamp — the gates + budget tracker dedup on it so a
-          // re-emitted ask/usage is handled once while a genuine re-run (new ts) is handled again.
+          // Message timestamp; the gates + budget dedup on it (a re-emit shares ts, a re-run gets a new one).
           const ts: number | undefined = typeof cline.ts === "number" ? cline.ts : undefined;
-          // Result capture is ROOT-only: a subtask's completion_result is its own answer back to the
-          // orchestrator, not the dispatch's result, and would clobber lastCompletion/lastText.
+          // Root-only: a subtask's completion_result is its answer to the orchestrator, not the dispatch's.
           if (isRoot) {
             if (say === "completion_result" && text.trim()) this.active.lastCompletion = text;
             else if (text.trim()) this.active.lastText = text;
           }
 
-          // Budget backstop (WHOLE tree): accumulate token usage from Bob's per-request 'api_req_started'
-          // say (Roo updates that one frame in place with final token counts under the same ts) and abort
-          // cleanly once a runaway dispatch crosses the token ceiling (or turn cap). Counting subtasks too
-          // closes the gap where an orchestrator's children burned tokens off-budget. Key per request:
-          // a re-emit of one frame shares (taskId, ts) → last-wins (no double-count), while the root and a
-          // subtask whose frames land on the same millisecond ts stay distinct (no under-count). Keying on
-          // the single canonical 'started' event also avoids double-counting a separate finished frame.
+          // Budget backstop (whole tree): accumulate per-request output tokens and abort over ceiling/turns.
+          // Key by taskId:ts so a re-emit dedups (last-wins) but root and a subtask sharing a ts stay distinct.
           if (say === "api_req_started") {
             const usage = parseApiReqUsage(text);
             if (usage) {
@@ -390,18 +374,11 @@ export class BobClient {
             }
           }
 
-          // Idle / blocked-on-ask watchdog.
-          //   • A FINAL blocking ask arms the (short) grace — ROOT-only, since answering/pressing a
-          //     subtask's prompt is out of scope here. A subtask that wedges on an ask still recovers:
-          //     its last pre-ask message reset the window, which then elapses to a (full-window) trip.
-          //   • Any non-ask message ANYWHERE in the tree is progress and resets the idle window. This is
-          //     the starvation fix — a long subtask emits no root events, so the old root-only reset let
-          //     the watchdog cancel a healthy orchestrator mid-run. ASSUMPTION (behavioral, not protocol-
-          //     enforced): orchestrators delegate sequentially — the root is paused while a subtask runs
-          //     — so subtask progress and a live root ask don't overlap. If they ever did, a subtask's
-          //     activity() would clear the root's armed grace; worst case is then one FULL idle window
-          //     before the trip (delayed recovery), never indefinite starvation, since progress did stop.
-          // Partial ask fragments are ignored so a streaming prompt can't keep resetting the grace.
+          // Idle watchdog. A final blocking ask arms the short grace — root-only (we don't press a
+          // subtask's ask here; a wedged subtask still trips on the full window). Any non-ask message
+          // anywhere in the tree is progress and resets the window — the starvation fix. (Assumes
+          // sequential delegation: if a subtask emits while the root holds an ask, activity() clears the
+          // grace → at worst one full idle window, never indefinite.) Partial asks don't reset the grace.
           if (ask) {
             if (isRoot && !partial) {
               this.active.pendingAsk = ask;
@@ -417,19 +394,14 @@ export class BobClient {
             this.active.watchdog?.activity();
           }
 
-          // Tool calls we react to. (a) submit_review_findings (review mode): capture findings — ROOT
-          // only, as a form of result capture. (b) newTask (orchestrator): note the spawn so the binder
-          // adopts the child that follows. Adoption spans the WHOLE tree so a subtask's own newTask (a
-          // grandchild) is adopted too; only an owned task's spawn arms it (noteSpawnFrom), so a user
-          // chat can't inject one.
+          // submit_review_findings: capture (root-only, result capture). newTask: arm adoption of the
+          // next create — tree-wide, so a subtask's own newTask adopts a grandchild; only an owned
+          // task's spawn arms it, so a user chat can't inject one.
           if (say === "tool" && text && !partial) {
             try {
               const parsed = JSON.parse(text);
               if (isRoot && parsed.tool === "submit_review_findings" && Array.isArray(parsed.issues)) {
-                // Append, don't overwrite: Bob may emit findings across multiple
-                // submit_review_findings calls (e.g. high-severity then low) — last-wins
-                // assignment would silently drop the earlier batches. Capped so a flood can't grow
-                // the array without bound.
+                // Append across calls (Bob may emit findings in batches); capped so a flood can't grow unbounded.
                 this.active.reviewFindings = [...(this.active.reviewFindings ?? []), ...parsed.issues].slice(
                   0,
                   MAX_REVIEW_FINDINGS,
@@ -442,48 +414,32 @@ export class BobClient {
             }
           }
 
-          // onEvent runs the worker's approve/reject/answer gates. Route every ROOT event (as before),
-          // PLUS an owned SUBTASK's COMMAND permission ask — so a `pytest`-style prompt raised inside an
-          // orchestrator subtask is pressed/denied by the same gates instead of stalling until the idle
-          // watchdog. The press carries `taskId`, so it lands on the subtask's own webview instance.
-          // Guard (the safety property): we're inside `cline && isOwnTree`, so a non-root here is an
-          // adopted, owned task — a genuine user chat (no newTask provenance) is never owned, and a chat
-          // mis-adopted in the create race is un-owned the instant it completes top-level (Increment 1).
-          // ONLY command asks cross over: a subtask's followup/mode-switch ask is deliberately NOT routed
-          // (avoids auto-answering a user's conversation). Residual (irreducible worker-side — Bob gives
-          // no parent id at create time, so a create-race mis-adoption can't be told from a real subtask
-          // until it self-corrects): a chat mis-adopted in the sub-second window BEFORE its top-level
-          // completion could be pressed. If that command is allowlisted OR classifier-approved it would be
-          // AUTO-RUN (not merely rejected) in the user's chat. Bounded by the tininess of the race (the
-          // user must start a chat AND have its first action be a command ask within the newTask→create
-          // window) and by inheriting the existing gate opt-in. resolvePressTarget() additionally drops a
-          // LATE press once the task un-owns, closing the async-verdict variant.
+          // onEvent runs the worker's gates. Route every root event, plus an owned subtask's COMMAND
+          // ask (carrying taskId, so the press hits the subtask's own instance) so a pytest-style prompt
+          // is pressed instead of stalling. Command asks only — a subtask's followup/mode-switch ask
+          // isn't routed (no auto-answering a user's chat). Only owned tasks reach here; the create-race
+          // mis-adoption residual is documented in docs/defer-known-issues.md.
           const routeToGates = isRoot || (!partial && ask !== undefined && isCommandAsk(ask));
           if (routeToGates) this.active.onEvent?.(name, { say, ask, text, partial, ts, taskId, isRoot });
         } else if (!cline && isRoot) {
-          // A lifecycle-only event (no message) isn't counted as progress: a wedge on an ask emits
-          // no messages, so letting these reset the idle window would mask exactly what we watch for.
+          // Lifecycle-only event (no message): forward to onEvent but don't reset the idle window — a
+          // wedge on an ask emits no messages, so counting these as progress would mask the wedge.
           this.active.onEvent?.(name, { isRoot: true });
         }
       }
 
-      // Report every lifecycle event (even while idle), flagging whether it's
-      // our own dispatch so callers can detect external chat activity.
+      // Report every lifecycle event (even while idle) so callers can detect external chat activity.
       if (taskId && this.observer && /taskCreated|taskStarted|taskCompleted|taskAborted/i.test(name)) {
-        // Own = anywhere in our dispatch's task tree (the bound root or an adopted subtask), so an
-        // orchestrator's subtasks don't read as external chat activity and spuriously trip defer. A
-        // genuine user chat has no newTask provenance, isn't owned, and still defers correctly.
+        // isOwn = in our tree (root or adopted subtask), so subtasks don't read as external chat and
+        // trip defer; a user chat (no newTask provenance) isn't owned and still defers.
         const isOwn = this.binder.isOwned(taskId);
         this.observer({ name, taskId, isOwn });
       }
 
       const terminal = /taskCompleted|taskAborted/i.test(name);
-      // Bound the owned tree and self-correct a mis-adoption when an ADOPTED subtask (an owned task
-      // that isn't our root) reaches a terminal. A real subtask's FINAL terminal is taskAborted (the
-      // orchestrator pops it after it completes), so release only then — a post-completion event of
-      // this id still reads isOwn=true above and can't bump the defer idle-window. A task that
-      // COMPLETED as top-level (isSubtask:false) but isn't our root was wrongly adopted in the
-      // newTask→create race; un-own it so defer treats it correctly from here.
+      // Release an adopted subtask on its terminal so `owned` stays bounded: a real subtask's final
+      // terminal is taskAborted; a non-root task that completed top-level (isSubtask:false) was a
+      // create-race mis-adoption — un-own it either way. releaseChild never drops the root.
       if (terminal && taskId && taskId !== this.binder.taskId && this.binder.isOwned(taskId)) {
         if (/taskAborted/i.test(name) || parseIsSubtask(payload) === false) this.binder.releaseChild(taskId);
       }
@@ -595,19 +551,13 @@ export class BobClient {
   }
 
   /**
-   * Answer a pending approval (e.g. a command ask): primary = approve/run,
-   * secondary = reject. Requires the Bob IPC button patch (tools/patch-bob-buttons.mjs)
-   * — without it Bob's IPC switch ignores these commandNames.
+   * Answer a pending approval: primary = approve/run, secondary = reject. Requires the Bob button
+   * patch (tools/patch-bob-buttons.mjs) — without it the IPC switch ignores these commands.
    *
-   * We send a Bob task id as the command `data`: the patch presses ONLY the webview
-   * instance whose `getCurrentTask().taskId` matches it (else the sole running instance),
-   * so the press lands on the instance actually showing the prompt and never on an idle
-   * one (an idle-sidebar press aborts a --new-tab task). If no instance owns the task,
-   * the patch no-ops rather than guessing.
-   *
-   * `taskId` defaults to the bound root; pass an owned SUBTASK's id to press the instance
-   * showing that subtask's prompt (an orchestrator's command ask), which is more precise than
-   * relying on the patch's sole-runner fallback.
+   * The `data` task id selects which webview to press: the patch presses the instance whose
+   * getCurrentTask().taskId matches (else the sole running instance, else no-op), so it never presses
+   * an idle sidebar (which would abort a --new-tab task). Defaults to the bound root; pass an owned
+   * subtask's id to press that subtask's prompt directly rather than via the sole-runner fallback.
    */
   approve(taskId?: string): void {
     const target = this.resolvePressTarget(taskId);
@@ -632,13 +582,11 @@ export class BobClient {
   }
 
   /**
-   * Validate a press target at PRESS time (the single choke point for approve/reject). Returns the id
-   * to press, or `undefined` to DROP the press. Drops when no dispatch is in flight, or when a non-root
-   * id is no longer in the owned tree — so a verdict that lands LATE (an async classifier approve that
-   * resolves after the subtask completed, or a mis-adopted chat that self-corrected) can't land a press
-   * on a now-foreign task. The bound root is always owned during an active dispatch, so a legitimate
-   * root/subtask press is never blocked. `null` (pre-bind root) is still sendable (the patch's
-   * sole-runner fallback), distinct from `undefined` (drop).
+   * Resolve+validate a press target (the single choke point for approve/reject). Returns the id to
+   * press, or undefined to DROP it — no dispatch in flight, or a non-root id no longer owned, so a
+   * LATE verdict (async classifier, or a self-corrected mis-adoption) can't press a now-foreign task.
+   * The root is always owned mid-dispatch, so legitimate presses aren't blocked. `null` (pre-bind
+   * root) is still sendable, distinct from `undefined` (drop).
    */
   private resolvePressTarget(taskId?: string): string | null | undefined {
     if (!this.active) return undefined;
