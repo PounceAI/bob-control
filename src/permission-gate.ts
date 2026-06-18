@@ -64,9 +64,10 @@ export function createPermissionGate(deps: PermissionGateDeps): (ev: PermissionE
     // Checked BEFORE the dedup bookkeeping so an event we ignore for inactivity doesn't consume the
     // dedup key (a genuine re-emit once active would then be skipped).
     if (deps.isActive && !deps.isActive()) return "ignored";
-    // Dedup by ask identity (ts): Bob re-emits one pending ask as it streams (same ts); a genuine
-    // re-run of the same command arrives as a new ts. Fall back to the command text when no ts.
-    const key = ev.ts !== undefined ? `ts:${ev.ts}` : `cmd:${command}`;
+    // Dedup by ask identity (ts): a re-emitted ask shares a ts; a genuine re-run gets a new one. Fall
+    // back to command text when no ts. Scope by taskId so root + same-text/same-ts subtask don't collide.
+    const scope = ev.taskId ?? "";
+    const key = ev.ts !== undefined ? `${scope}:ts:${ev.ts}` : `${scope}:cmd:${command}`;
     if (handled.has(key)) return "ignored";
     handled.add(key);
 
@@ -74,7 +75,7 @@ export function createPermissionGate(deps: PermissionGateDeps): (ev: PermissionE
     const { decision, reason } = evaluate(command, deps.policy ?? {});
 
     if (decision === "allow") {
-      deps.client.approve();
+      deps.client.approve(ev.taskId);
       deps.log(`  ✓ permission: auto-approved (${reason}): ${short}`);
       deps.addNote(deps.task.id, `Permission gate APPROVED \`${short}\`: ${reason}`, "permission-gate");
       return "handled";
@@ -87,7 +88,7 @@ export function createPermissionGate(deps: PermissionGateDeps): (ev: PermissionE
     }
 
     // deny, OR escalate with no classifier → default-deny: reject, surface, end the dispatch.
-    deps.client.reject();
+    deps.client.reject(ev.taskId);
     const why = decision === "deny" ? reason : `default-deny: ${reason}`;
     deps.log(`  ⛔ permission: denied (${why}) → needs_input + ending dispatch: ${short}`);
     deps.addNote(deps.task.id, `Permission gate DENIED \`${short}\`: ${why}`, "permission-gate");

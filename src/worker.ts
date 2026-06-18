@@ -25,6 +25,7 @@ import { BobClient, resolvePipe, type DispatchResult } from "./bob-ipc.js";
 import { formatReviewFindings, parseReviewFindings } from "./review-findings.js";
 import { createPollLoop, defaultVerify, defaultCaptureSnapshot, type VerifyResult } from "./bob-polls.js";
 import { ExternalActivity } from "./defer.js";
+import { PollStatusLatch } from "./worker-status.js";
 import { notify } from "./notify.js";
 import { shouldRetry, executeRetry } from "./retry-policy.js";
 import {
@@ -431,7 +432,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
     cliPath: opts.classifierCli,
     task: { id: task.id, title: task.title },
     cwd: process.cwd(),
-    client: { approve: () => client.approve(), reject: () => client.reject() },
+    client: { approve: (id) => client.approve(id), reject: (id) => client.reject(id) },
     addNote: repo.addNote,
     log: (m) => console.log(m),
     isActive: () => dispatchActive,
@@ -450,8 +451,8 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
     task: { id: task.id, title: task.title },
     cwd: repoRoot,
     client: {
-      approve: () => client.approve(),
-      reject: () => client.reject(),
+      approve: (id) => client.approve(id),
+      reject: (id) => client.reject(id),
       cancelActive: () => client.cancelActive(),
     },
     addNote: repo.addNote,
@@ -540,14 +541,17 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
         isAnswerableAsk,
         tokenCeiling,
         turnCap,
-        onEvent: (name, { say, ask, text, partial, ts }) => {
-          // Capture the ask (see seenAsk). Clear only on a real non-ask message; a message-less
-          // lifecycle event (say/ask/text all absent) isn't progress and mustn't drop it.
-          if (ask) {
-            const t = (text ?? "").trim();
-            if (t) seenAsk = { kind: ask, text: t };
-          } else if (say !== undefined || (text ?? "").trim() !== "") {
-            seenAsk = undefined;
+        onEvent: (name, { say, ask, text, partial, ts, taskId, isRoot }) => {
+          // Capture the ask for the root's idle-recovery needs_input — ROOT-only, so a routed subtask
+          // command ask (the gates handle it) isn't mis-surfaced as the root's blocker. Clear only on a
+          // real non-ask root message; a message-less lifecycle event isn't progress and mustn't drop it.
+          if (isRoot) {
+            if (ask) {
+              const t = (text ?? "").trim();
+              if (t) seenAsk = { kind: ask, text: t };
+            } else if (say !== undefined || (text ?? "").trim() !== "") {
+              seenAsk = undefined;
+            }
           }
 
           if (say && say !== lastSay) {
@@ -559,16 +563,17 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
           // Deterministic permission gate FIRST (no LLM/human): it approves allowlisted commands and
           // rejects+surfaces (needs_input) + ends the dispatch on a deny/unknown. Only an unrecognised
           // command WITH the classifier enabled is handed on to the LLM command-gate.
+          // taskId (the task that raised the ask) flows to the gates so a press targets its own instance.
           let pv: PermissionVerdict = "ignored";
           try {
-            pv = permissionGate({ ask, text, partial, ts });
+            pv = permissionGate({ ask, text, partial, ts, taskId });
           } catch (e) {
             console.error(`  ⚠ permission gate error on #${task.id}: ${(e as Error).message}`);
           }
           // .catch each gate: a press/answer that throws (e.g. an IPC write on a dropped pipe, or an
           // answerer failure) must not become an unhandled rejection that crashes the worker.
           if (pv === "escalate") {
-            commandGate({ ask, text, partial, ts }).catch((e) =>
+            commandGate({ ask, text, partial, ts, taskId }).catch((e) =>
               console.error(`  ⚠ command gate error on #${task.id}: ${(e as Error).message}`),
             );
           }
@@ -1058,9 +1063,9 @@ async function main(): Promise<void> {
           : "gate OFF (commands fall back to the idle-watchdog backstop)"
     }.`,
   );
-  let idled = false;
-  let deferring = false;
-  let disarmed = false;
+  // One latch for the between-dispatch status (announce once per entry, re-announce on return). See
+  // worker-status.ts for why three separate booleans drifted and stuck the status on "running".
+  const pollStatus = new PollStatusLatch();
   while (!stopping) {
     // Sweep stale board questions so a needs_input task whose asker died still times out.
     if (!opts.dryRun) repo.expireOverdueQuestions();
@@ -1073,35 +1078,31 @@ async function main(): Promise<void> {
         console.log("bob-worker: board disarmed — nothing to dispatch (--once); exiting.");
         break;
       }
-      if (!disarmed) {
+      if (pollStatus.enter("disarmed")) {
         console.log("bob-worker: board disarmed — dispatch paused (arm the board to resume).");
         emit(opts, "idle", { disarmed: true });
-        disarmed = true;
       }
       await sleep(opts.pollMs);
       continue;
     }
-    if (disarmed) {
+    if (pollStatus.is("disarmed")) {
+      // Board re-armed; the next status (defer/idle/active) re-announces below since it differs.
       console.log("bob-worker: board armed — resuming.");
-      disarmed = false;
-      idled = false;
     }
 
     // Defer while the user is chatting with Bob, checked before any dispatch so a
     // live conversation is never aborted by our same-tab StartNewTask.
     if (opts.defer && !opts.dryRun && external.shouldDefer(opts.deferIdleMs)) {
-      if (!deferring) {
+      if (pollStatus.enter("deferred")) {
         console.log("bob-worker: deferring — Bob chat active (Ctrl-C to stop).");
         emit(opts, "deferred", {});
-        deferring = true;
       }
       await sleep(opts.pollMs);
       continue;
     }
-    if (deferring) {
+    if (pollStatus.is("deferred")) {
       console.log("bob-worker: chat idle — resuming.");
       emit(opts, "resumed", {});
-      deferring = false;
     }
 
     const { task, gated, blocked } = pickEligible(opts);
@@ -1116,17 +1117,18 @@ async function main(): Promise<void> {
         console.log(`bob-worker: no eligible pending tasks — exiting (--once)${gatedMsg}${blockedMsg}.`);
         break;
       }
-      if (!idled) {
+      // enter("idle") returns true after any other status too, so idle is re-announced once a
+      // dispatch or defer ends (see worker-status.ts).
+      if (pollStatus.enter("idle")) {
         console.log(
           `bob-worker: no eligible tasks — idle-polling every ${opts.pollMs}ms${gatedMsg}${blockedMsg}. (Ctrl-C to stop)`,
         );
         emit(opts, "idle", { gated, blocked });
-        idled = true;
       }
       await sleep(opts.pollMs);
       continue;
     }
-    idled = false;
+    pollStatus.enter("active");
     try {
       await runOne(client, task, opts, patchPresent);
     } catch (err) {
