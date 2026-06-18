@@ -15,8 +15,13 @@ task should make the **behavior-preserving** intent explicit and name the target
 
 Do this:
 
-1. **Check for duplicates.** Call `list_tasks` (status `pending`); skip a near-identical
-   refactor task and point the user at it instead.
+1. **Get board state in one call.** Call `board_status` — it returns `open_tasks` (the live,
+   non-terminal tasks) for the dedup check and `worker_draining` for step 3. Scan `open_tasks`
+   for a near-identical **pending** refactor task; if one exists, skip creating another and point
+   the user at it. (Ignore a `blocked`/`needs_input` near-match — it can't be pulled, so deduping
+   against it would dead-end the request.) Only if `open_tasks_truncated` is true and you're
+   unsure, fall back to `list_tasks {status: 'pending'}`. `worker_draining` is a step-1 snapshot —
+   keep it for step 3 rather than re-calling `board_status`.
 
 2. **Shape the refactor task** with `create_task`:
    - **mode**: `refactor`.
@@ -28,7 +33,7 @@ Do this:
      off-limits. If useful, include the current `git diff`/`git log` context, bounded.
 
 3. **Wait for Bob, then surface what changed.** Report the new task id and that it routes to
-   `{refactor}`. First check `board_status`: if `worker_draining.draining` is **false**, no worker will
+   `{refactor}`. Use the `worker_draining` from step 1: if `worker_draining.draining` is **false**, no worker will
    pull this — say it's **queued as #id** and tell the user to start one (`launch-worker.cmd`),
    then stop. Otherwise call `await_task {task_id: id}` — it **blocks until the worker drains the
    task and Bob settles it**, so the result comes back in this same turn:

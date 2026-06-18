@@ -12,6 +12,9 @@ import { awaitTaskOutcome } from "./await-task.js";
 
 const WORKER_ACTIVE_WINDOW_MS = 5 * 60 * 1000;
 
+// Max live tasks board_status inlines as open_tasks before it flags open_tasks_truncated.
+const OPEN_TASKS_CAP = 50;
+
 // await_answer blocks server-side in chunks so a single tool call stays under the MCP
 // transport timeout while the total human wait can be minutes (the worker re-calls).
 const AWAIT_CHUNK_DEFAULT_MS = 25_000;
@@ -577,21 +580,29 @@ server.registerTool(
   {
     title: "Board Status",
     description:
-      "Dispatch state and counts: whether the board is armed, task counts by status, whether a " +
-      "worker looks active, and whether a worker is currently draining the board (`worker_draining` " +
-      "— a live heartbeat). Check `worker_draining` before await_task: if false, nothing will pull " +
-      "the task, so don't block — start a worker first. Also check before a bulk-create.",
+      "Dispatch state, counts, and the live task list: whether the board is `armed`, task `counts` by " +
+      "status, whether a worker looks active, whether a worker is currently draining the board " +
+      "(`worker_draining` — a live heartbeat), and `open_tasks` — the non-terminal tasks (staged / " +
+      "pending / in_progress / needs_input / blocked) as compact {id,title,status,mode,tags,priority} " +
+      "rows for deduping before create_task (capped; see open_tasks_truncated). Check " +
+      "`worker_draining.draining` before await_task: if false, nothing will pull the task, so don't " +
+      "block — start a worker first. " +
+      "Also check before a bulk-create.",
     inputSchema: {},
   },
   async () => {
     repo.expireOverdueQuestions(); // sweep so a stuck needs_input doesn't linger past its deadline
     const tasks = repo.listTasks({});
+    // Reuse the tasks we just loaded for counts — no extra query.
+    const { open_tasks, truncated } = repo.selectOpenTasks(tasks, OPEN_TASKS_CAP);
     return json({
       armed: repo.isBoardArmed(),
       worker_likely_active: workerLikelyActive(),
       worker_draining: repo.getWorkerLiveness(),
       counts: repo.countByStatus(tasks),
       total: tasks.length,
+      open_tasks,
+      open_tasks_truncated: truncated,
     });
   },
 );

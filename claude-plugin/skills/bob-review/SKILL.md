@@ -17,8 +17,13 @@ the findings come back to you — you don't need Bob's webview panel.
 
 Do this:
 
-1. **Check for duplicates.** Call `list_tasks` (status `pending`); if a near-identical review
-   task already exists, point the user at it instead of creating another.
+1. **Get board state in one call.** Call `board_status` — it returns `open_tasks` (the live,
+   non-terminal tasks) for the dedup check and `worker_draining` for step 4. Scan `open_tasks`
+   for a near-identical **pending** review task; if one exists, point the user at it instead of
+   creating another. (Ignore a `blocked`/`needs_input` near-match — it can't be pulled, so
+   deduping against it would dead-end the request.) Only if `open_tasks_truncated` is true and
+   you're unsure, fall back to `list_tasks {status: 'pending', tag: 'review'}`. `worker_draining`
+   is a step-1 snapshot — keep it for step 4 rather than re-calling `board_status`.
 
 2. **Gather the diff to review.** Review mode is tool-restricted under headless dispatch (it
    can't run git itself), so the diff must be **embedded in the task**.
@@ -43,8 +48,8 @@ Do this:
      user's focus note if any. Keep it short; review mode supplies its own rubric.
 
 4. **Wait for Bob, then surface the findings.** Report the new task id and that it routes to
-   `{review}`. First check `board_status`: if `worker_draining.draining` is **false**, no worker will
-   pull this — tell the user it's **queued as #id** and to start one (`launch-worker.cmd`), then
+   `{review}`. Use the `worker_draining` from step 1: if `worker_draining.draining` is **false**, no worker
+   will pull this — tell the user it's **queued as #id** and to start one (`launch-worker.cmd`), then
    stop. Otherwise call `await_task {task_id: id}` — it **blocks until the worker drains the task
    and Bob settles it**, so the whole review loop completes in this one turn (no "check back later"):
    - `analysis_done` (or `done`) → the review is in the task **`result`** plus a structured
