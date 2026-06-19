@@ -36,14 +36,14 @@ describe("defaultDbPath precedence", () => {
   });
 
   it("CLAUDE_PROJECT_DIR resolves to <project>/data/tasks.db (terminal == plugin board)", () => {
-    process.env.CLAUDE_PROJECT_DIR = resolve("/work/pounce");
-    assert.equal(defaultDbPath(), resolve("/work/pounce", "data", "tasks.db"));
+    process.env.CLAUDE_PROJECT_DIR = resolve("/work/project");
+    assert.equal(defaultDbPath(), resolve("/work/project", "data", "tasks.db"));
   });
 
   it("ignores empty / whitespace-only env vars (a shell-config slip can't pick a bogus path)", () => {
     process.env.BOB_TASKS_DB = "   "; // whitespace-only → skipped, not resolved to a junk path
-    process.env.CLAUDE_PROJECT_DIR = resolve("/work/pounce");
-    assert.equal(defaultDbPath(), resolve("/work/pounce", "data", "tasks.db"));
+    process.env.CLAUDE_PROJECT_DIR = resolve("/work/project");
+    assert.equal(defaultDbPath(), resolve("/work/project", "data", "tasks.db"));
   });
 
   it("falls back to the module-relative board only when no env hint is set", () => {
