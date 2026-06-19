@@ -1,6 +1,6 @@
 # Bob Control
 
-[![CI](https://github.com/Joshua-Gilbert/bob-control/actions/workflows/ci.yml/badge.svg)](https://github.com/Joshua-Gilbert/bob-control/actions/workflows/ci.yml)
+[![CI](https://github.com/PounceAI/bob-control/actions/workflows/ci.yml/badge.svg)](https://github.com/PounceAI/bob-control/actions/workflows/ci.yml)
 
 Bob Control turns an AI coding agent from a one-prompt-at-a-time chat window into an unattended
 queue worker. Fill a board and each task gets dispatched, auto-approved inside risk guardrails,

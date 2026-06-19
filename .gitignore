@@ -34,10 +34,8 @@ data/
 # Planning / design notes, not part of the shipped project
 docs/
 
-# Scratch: ignore everything except the reusable verification harnesses
-scratch/*
-!scratch/verify-extension.mjs
-!scratch/dummy-pipe-server.mjs
+# Scratch: local dev/verification harnesses, not part of the shipped project
+scratch/
 
 # OS / editor cruft
 .DS_Store

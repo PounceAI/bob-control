@@ -6,7 +6,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Joshua-Gilbert/bob-control.git"
+    "url": "git+https://github.com/PounceAI/bob-control.git"
   },
   "keywords": [
     "mcp",
