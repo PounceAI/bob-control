@@ -101,9 +101,18 @@ function setStatus(state: "stopped" | "running" | "deferred" | "idle", detail = 
   status.tooltip = worker ? "Click to stop the Bob Tasks worker" : "Click to start the Bob Tasks worker";
 }
 
-function startWorker(): void {
+function startWorker(force = false): void {
   if (worker || starting) {
     vscode.window.showInformationMessage("Bob Tasks worker is already running.");
+    return;
+  }
+  // launch-bob-ipc.cmd exports ROO_CODE_IPC_SOCKET_PATH (so Bob opens the IPC pipe we
+  // dispatch over); this host inherits it, so an absent var means Bob was started the wrong
+  // way and the worker can't connect. Warn rather than spawn a worker that would only burn
+  // the 30s connect watchdog. Done here, not at activation, so CLI/MCP-only users aren't
+  // nagged; `force` is the "Start anyway" bypass.
+  if (!force && !process.env.ROO_CODE_IPC_SOCKET_PATH) {
+    warnLaunchEnvironment();
     return;
   }
   const connector = connectorRoot();
@@ -271,6 +280,37 @@ function startWorker(): void {
 
   setStatus("running");
   vscode.window.showInformationMessage("Bob Tasks worker started.");
+}
+
+/**
+ * Warn that Bob was started without launch-bob-ipc.cmd, and offer a fix or a one-shot bypass.
+ * Fires only on an actual start attempt — no persisted suppression that could later hide a
+ * real failure; "Start anyway" re-enters startWorker with force.
+ */
+function warnLaunchEnvironment(): void {
+  const FIX = "How to fix";
+  const ANYWAY = "Start anyway";
+  void vscode.window
+    .showWarningMessage(
+      "Bob Tasks: IBM Bob was started without launch-bob-ipc.cmd, so the IPC pipe isn't open " +
+        "(the worker can't connect) and auto-approval isn't applied (commands stall on manual " +
+        "prompts). Fully quit Bob and relaunch via launch-bob-ipc.cmd — or start the worker anyway.",
+      FIX,
+      ANYWAY,
+    )
+    .then((choice) => {
+      if (choice === FIX) {
+        out.appendLine(
+          "[self-check] To fix: fully quit IBM Bob, then start it from launch-bob-ipc.cmd in the " +
+            "connector folder — it sets ROO_CODE_IPC_SOCKET_PATH and runs set-bob-autoapprove.mjs " +
+            "(which must happen while Bob is closed). Repoint your taskbar/Start shortcut at " +
+            "launch-bob-ipc.cmd so it can't be bypassed.",
+        );
+        out.show(true);
+      } else if (choice === ANYWAY) {
+        startWorker(true);
+      }
+    });
 }
 
 function stopWorker(): void {
