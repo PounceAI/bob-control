@@ -678,9 +678,6 @@ function buildPollLoop(
   if (opts.verifyJudge && !judgeOn) {
     console.log(`  [judge] skipped for {${mode}} (no code diff expected in this mode)`);
   }
-  // Pre-task working-tree snapshot so the judge diffs only THIS task's changes
-  // (set just before the initial dispatch below; closed over by the verifier).
-  const judgeBaseline: GitBaseline | undefined = judgeOn ? evidenceBaseline : undefined;
   const compositeVerifier = judgeOn
     ? async (result: string, command: string | undefined, cwd: string): Promise<VerifyResult> => {
         // Run command verifier first if a command is set (reuse defaultVerify logic)
@@ -695,7 +692,7 @@ function buildPollLoop(
 
         // Run the LLM judge (either as sole verifier or additional gate after command),
         // scoping the diff to this task's changes via the pre-dispatch baseline.
-        const gitDiff = await captureGitDiff(cwd, 4000, judgeBaseline?.ref, judgeBaseline?.untracked);
+        const gitDiff = await captureGitDiff(cwd, 4000, evidenceBaseline.ref, evidenceBaseline.untracked);
         const ctx: JudgeContext = {
           taskPrompt: buildPrompt(task),
           completionResult: result,
