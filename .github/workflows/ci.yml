@@ -40,3 +40,26 @@ jobs:
 
       - name: Test (with coverage)
         run: npm run test:coverage
+
+  # The extension is a separate npm package, so the job above never builds it. Package it
+  # here so a tsc/vsce break surfaces on the PR, not first at release-tag time.
+  build-extension:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22.x"
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Install extension deps
+        working-directory: extension
+        run: npm ci
+
+      - name: Build & package extension
+        working-directory: extension
+        # `npm run package` runs tsc (vscode:prepublish) then vsce package, so it catches
+        # both a compile break and a packaging/manifest break in one step.
+        run: npm run package
