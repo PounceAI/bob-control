@@ -13,6 +13,7 @@ import {
   producesReviewFindings,
   judgeAppliesToMode,
   isReadOnlyMode,
+  type ModeProfile,
   type Risk,
 } from "./modes.js";
 import { createCommandGate } from "./command-gate.js";
@@ -347,12 +348,7 @@ function emit(opts: Opts, type: string, data: Record<string, unknown> = {}): voi
 const activeFollowupGates = new Map<number, ReturnType<typeof createFollowupGate>>();
 
 async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: boolean | null): Promise<void> {
-  const { mode, source } = resolveMode(task);
-  const profile = profileFor(mode);
-  // Our approve/reject presses (command + mode-switch gates) only land with the Bob button patch. A
-  // known-absent patch (false) makes them no-ops, so an "answerable" ask actually wedges — treat it as
-  // unanswerable to trip the short grace instead of the full idle window. Unknown (null) assumes present.
-  const pressesLand = patchPresent !== false;
+  const { mode, source, profile, pressesLand } = resolveRouting(task, patchPresent);
   console.log(`\n▶ #${task.id} "${task.title}" → mode {${mode}} (${source}, risk:${profile.risk})`);
   emit(opts, "taskStart", { id: task.id, title: task.title, mode, risk: profile.risk });
 
@@ -369,12 +365,69 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
   }
   repo.addNote(task.id, `Auto-dispatched in mode {${mode}} (${source}, risk:${profile.risk}).`, "worker");
 
+  // Read once per task and thread to the gates + judge, so both see one consistent value.
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const { doDispatch, getSeenAsk } = createDispatchSession(client, task, opts, { mode, profile, pressesLand }, apiKey);
+
+  const { planStopBaseline, evidenceBaseline } = await prepareDispatch(task, opts);
+  const pollLoop = buildPollLoop(task, opts, mode, doDispatch, evidenceBaseline, apiKey);
+
+  // Initial dispatch, then the verify-and-continue loop (a no-op when the feature is off).
+  const initialRes = await doDispatch(buildPrompt(task));
+  const res = await pollLoop(initialRes, planStopBaseline);
+
+  persistReviewFindings(task, mode, res);
+  // The followup gate is unregistered by the caller's finally (guaranteed on every exit path).
+  await finalizeDispatch(client, task, opts, mode, res, getSeenAsk(), evidenceBaseline);
+}
+
+interface Routing {
+  mode: string;
+  source: string;
+  profile: ModeProfile;
+  /** Whether our approve/reject IPC presses actually land (the Bob button patch is present). */
+  pressesLand: boolean;
+}
+
+/** Route a task to a Bob mode + risk profile, and decide whether our gate presses can land. */
+function resolveRouting(task: Task, patchPresent: boolean | null): Routing {
+  const { mode, source } = resolveMode(task);
+  const profile = profileFor(mode);
+  // Our approve/reject presses (command + mode-switch gates) only land with the Bob button patch. A
+  // known-absent patch (false) makes them no-ops, so an "answerable" ask actually wedges — treat it as
+  // unanswerable to trip the short grace instead of the full idle window. Unknown (null) assumes present.
+  const pressesLand = patchPresent !== false;
+  return { mode, source, profile, pressesLand };
+}
+
+interface DispatchSession {
+  /** Dispatch the given text to Bob in this task's mode, with every gate wired to its event stream. */
+  doDispatch: (text: string) => Promise<DispatchResult>;
+  /** Last pending root ask seen this dispatch (from any frame), for the idle-recovery needs_input. */
+  getSeenAsk: () => { kind: string; text: string } | undefined;
+}
+
+/**
+ * Wire up the per-task dispatch session: the four gates (command / permission / mode-switch / followup)
+ * that resolve Bob's mid-task prompts non-interactively, plus the doDispatch helper that streams a
+ * dispatch through them. The gates share a dispatchActive flag so a late verdict from a settled
+ * dispatch can't press the next task's prompt. Registers the followup gate in activeFollowupGates so a
+ * stdin answer can reach it; the caller's finally unregisters it.
+ */
+function createDispatchSession(
+  client: BobClient,
+  task: Task,
+  opts: Opts,
+  routing: Pick<Routing, "mode" | "profile" | "pressesLand">,
+  apiKey: string | undefined,
+): DispatchSession {
+  const { mode, profile, pressesLand } = routing;
+
   // Gray-zone command approval: under allowlist or classifier policy, commands that
   // miss Bob's static allowlist surface as an `ask` instead of auto-running. Rather
   // than wait for a human, ask Claude and press approve/reject over IPC (needs the
   // Bob button patch). Fail-safe: only an explicit "approve" runs the command.
   const classifierOn = opts.commandClassifier && policyHasGrayZone(profile.commandPolicy);
-  const apiKey = process.env.ANTHROPIC_API_KEY;
   // The api backend can't run without a key; the cli backend reuses Claude's login.
   const classifierBlocked = opts.classifierBackend === "api" && !apiKey;
 
@@ -593,6 +646,23 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
     }
   };
 
+  return { doDispatch, getSeenAsk: () => seenAsk };
+}
+
+/**
+ * Build the verify-and-continue poll loop for this dispatch. Composes the optional LLM judge with
+ * command verification (the judge is diff-based, so it applies only to code-writing modes — see
+ * judgeAppliesToMode), scoping the judge's diff to this task via the pre-dispatch evidence baseline.
+ * A no-op loop when --verify-and-continue is off.
+ */
+function buildPollLoop(
+  task: Task,
+  opts: Opts,
+  mode: string,
+  doDispatch: (text: string) => Promise<DispatchResult>,
+  evidenceBaseline: GitBaseline,
+  apiKey: string | undefined,
+): (initial: DispatchResult, baseline?: string) => Promise<DispatchResult> {
   // Construct a composite verifier that combines command verification with LLM judge.
   // When --verify-judge is on:
   // - If verifyCommand is set, it runs FIRST and must pass, then judge provides additional gate
@@ -608,9 +678,6 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
   if (opts.verifyJudge && !judgeOn) {
     console.log(`  [judge] skipped for {${mode}} (no code diff expected in this mode)`);
   }
-  // Pre-task working-tree snapshot so the judge diffs only THIS task's changes
-  // (set just before the initial dispatch below; closed over by the verifier).
-  let judgeBaseline: GitBaseline | undefined;
   const compositeVerifier = judgeOn
     ? async (result: string, command: string | undefined, cwd: string): Promise<VerifyResult> => {
         // Run command verifier first if a command is set (reuse defaultVerify logic)
@@ -625,7 +692,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
 
         // Run the LLM judge (either as sole verifier or additional gate after command),
         // scoping the diff to this task's changes via the pre-dispatch baseline.
-        const gitDiff = await captureGitDiff(cwd, 4000, judgeBaseline?.ref, judgeBaseline?.untracked);
+        const gitDiff = await captureGitDiff(cwd, 4000, evidenceBaseline.ref, evidenceBaseline.untracked);
         const ctx: JudgeContext = {
           taskPrompt: buildPrompt(task),
           completionResult: result,
@@ -659,7 +726,7 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
 
   // Verify-and-continue loop: on a failed verify it re-dispatches the FULL task plus
   // the failure (via doDispatch) so Bob has the context to fix it.
-  const pollLoop = createPollLoop({
+  return createPollLoop({
     enabled: opts.verifyAndContinue,
     verifyCommand: opts.verifyCommand,
     maxContinues: opts.maxContinues,
@@ -672,19 +739,30 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
     detectPlanStop: opts.detectPlanStop,
     verify: compositeVerifier,
   });
+}
 
+/**
+ * Pre-dispatch snapshots: a plan-stop baseline (working-tree state, to detect a plan-only completion),
+ * the evidence baseline (reused by the judge AND the completion gate / delete-safety), and a one-time
+ * rollback checkpoint. Captured once per task, before the initial dispatch.
+ */
+async function prepareDispatch(
+  task: Task,
+  opts: Opts,
+): Promise<{ planStopBaseline: string | undefined; evidenceBaseline: GitBaseline }> {
   // Capture baseline snapshot BEFORE initial dispatch for plan-stop detection.
   // This allows detecting changes even when the tree is already dirty from prior tasks.
   // Reuses the poll loop's own snapshot fn so the baseline string-matches the snapshot
   // taken after a continue (the comparison in checkDidWork is exact-string).
-  const baseline: string | undefined = opts.detectPlanStop ? await defaultCaptureSnapshot(process.cwd()) : undefined;
+  const planStopBaseline: string | undefined = opts.detectPlanStop
+    ? await defaultCaptureSnapshot(process.cwd())
+    : undefined;
 
   // One pre-task git snapshot, reused by the judge (when on) AND by the completion
   // gate to compute execution evidence / record file artifacts. The judge needs it
   // only for code modes, but completion evidence + delete-safety want it for every
   // task (a read-only task that wrote a file must still be recorded).
   const evidenceBaseline = await captureGitBaseline(process.cwd());
-  if (judgeOn) judgeBaseline = evidenceBaseline;
   // Persist a rollback checkpoint once per task (first attempt). Captured for ALL modes — a
   // read-only task that wrongly writes files should still be revertable — reusing the evidence
   // stash so we don't snapshot twice. Repo-bound + pinned (gc-safe) inside captureCheckpoint.
@@ -692,13 +770,11 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
     const cp = await captureCheckpoint(process.cwd(), task.id, evidenceBaseline.ref);
     if (cp) repo.setCheckpoint(task.id, cp);
   }
+  return { planStopBaseline, evidenceBaseline };
+}
 
-  // Initial dispatch.
-  const initialRes = await doDispatch(buildPrompt(task));
-
-  // Run the poll loop (no-op if feature is off).
-  const res = await pollLoop(initialRes, baseline);
-
+/** Format and persist Bob's review findings (review-producing modes) as a structured board note. */
+function persistReviewFindings(task: Task, mode: string, res: DispatchResult): void {
   // Format and persist review findings (review-producing modes: review + devsecops).
   // Prefer the structured submit_review_findings capture; but under headless IPC
   // dispatch Bob is tool-restricted and never calls that tool — it returns the review
@@ -713,7 +789,23 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
     repo.addNote(task.id, formatReviewFindings(findings), "bob-review");
     console.log(`  captured ${findings.length} review finding${findings.length === 1 ? "" : "s"}`);
   }
+}
 
+/**
+ * Decide and apply the task's terminal state from the dispatch result: park needs_input, surface an
+ * idle/blocked-on-ask question, record a genuine completion (with evidence + artifacts), block when
+ * verify-and-continue gave up, or retry / park a hard failure. Preserves partial work to a branch on
+ * any terminal failure (never leaves WIP on main).
+ */
+async function finalizeDispatch(
+  client: BobClient,
+  task: Task,
+  opts: Opts,
+  mode: string,
+  res: DispatchResult,
+  seenAsk: { kind: string; text: string } | undefined,
+  evidenceBaseline: GitBaseline,
+): Promise<void> {
   // If Bob parked this task awaiting a human answer on the board (called ask_question →
   // needs_input), the dispatch ending is NOT a failure — leave it awaiting; the question's
   // own deadline + the board sweeper govern it. Don't clobber needs_input to blocked/done.
@@ -879,7 +971,6 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
       if (opts.notify) notify(`Bob task #${task.id} ${res.status}`, task.title);
     }
   }
-  // The gate is unregistered by the caller's finally (guaranteed on every exit path).
 }
 
 async function main(): Promise<void> {
