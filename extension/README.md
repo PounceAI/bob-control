@@ -115,7 +115,7 @@ When the extension is active, a status-bar item shows the worker state (click it
 ### Prerequisites
 
 1. **Bob Control built** — The parent project must be built at `../dist` (relative to this extension directory). Run `npm install && npm run build` in the project root.
-2. **Bob launched with IPC** — Bob must be running with `ROO_CODE_IPC_SOCKET_PATH` set to `\\.\pipe\bob-ipc`. Use the project's `launch-bob-ipc.cmd` script. (node-ipc internally mangles that into a doubled `\\.\pipe\pipe\bob-ipc` — the name the worker actually connects to, and the default of `bobTasks.pipe`.)
+2. **Bob launched with IPC** — Bob must be running with `ROO_CODE_IPC_SOCKET_PATH` set to `\\.\pipe\bob-ipc`. Use the project's `launch-bob-ipc.cmd` script. (node-ipc internally mangles that into a doubled `\\.\pipe\pipe\bob-ipc` — the name the worker actually connects to, and the default of `bobTasks.pipe`.) Launching Bob any other way (Start menu, taskbar) skips both the IPC pipe **and** `set-bob-autoapprove.mjs`, so the worker can't connect and commands stall on manual prompts. Start the worker without `ROO_CODE_IPC_SOCKET_PATH` set and the extension warns with *How to fix* / *Start anyway* rather than spawning a doomed worker. Repoint your Start/taskbar shortcut at `launch-bob-ipc.cmd` so it can't be bypassed.
 3. **Node >= 22.5** — The worker requires Node 22.5 or later for `node:sqlite`. Verify with `node --version`. If your system Node is older, set `bobTasks.nodePath` to an absolute path to a newer Node binary.
 
 ### Build Steps
