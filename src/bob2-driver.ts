@@ -1,6 +1,14 @@
 import type { BobDriver } from "./bob-driver.js";
 import type { DispatchCore, DispatchResult } from "./bob-ipc.js";
-import { Bob2TaskStore, awaitTurnSettled, bob2DbExists, sleep, taskError, type Bob2TaskRow } from "./bob2-taskstore.js";
+import {
+  Bob2TaskStore,
+  awaitTurnSettled,
+  bob2DbExists,
+  parseCosts,
+  sleep,
+  taskError,
+  type Bob2TaskRow,
+} from "./bob2-taskstore.js";
 import { writeAutoApprove } from "./bob2-config.js";
 
 // V5: the Bob 2.0 in-process driver. Bob 2.0 removed the node-ipc pipe, so the only way to start a task
@@ -66,14 +74,19 @@ export interface InProcessDriverOptions {
  * → aborted, checked FIRST so a failure isn't masked. Otherwise a settled turn → completed (Bob leaves a
  * finished task at 'active', so "settled" = the turn went quiet, which IS completion here); an unsettled
  * row (wall-clock elapsed mid-turn) → timeout. The raw Bob status is carried in lastText for diagnostics.
- * Result text + token costs are deferred to V6.
+ * `extras` carries the V6 reads off bob.db: `result` (Bob's summary, only meaningful on completion) and
+ * `tokensUsed` (output tokens from `costs`, reported on any outcome).
  */
-export function mapOutcome(row: Bob2TaskRow | null, settled: boolean): DispatchResult {
+export function mapOutcome(
+  row: Bob2TaskRow | null,
+  settled: boolean,
+  extras: { result?: string; tokensUsed?: number } = {},
+): DispatchResult {
   const err = row ? taskError(row) : null;
   const detail = row ? `bob2 status=${row.status}${err ? ` error=${err}` : ""}` : "";
-  const base = { taskId: row?.id ?? null, result: "", lastText: detail, tokensUsed: 0, turns: 0 };
+  const base = { taskId: row?.id ?? null, result: "", lastText: detail, tokensUsed: extras.tokensUsed ?? 0, turns: 0 };
   if (err) return { ...base, status: "aborted" };
-  if (settled) return { ...base, status: "completed" };
+  if (settled) return { ...base, status: "completed", result: extras.result ?? "" };
   return { ...base, status: "timeout" };
 }
 
@@ -203,7 +216,11 @@ export class InProcessDriver implements BobDriver {
         quietMs: this.quietMs,
         timeoutMs: opts.timeoutMs ?? 300_000,
       });
-      return mapOutcome(row, settled);
+      // V6: enrich the outcome from bob.db — output tokens (any outcome) + Bob's summary text (only on a
+      // clean completion; a timeout/error row's last message would be partial/misleading).
+      const tokensUsed = parseCosts(row?.costs ?? null)?.output ?? 0;
+      const result = settled && row && !taskError(row) ? (store.readResultText(id) ?? "") : "";
+      return mapOutcome(row, settled, { result, tokensUsed });
     } finally {
       store?.close();
     }

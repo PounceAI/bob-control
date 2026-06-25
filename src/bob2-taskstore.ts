@@ -19,7 +19,9 @@ import { bob2HomeDir } from "./bob2-config.js";
 //   - `last_error` is the **string `"null"`** (JSON of null) on a successful run, real JSON on a failure —
 //     so "errored" means last_error is set AND not that sentinel.
 //   - The workspace is in `env.workspace` (JSON), not the `directory` column (which is "").
-//   - Result text + token costs live in a separate `messages` table / the `costs` column (V6).
+//   - Result text = the latest `assistant` row's `data.content` in the `messages` table; token/cost
+//     accounting is the `costs` column JSON (input/output/cacheRead/cacheWrite/cost). Both read in V6
+//     (readResultText / parseCosts).
 // See docs/bob-2-inprocess.md and the auto-memory bob-2-taskstore-schema.
 
 const requireModule = createRequire(import.meta.url);
@@ -79,6 +81,54 @@ export function hasRun(row: Bob2TaskRow): boolean {
   return row.created_at != null && row.updated_at != null && row.updated_at > row.created_at;
 }
 
+/** Token/cost accounting parsed from the `costs` column JSON (live shape: input/output/cacheRead/
+ *  cacheWrite token counts + `cost` in USD). `output` matches DispatchResult.tokensUsed's 1.x semantics. */
+export interface Bob2Costs {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
+}
+
+const finiteNum = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+
+/** Parse the `costs` JSON, or null if absent/unparseable (best-effort budget — never fail a dispatch on it). */
+export function parseCosts(raw: string | null): Bob2Costs | null {
+  if (!raw) return null;
+  try {
+    const c = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      input: finiteNum(c.input),
+      output: finiteNum(c.output),
+      cacheRead: finiteNum(c.cacheRead),
+      cacheWrite: finiteNum(c.cacheWrite),
+      cost: finiteNum(c.cost),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Flatten a message `content` (string, or an array of text blocks) to plain text; null when empty. */
+function extractText(content: unknown): string | null {
+  if (typeof content === "string") return content.trim() || null;
+  if (Array.isArray(content)) {
+    const t = content
+      .map((b) =>
+        typeof b === "string"
+          ? b
+          : typeof (b as { text?: unknown })?.text === "string"
+            ? (b as { text: string }).text
+            : "",
+      )
+      .join("")
+      .trim();
+    return t || null;
+  }
+  return null;
+}
+
 const COLS = "id, parent_id, status, directory, created_at, updated_at, costs, last_error";
 
 export class Bob2TaskStore {
@@ -135,6 +185,21 @@ export class Bob2TaskStore {
   read(id: string): Bob2TaskRow | null {
     const row = this.q(`SELECT ${COLS} FROM tasks WHERE id = ?`).get(id) as Bob2TaskRow | undefined;
     return row ?? null;
+  }
+
+  /** Bob's completion summary for the task: the latest `assistant` message's `content` (the result text
+   *  2.0 doesn't return from startTask). Read from the `messages` table (id/task_id/role/data JSON).
+   *  Best-effort — null when no assistant message exists or the row won't parse (never throws). */
+  readResultText(id: string): string | null {
+    try {
+      const row = this.q(
+        "SELECT data FROM messages WHERE task_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+      ).get(id) as { data: string } | undefined;
+      if (!row) return null;
+      return extractText((JSON.parse(row.data) as { content?: unknown }).content);
+    } catch {
+      return null;
+    }
   }
 
   close(): void {

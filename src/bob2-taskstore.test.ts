@@ -12,6 +12,7 @@ import {
   isActivelyRunning,
   taskError,
   hasRun,
+  parseCosts,
   bob2DbPath,
   bob2DbExists,
   type Bob2TaskRow,
@@ -29,7 +30,19 @@ function makeStore(): { db: DatabaseSync; store: Bob2TaskStore } {
   db.exec(
     "CREATE TABLE tasks (id TEXT PRIMARY KEY, parent_id TEXT, status TEXT, directory TEXT, created_at INTEGER, updated_at INTEGER, costs TEXT, last_error TEXT)",
   );
+  db.exec("CREATE TABLE messages (id TEXT PRIMARY KEY, task_id TEXT, role TEXT, data TEXT, created_at INTEGER)");
   return { db, store: new Bob2TaskStore(db) };
+}
+
+let msgSeq = 0;
+function insertMessage(db: DatabaseSync, taskId: string, role: string, data: unknown, createdAt: number): void {
+  db.prepare("INSERT INTO messages (id, task_id, role, data, created_at) VALUES (?, ?, ?, ?, ?)").run(
+    `m${++msgSeq}`,
+    taskId,
+    role,
+    JSON.stringify(data),
+    createdAt,
+  );
 }
 
 function insert(
@@ -160,6 +173,47 @@ test("awaitTurnSettled settles immediately on a real last_error", async () => {
   const res = await awaitTurnSettled(store, "e", { pollMs: 5, quietMs: 5_000, timeoutMs: 2_000 });
   assert.equal(res.settled, true);
   assert.equal(res.row?.last_error, "kaboom");
+});
+
+// ── V6: result text + cost parsing ────────────────────────────────────────────────────────────────
+
+test("parseCosts pulls token/cost fields; null/garbage → null; missing fields → 0", () => {
+  const c = parseCosts('{"input":24848,"output":354,"cacheRead":16060,"cacheWrite":8783,"cost":0.063}');
+  assert.deepEqual(c, { input: 24848, output: 354, cacheRead: 16060, cacheWrite: 8783, cost: 0.063 });
+  assert.equal(parseCosts(null), null);
+  assert.equal(parseCosts("not json"), null);
+  assert.deepEqual(parseCosts("{}"), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }); // absent → 0
+});
+
+test("readResultText returns the latest assistant message's content; null when none", () => {
+  const { db, store } = makeStore();
+  insertMessage(db, "t1", "user", { role: "user", content: "do it" }, 100);
+  insertMessage(db, "t1", "assistant", { role: "assistant", content: "first pass" }, 200);
+  insertMessage(db, "t1", "tool", { role: "tool", content: "Edited file" }, 300); // newer, but not assistant
+  insertMessage(db, "t1", "assistant", { role: "assistant", content: "Done. Removed the redundant local." }, 400);
+  assert.equal(store.readResultText("t1"), "Done. Removed the redundant local."); // latest assistant wins
+  assert.equal(store.readResultText("nope"), null); // no messages for this task
+});
+
+test("readResultText flattens array content and ignores unparseable rows", () => {
+  const { db, store } = makeStore();
+  insertMessage(
+    db,
+    "a",
+    "assistant",
+    {
+      content: [
+        { type: "text", text: "part one " },
+        { type: "text", text: "part two" },
+      ],
+    },
+    10,
+  );
+  assert.equal(store.readResultText("a"), "part one part two");
+  db.prepare(
+    "INSERT INTO messages (id, task_id, role, data, created_at) VALUES ('bad','b','assistant','{not json',20)",
+  ).run();
+  assert.equal(store.readResultText("b"), null); // bad JSON → null, never throws
 });
 
 test("open() throws a clear error when the db file is absent", () => {

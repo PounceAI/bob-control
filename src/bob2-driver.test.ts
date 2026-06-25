@@ -28,6 +28,7 @@ function makeStore() {
   db.exec(
     "CREATE TABLE tasks (id TEXT PRIMARY KEY, parent_id TEXT, status TEXT, directory TEXT, created_at INTEGER, updated_at INTEGER, costs TEXT, last_error TEXT)",
   );
+  db.exec("CREATE TABLE messages (id TEXT PRIMARY KEY, task_id TEXT, role TEXT, data TEXT, created_at INTEGER)");
   const store = new Bob2TaskStore(db);
   store.close = () => {}; // keep the shared db alive across the driver's per-dispatch open/close
   const base = Date.now() - 100_000; // created_at values in the recent past, so updated_at can advance past them
@@ -52,7 +53,18 @@ function makeStore() {
       "INSERT INTO tasks (id, parent_id, status, directory, created_at, updated_at, costs, last_error) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)",
     ).run(`sub-${++n}`, parent, status, DIR, base + ++clock * 1000, base + clock * 1000);
   };
-  return { db, store, seedRoot, bump, setLastError, seedSubtask };
+  // Bob's end-of-turn artifacts: the costs JSON + a final assistant message (the result text).
+  const finishWith = (id: string, opts: { result?: string; output?: number }): void => {
+    if (opts.output != null) db.prepare("UPDATE tasks SET costs = ? WHERE id = ?").run(`{"output":${opts.output}}`, id);
+    if (opts.result != null)
+      db.prepare("INSERT INTO messages (id, task_id, role, data, created_at) VALUES (?, ?, 'assistant', ?, ?)").run(
+        `msg-${++n}`,
+        id,
+        JSON.stringify({ role: "assistant", content: opts.result }),
+        Date.now(),
+      );
+  };
+  return { db, store, seedRoot, bump, setLastError, seedSubtask, finishWith };
 }
 
 function makeHost(opts: {
@@ -128,6 +140,11 @@ test("mapOutcome: real error → aborted, settled → completed, unsettled → t
   assert.equal(mapOutcome(r(), true).taskId, "u7");
   assert.equal(mapOutcome(null, false).taskId, null);
   assert.match(mapOutcome(r({ status: "running" }), false).lastText, /status=running/);
+  // extras: result only surfaces on completion; tokensUsed on any outcome
+  assert.equal(mapOutcome(r(), true, { result: "summary", tokensUsed: 42 }).result, "summary");
+  assert.equal(mapOutcome(r(), false, { result: "partial", tokensUsed: 42 }).result, ""); // not on timeout
+  assert.equal(mapOutcome(r({ last_error: "boom" }), true, { result: "x", tokensUsed: 7 }).result, ""); // not on abort
+  assert.equal(mapOutcome(r(), false, { tokensUsed: 42 }).tokensUsed, 42);
 });
 
 // ── connect / queryWorkspace ─────────────────────────────────────────────────────────────────────
@@ -173,6 +190,42 @@ test("dispatch correlates the new root and resolves completed once the turn leav
   const res = await driver.dispatch({ text: "do it", mode: "code" });
   assert.equal(res.status, "completed");
   assert.equal(res.taskId, id);
+});
+
+test("dispatch captures Bob's result text + output tokens from bob.db on completion", async () => {
+  const { store, seedRoot, bump, finishWith } = makeStore();
+  let id = "";
+  const driver = new InProcessDriver(
+    makeHost({
+      startTask: () => {
+        id = seedRoot("running");
+        finishWith(id, { result: "Done — removed the redundant local.", output: 354 });
+      },
+    }),
+    { openStore: () => store, ...fast },
+  );
+  setTimeout(() => bump(id, "active"), 15);
+  const res = await driver.dispatch({ text: "do it", mode: "code" });
+  assert.equal(res.status, "completed");
+  assert.equal(res.result, "Done — removed the redundant local."); // the latest assistant message
+  assert.equal(res.tokensUsed, 354); // costs.output
+});
+
+test("dispatch reports tokens but NOT result text on a non-completion (timeout)", async () => {
+  const { store, seedRoot, finishWith } = makeStore();
+  const driver = new InProcessDriver(
+    makeHost({
+      startTask: () => {
+        const id = seedRoot("running"); // stays running → never settles → times out
+        finishWith(id, { result: "partial, do not surface", output: 120 });
+      },
+    }),
+    { openStore: () => store, writeApproval: () => {}, pollMs: 5, quietMs: 25, correlateTimeoutMs: 1000 },
+  );
+  const res = await driver.dispatch({ text: "do it", timeoutMs: 40 });
+  assert.equal(res.status, "timeout");
+  assert.equal(res.result, ""); // a partial turn's last message must not read as the result
+  assert.equal(res.tokensUsed, 120); // tokens still accounted
 });
 
 test("dispatch ignores a pre-existing root and a subtask, picking our new root", async () => {

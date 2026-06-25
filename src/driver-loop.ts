@@ -94,6 +94,7 @@ async function finalize(
       repo.recordArtifact(task.id, { kind: "file", path: f, detail: ranReadOnly ? "side-effect" : "modified" });
     if (changed.diffstat)
       repo.addNote(task.id, `Changed ${changed.count} file(s) (evidence):\n${changed.diffstat}`, "worker");
+    if (res.tokensUsed) repo.addNote(task.id, `Bob usage: ~${res.tokensUsed} output tokens.`, "worker");
     const completed = repo.completeTask(task.id, { result, ranReadOnly, evidenceReliable: changed.gitAvailable });
     if (task.retry_attempts > 0) repo.resetRetryAttempts(task.id);
     const finalStatus = completed?.status ?? "done";
