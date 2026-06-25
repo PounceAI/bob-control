@@ -9,7 +9,9 @@ import {
   Bob2TaskStore,
   awaitTurnSettled,
   isTerminal,
-  isRowSettled,
+  isActivelyRunning,
+  taskError,
+  hasRun,
   bob2DbPath,
   bob2DbExists,
   type Bob2TaskRow,
@@ -17,10 +19,10 @@ import {
 
 const requireModule = createRequire(import.meta.url);
 
-// Bob 2.0 task-store reader against an in-memory db matching the LIVE schema (verified 2026-06-25): id
-// and parent_id are TEXT (uuids), created_at/updated_at are INTEGER epoch ms, plus last_error. Correlation
-// is snapshot-then-find-the-new-root (id is a uuid, so created_at orders), and the watch settles only on
-// a terminal status or last_error. No live Bob needed (the status lifecycle is finished in V7).
+// Bob 2.0 task-store reader against an in-memory db matching the LIVE schema (verified 2026-06-25 by
+// reading a real dispatched task): id/parent_id TEXT (uuids), created_at/updated_at INTEGER epoch ms,
+// last_error (string "null" sentinel on success). Correlation is snapshot-then-find-the-new-root; the
+// completion watch follows the live active→running→active lifecycle (settle once not-running + quiet).
 function makeStore(): { db: DatabaseSync; store: Bob2TaskStore } {
   const { DatabaseSync } = requireModule("node:sqlite") as typeof import("node:sqlite");
   const db = new DatabaseSync(":memory:");
@@ -32,33 +34,57 @@ function makeStore(): { db: DatabaseSync; store: Bob2TaskStore } {
 
 function insert(
   db: DatabaseSync,
-  row: { id: string; parent?: string | null; status: string; created_at: number; last_error?: string | null },
+  row: {
+    id: string;
+    parent?: string | null;
+    status: string;
+    created_at: number;
+    updated_at?: number;
+    last_error?: string | null;
+  },
 ): void {
   db.prepare(
     "INSERT INTO tasks (id, parent_id, status, directory, created_at, updated_at, costs, last_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-  ).run(row.id, row.parent ?? null, row.status, "", row.created_at, row.created_at, null, row.last_error ?? null);
+  ).run(
+    row.id,
+    row.parent ?? null,
+    row.status,
+    "",
+    row.created_at,
+    row.updated_at ?? row.created_at,
+    null,
+    row.last_error ?? null,
+  );
 }
+
+const row = (over: Partial<Bob2TaskRow> = {}): Bob2TaskRow => ({
+  id: "x",
+  parent_id: null,
+  status: "active",
+  directory: "",
+  created_at: 1,
+  updated_at: 1,
+  costs: null,
+  last_error: null,
+  ...over,
+});
 
 test("bob2DbPath resolves ~/.bob/db/bob.db", () => {
   assert.match(bob2DbPath().replace(/\\/g, "/"), /\.bob\/db\/bob\.db$/);
 });
 
-test("terminal / settled predicates", () => {
-  assert.ok(isTerminal("completed") && isTerminal("error"));
-  assert.ok(!isTerminal("active") && !isTerminal("running") && !isTerminal("paused"));
-  const row = (status: string, last_error: string | null = null): Bob2TaskRow => ({
-    id: "x",
-    parent_id: null,
-    status,
-    directory: "",
-    created_at: 1,
-    updated_at: 1,
-    costs: null,
-    last_error,
-  });
-  assert.ok(isRowSettled(row("completed")) && isRowSettled(row("error")));
-  assert.ok(isRowSettled(row("active", "boom"))); // last_error settles even while status is non-terminal
-  assert.ok(!isRowSettled(row("active")) && !isRowSettled(row("running"))); // a live turn is NOT settled
+test("status / error / run predicates", () => {
+  assert.ok(isActivelyRunning("running") && isActivelyRunning("compacting"));
+  assert.ok(!isActivelyRunning("active") && !isActivelyRunning("paused"));
+  assert.ok(isTerminal("completed") && isTerminal("error") && !isTerminal("active"));
+  // last_error: real value is an error; the "null" / "" sentinels are NOT.
+  assert.equal(taskError(row({ last_error: "boom" })), "boom");
+  assert.equal(taskError(row({ last_error: "null" })), null); // success sentinel (JSON of null)
+  assert.equal(taskError(row({ last_error: "" })), null);
+  assert.equal(taskError(row({ last_error: null })), null);
+  // hasRun: updated_at advanced past created_at.
+  assert.ok(hasRun(row({ created_at: 100, updated_at: 200 })));
+  assert.ok(!hasRun(row({ created_at: 100, updated_at: 100 }))); // created, not started
 });
 
 test("snapshotRoots captures the high-water created_at and the root ids at that timestamp", () => {
@@ -67,8 +93,8 @@ test("snapshotRoots captures the high-water created_at and the root ids at that 
   insert(db, { id: "b", status: "active", created_at: 200 });
   insert(db, { id: "sub", parent: "b", status: "active", created_at: 300 }); // subtask — not a root
   const snap = store.snapshotRoots();
-  assert.equal(snap.sinceMs, 200); // newest ROOT, ignoring the later subtask
-  assert.deepEqual([...snap.ids], ["b"]); // only the root at the boundary timestamp
+  assert.equal(snap.sinceMs, 200);
+  assert.deepEqual([...snap.ids], ["b"]);
 });
 
 test("snapshotRoots on an empty store yields sinceMs 0 and no ids", () => {
@@ -79,9 +105,9 @@ test("snapshotRoots on an empty store yields sinceMs 0 and no ids", () => {
 test("newRootSince returns the new root that wasn't in the snapshot, excluding subtasks", () => {
   const { db, store } = makeStore();
   insert(db, { id: "old", status: "active", created_at: 200 });
-  const snap = store.snapshotRoots(); // sinceMs 200, ids {old}
-  insert(db, { id: "ours", status: "active", created_at: 250 }); // our dispatch
-  insert(db, { id: "kid", parent: "ours", status: "active", created_at: 260 }); // its subtask — excluded
+  const snap = store.snapshotRoots();
+  insert(db, { id: "ours", status: "active", created_at: 250 });
+  insert(db, { id: "kid", parent: "ours", status: "active", created_at: 260 });
   assert.equal(store.newRootSince(snap.ids, snap.sinceMs)?.id, "ours");
 });
 
@@ -90,7 +116,6 @@ test("newRootSince disambiguates a same-millisecond create via the snapshot id-s
   insert(db, { id: "old", status: "active", created_at: 200 });
   const snap = store.snapshotRoots();
   insert(db, { id: "ours", status: "active", created_at: 200 }); // same ms as the baseline max
-  // created_at >= sinceMs would also match 'old', but it's in the snapshot set → 'ours' wins.
   assert.equal(store.newRootSince(snap.ids, snap.sinceMs)?.id, "ours");
 });
 
@@ -101,30 +126,40 @@ test("newRootSince returns null when no new root has appeared yet", () => {
   assert.equal(store.newRootSince(snap.ids, snap.sinceMs), null);
 });
 
-test("awaitTurnSettled settles on a terminal status", async () => {
+// ── completion watch (live active→running→active lifecycle) ───────────────────────────────────────
+
+test("awaitTurnSettled does NOT settle while the task is 'running', even with stale updated_at", async () => {
   const { db, store } = makeStore();
-  insert(db, { id: "t", status: "running", created_at: 1 });
-  setTimeout(() => db.prepare("UPDATE tasks SET status = 'completed' WHERE id = 't'").run(), 20);
-  const res = await awaitTurnSettled(store, "t", { pollMs: 5, timeoutMs: 2000 });
-  assert.equal(res.settled, true);
-  assert.equal(res.row?.status, "completed");
+  insert(db, { id: "r", status: "running", created_at: Date.now() - 10_000, updated_at: Date.now() - 9_000 });
+  const res = await awaitTurnSettled(store, "r", { pollMs: 5, quietMs: 20, timeoutMs: 40 });
+  assert.equal(res.settled, false); // running gates the settle regardless of the updated_at gap
+  assert.equal(res.row?.status, "running");
 });
 
-test("awaitTurnSettled settles on a non-null last_error even while status stays non-terminal", async () => {
+test("awaitTurnSettled does NOT settle a created-but-unstarted row (updated_at == created_at)", async () => {
   const { db, store } = makeStore();
-  insert(db, { id: "e", status: "active", created_at: 1 });
-  setTimeout(() => db.prepare("UPDATE tasks SET last_error = 'kaboom' WHERE id = 'e'").run(), 20);
-  const res = await awaitTurnSettled(store, "e", { pollMs: 5, timeoutMs: 2000 });
+  const t = Date.now() - 10_000;
+  insert(db, { id: "c", status: "active", created_at: t, updated_at: t }); // hasRun false
+  const res = await awaitTurnSettled(store, "c", { pollMs: 5, quietMs: 20, timeoutMs: 40 });
+  assert.equal(res.settled, false);
+});
+
+test("awaitTurnSettled settles once the row leaves 'running' and goes quiet", async () => {
+  const { db, store } = makeStore();
+  insert(db, { id: "t", status: "running", created_at: Date.now() - 1_000, updated_at: Date.now() });
+  setTimeout(() => db.prepare("UPDATE tasks SET status='active', updated_at=? WHERE id='t'").run(Date.now()), 15);
+  const res = await awaitTurnSettled(store, "t", { pollMs: 5, quietMs: 25, timeoutMs: 2_000 });
+  assert.equal(res.settled, true);
+  assert.equal(res.row?.status, "active"); // back to active + quiet = done
+});
+
+test("awaitTurnSettled settles immediately on a real last_error", async () => {
+  const { db, store } = makeStore();
+  insert(db, { id: "e", status: "running", created_at: Date.now() - 1_000, updated_at: Date.now() });
+  setTimeout(() => db.prepare("UPDATE tasks SET last_error='kaboom' WHERE id='e'").run(), 15);
+  const res = await awaitTurnSettled(store, "e", { pollMs: 5, quietMs: 5_000, timeoutMs: 2_000 });
   assert.equal(res.settled, true);
   assert.equal(res.row?.last_error, "kaboom");
-});
-
-test("awaitTurnSettled does NOT settle while the task sits at 'active' (no completion inferred)", async () => {
-  const { db, store } = makeStore();
-  insert(db, { id: "a", status: "active", created_at: 1 });
-  const res = await awaitTurnSettled(store, "a", { pollMs: 5, timeoutMs: 30 });
-  assert.equal(res.settled, false); // conservative: a non-terminal state never reads as done
-  assert.equal(res.row?.status, "active");
 });
 
 test("open() throws a clear error when the db file is absent", () => {

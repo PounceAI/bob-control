@@ -1,6 +1,6 @@
 import type { BobDriver } from "./bob-driver.js";
 import type { DispatchCore, DispatchResult } from "./bob-ipc.js";
-import { Bob2TaskStore, awaitTurnSettled, bob2DbExists, sleep, type Bob2TaskRow } from "./bob2-taskstore.js";
+import { Bob2TaskStore, awaitTurnSettled, bob2DbExists, sleep, taskError, type Bob2TaskRow } from "./bob2-taskstore.js";
 import { writeAutoApprove } from "./bob2-config.js";
 
 // V5: the Bob 2.0 in-process driver. Bob 2.0 removed the node-ipc pipe, so the only way to start a task
@@ -45,24 +45,26 @@ export interface InProcessDriverOptions {
   writeApproval?: () => void;
   /** Completion-watch poll cadence (ms). */
   pollMs?: number;
+  /** Quiescence window (ms): how long `updated_at` must be still before a turn reads as done. */
+  quietMs?: number;
   /** How long to wait for our new task row to materialize after startTask returns no id (ms). */
   correlateTimeoutMs?: number;
 }
 
 /**
- * Map a settled task-store row to a DispatchResult. Terminal status is honored FIRST, regardless of
- * `settled`, so a row that reached `completed`/`error` in the same tick the wall-clock elapsed isn't
- * discarded as a timeout. `error` (or a non-null last_error) → aborted; only a genuine wall-clock
- * timeout with a still-live row → timeout. The raw Bob status is carried in lastText for diagnostics
- * (the 1.x status vocabulary can't express paused/compacting). Result text + costs are deferred to V6.
+ * Map a settled task-store row to a DispatchResult. A real error (last_error set, not the "null" sentinel)
+ * → aborted, checked FIRST so a failure isn't masked. Otherwise a settled turn → completed (Bob leaves a
+ * finished task at 'active', so "settled" = the turn went quiet, which IS completion here); an unsettled
+ * row (wall-clock elapsed mid-turn) → timeout. The raw Bob status is carried in lastText for diagnostics.
+ * Result text + token costs are deferred to V6.
  */
 export function mapOutcome(row: Bob2TaskRow | null, settled: boolean): DispatchResult {
-  const detail = row ? `bob2 status=${row.status}${row.last_error ? ` error=${row.last_error}` : ""}` : "";
-  const base = { taskId: row ? row.id : null, result: "", lastText: detail, tokensUsed: 0, turns: 0 };
-  if (row?.status === "completed") return { ...base, status: "completed" };
-  if (row?.status === "error" || row?.last_error != null) return { ...base, status: "aborted" };
-  if (!settled) return { ...base, status: "timeout" };
-  return { ...base, status: "idle" };
+  const err = row ? taskError(row) : null;
+  const detail = row ? `bob2 status=${row.status}${err ? ` error=${err}` : ""}` : "";
+  const base = { taskId: row?.id ?? null, result: "", lastText: detail, tokensUsed: 0, turns: 0 };
+  if (err) return { ...base, status: "aborted" };
+  if (settled) return { ...base, status: "completed" };
+  return { ...base, status: "timeout" };
 }
 
 export class InProcessDriver implements BobDriver {
@@ -70,6 +72,7 @@ export class InProcessDriver implements BobDriver {
   private approvalWritten = false;
   private busy = false;
   private readonly pollMs: number;
+  private readonly quietMs: number;
   private readonly correlateTimeoutMs: number;
 
   constructor(
@@ -77,6 +80,7 @@ export class InProcessDriver implements BobDriver {
     private readonly opts: InProcessDriverOptions = {},
   ) {
     this.pollMs = opts.pollMs ?? 1000;
+    this.quietMs = opts.quietMs ?? 8000;
     this.correlateTimeoutMs = opts.correlateTimeoutMs ?? 15_000;
   }
 
@@ -167,6 +171,7 @@ export class InProcessDriver implements BobDriver {
       }
       const { settled, row } = await awaitTurnSettled(store, id, {
         pollMs: this.pollMs,
+        quietMs: this.quietMs,
         timeoutMs: opts.timeoutMs ?? 300_000,
       });
       return mapOutcome(row, settled);

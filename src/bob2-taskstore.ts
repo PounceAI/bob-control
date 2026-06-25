@@ -9,12 +9,18 @@ import { bob2HomeDir } from "./bob2-config.js";
 // the existing root tasks, call startTask, then correlate OUR task as the new root that appeared, and
 // poll its status. Read-only — we never write Bob's DB.
 //
-// Schema confirmed against a live 2.0 store (2026-06-25): `id` and `parent_id` are TEXT (uuids, plus
-// `legacy-bob-code-*` for migrated 1.x tasks), so correlation orders by `created_at` (INTEGER epoch ms),
-// NOT by id. Result text lives in a separate `messages` table (deferred to V6). The status lifecycle is
-// only partly observable offline — all migrated rows sit at 'active' — so the completion watch settles
-// conservatively on a hard terminal status or a non-null `last_error`, leaving the wall-clock as the
-// backstop. See docs/bob-2-inprocess.md.
+// Schema + lifecycle confirmed against a live 2.0 store (2026-06-25, by reading a real dispatched task):
+//   - `id`/`parent_id` are TEXT (uuids; migrated 1.x rows are `legacy-bob-code-*`), so correlation orders
+//     by `created_at` (INTEGER epoch ms), NOT by id. `updated_at` is INTEGER epoch ms (same clock as ours).
+//   - **Lifecycle is `active → running → active`** (watched live): a created task is 'active', flips to
+//     'running' for the turn, then returns to 'active' when done (Bob never uses 'completed'). So the watch
+//     gates on 'running' — while running it's NOT done even though `updated_at` bumps with gaps up to ~6.5s —
+//     and settles once the row leaves 'running' AND goes quiet (`updated_at` still for `quietMs`).
+//   - `last_error` is the **string `"null"`** (JSON of null) on a successful run, real JSON on a failure —
+//     so "errored" means last_error is set AND not that sentinel.
+//   - The workspace is in `env.workspace` (JSON), not the `directory` column (which is "").
+//   - Result text + token costs live in a separate `messages` table / the `costs` column (V6).
+// See docs/bob-2-inprocess.md and the auto-memory bob-2-taskstore-schema.
 
 const requireModule = createRequire(import.meta.url);
 
@@ -47,16 +53,30 @@ export function bob2DbExists(path = bob2DbPath()): boolean {
   return existsSync(path);
 }
 
-/** Hard terminal: the task won't run again without new input. */
+/** Bob is mid-turn on the task. Live lifecycle is active→running→active, so 'running' (and the transient
+ *  'compacting') means NOT done — the watch must not settle while here, even across multi-second updated_at
+ *  gaps within the turn. */
+export function isActivelyRunning(status: string): boolean {
+  return status === "running" || status === "compacting";
+}
+
+/** Hard terminal status. Rare/unobserved in practice (a done task returns to 'active') — kept as a
+ *  belt-and-suspenders settle alongside the quiet-after-running rule, in case some task type does flip it. */
 export function isTerminal(status: string): boolean {
   return status === "completed" || status === "error";
 }
 
-/** The dispatched turn has settled (won't progress without input): a terminal status, or Bob recorded an
- *  error. Deliberately does NOT treat 'active'/'running'/'paused' as settled — the live status lifecycle
- *  is unverified, so we never infer completion from a non-terminal state (the wall-clock is the backstop). */
-export function isRowSettled(row: Bob2TaskRow): boolean {
-  return isTerminal(row.status) || row.last_error != null;
+/** Bob's real error for the task, or null. last_error is the string "null" (JSON of null) on a SUCCESSFUL
+ *  run and real JSON on a failure, so the literal "null" / "" sentinels are NOT errors. */
+export function taskError(row: Bob2TaskRow): string | null {
+  const e = row.last_error;
+  return e != null && e !== "null" && e !== "" ? e : null;
+}
+
+/** Has the turn run at all? A freshly-created row has updated_at == created_at; it advances once Bob
+ *  starts the turn. Distinguishes "created, not yet started" from "ran, now quiet" for the completion watch. */
+export function hasRun(row: Bob2TaskRow): boolean {
+  return row.created_at != null && row.updated_at != null && row.updated_at > row.created_at;
 }
 
 const COLS = "id, parent_id, status, directory, created_at, updated_at, costs, last_error";
@@ -125,21 +145,32 @@ export class Bob2TaskStore {
 /**
  * Poll a task row until the dispatched turn settles, or the wall-clock elapses (`settled:false` → the
  * driver maps that to a 'timeout'). Polling, not events (2.0 exposes none); pollMs trades latency for DB
- * load. Settles on isRowSettled (terminal status or last_error) — never on a non-terminal state, since
- * the live lifecycle is unverified. Override the rule via opts.isSettled (takes the row).
+ * load. Settle rule (live-validated against the active→running→active lifecycle):
+ *   - a real `last_error`, or a terminal status, settles immediately;
+ *   - otherwise the turn is done once it is NOT running, HAS run (updated_at advanced past created_at, so
+ *     we don't settle a created-but-unstarted row), AND has been quiet for `quietMs` (updated_at still).
+ * Gating on 'running' is what makes the multi-second updated_at gaps *within* a turn safe; `quietMs` only
+ * governs the not-running tail (post-turn, or a fast turn we never caught 'running'). Override via opts.isSettled.
  */
 export async function awaitTurnSettled(
   store: Bob2TaskStore,
   id: string,
-  opts: { pollMs?: number; timeoutMs?: number; isSettled?: (row: Bob2TaskRow) => boolean } = {},
+  opts: { pollMs?: number; timeoutMs?: number; quietMs?: number; isSettled?: (row: Bob2TaskRow) => boolean } = {},
 ): Promise<{ settled: boolean; row: Bob2TaskRow | null }> {
   const pollMs = opts.pollMs ?? 1000;
   const timeoutMs = opts.timeoutMs ?? 300_000;
-  const settledRule = opts.isSettled ?? isRowSettled;
+  const quietMs = opts.quietMs ?? 8000;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const row = store.read(id);
-    if (row && settledRule(row)) return { settled: true, row };
+    if (row) {
+      const settled = opts.isSettled
+        ? opts.isSettled(row)
+        : taskError(row) != null ||
+          isTerminal(row.status) ||
+          (!isActivelyRunning(row.status) && hasRun(row) && Date.now() - (row.updated_at ?? 0) >= quietMs);
+      if (settled) return { settled: true, row };
+    }
     if (Date.now() >= deadline) return { settled: false, row };
     await sleep(pollMs);
   }
