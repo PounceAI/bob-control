@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import "./suppress-warnings.js";
 import { randomUUID } from "node:crypto";
+import { pathToFileURL } from "node:url";
 import * as repo from "./db.js";
 import {
   resolveMode,
@@ -127,7 +128,7 @@ function buttonPatchPresent(): boolean | null {
  * treats this as a failure and auto-continues, asking Bob to implement the plan.
  */
 
-interface Opts {
+export interface Opts {
   once: boolean;
   newTab: boolean;
   dryRun: boolean;
@@ -190,7 +191,7 @@ const DEFAULT_BUDGET_FLAT_CAP = 100_000;
 /** Floor for the estimate-derived ceiling, so a low estimate can't abort real work early. */
 const BUDGET_CEILING_FLOOR = 50_000;
 
-function parseOpts(argv: string[]): Opts {
+export function parseOpts(argv: string[]): Opts {
   const val = (name: string): string | undefined => {
     const i = argv.indexOf(name);
     return i !== -1 ? argv[i + 1] : undefined;
@@ -305,7 +306,7 @@ const TERMINAL_CAUSE: Record<DispatchResult["status"], string> = {
  * and whose dependencies are all satisfied.
  * Returns the task plus counts of tasks skipped due to risk gate or blocked dependencies.
  */
-function pickEligible(opts: Opts): { task: Task | null; gated: number; blocked: number } {
+export function pickEligible(opts: Opts): { task: Task | null; gated: number; blocked: number } {
   const max = RISK_RANK[opts.maxRisk];
   const pending = repo.listTasks({ status: "pending", tag: opts.tag });
   let gated = 0;
@@ -1009,7 +1010,7 @@ async function finalizeDispatch(
   }
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const opts = parseOpts(process.argv.slice(2));
   // A stray unhandled rejection must not crash a long-running drain — log it and keep going.
   process.on("unhandledRejection", (reason) => {
@@ -1345,7 +1346,11 @@ async function main(): Promise<void> {
   process.exit(0);
 }
 
-main().catch((err) => {
-  console.error("bob-worker fatal:", err);
-  process.exit(1);
-});
+// Auto-run only as a CLI. Importing worker.ts — to reuse parseOpts / pickEligible / main from the 2.0
+// in-process driver (or a test) — must have no side effects. Matches cli.ts's is-main guard.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error("bob-worker fatal:", err);
+    process.exit(1);
+  });
+}
