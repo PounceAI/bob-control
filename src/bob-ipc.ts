@@ -27,7 +27,13 @@ const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 // Cap accumulated review findings so a flood of submit_review_findings frames can't grow unbounded.
 const MAX_REVIEW_FINDINGS = 1000;
 
-export interface DispatchOptions {
+/**
+ * The transport-shared dispatch inputs BOTH drivers honor. The 2.0 in-process driver can't honor the
+ * 1.x gate fields below (it has no event stream to drive a watchdog/budget/classifier off — see
+ * docs/bob-2-inprocess.md), so the `BobDriver` seam is typed on this subset; `DispatchOptions` adds the
+ * 1.x-only fields and is what `BobClient` takes.
+ */
+export interface DispatchCore {
   text: string;
   /** Bob mode slug; sent as configuration.mode. Omit to use Bob's current mode. */
   mode?: string | null;
@@ -40,6 +46,9 @@ export interface DispatchOptions {
   newTab?: boolean;
   /** Per-task timeout. Default 300000ms (5 min). */
   timeoutMs?: number;
+}
+
+export interface DispatchOptions extends DispatchCore {
   /**
    * Optional live event callback for logging/progress. `ask` is set (e.g. "command")
    * when Bob is *blocking for approval* rather than just narrating (`say`); the
