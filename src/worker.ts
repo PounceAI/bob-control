@@ -23,6 +23,8 @@ import { isCommandAsk } from "./command-policy.js";
 import { createFollowupGate, buildIdleAskQuestion, parseFollowup, followupDisposition } from "./followup-gate.js";
 import { handleStdinAnswer } from "./worker-answer.js";
 import { BobClient, resolvePipe, type DispatchResult } from "./bob-ipc.js";
+import { workspaceVerdict, workspaceMismatchQuestion, type WorkspaceMismatch } from "./workspace-guard.js";
+import { normalizeWorkspacePath } from "./pipe-name.js";
 import { formatReviewFindings, parseReviewFindings } from "./review-findings.js";
 import { createPollLoop, defaultVerify, defaultCaptureSnapshot, type VerifyResult } from "./bob-polls.js";
 import { ExternalActivity } from "./defer.js";
@@ -344,8 +346,42 @@ function emit(opts: Opts, type: string, data: Record<string, unknown> = {}): voi
   if (opts.emitJson) console.log(`@@WORKER ${JSON.stringify({ type, ...data })}`);
 }
 
+/** Is a process alive? `process.kill(pid, 0)` sends no signal but throws ESRCH if the pid is gone
+ *  (EPERM = it exists but we can't signal it = alive). Lets the lease tell a dead holder from a live one. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 /** Global registry of active followup gates, keyed by task ID. */
 const activeFollowupGates = new Map<number, ReturnType<typeof createFollowupGate>>();
+
+/** Refuse a picked task because the worker is on the wrong Bob: claim it, park it needs_input with the
+ *  mismatch message (board-visible) + notify. The caller then stops draining — every task here would
+ *  misroute identically, so one loud signal beats churning the whole board. */
+async function parkWorkspaceMismatch(task: Task, opts: Opts, m: WorkspaceMismatch): Promise<void> {
+  if (!repo.claimTask(task.id, opts.assignee)) {
+    console.log(`  (task #${task.id} vanished before the workspace guard could park it)`);
+    return;
+  }
+  const question = workspaceMismatchQuestion(m);
+  const q = repo.askQuestion(task.id, question);
+  if (q) {
+    console.log(
+      `  ✗ #${task.id} refused — wrong Bob ("${m.reported}"); parked needs_input (question ${q.question_id}).`,
+    );
+    emit(opts, "question", { id: task.id, title: task.title, question });
+    if (opts.notify) notify("Worker hit the wrong Bob", question);
+  } else {
+    // Lost the claim/in_progress window — record blocked so the refusal isn't silently dropped.
+    repo.updateStatus(task.id, "blocked");
+    repo.addNote(task.id, `Refused (wrong Bob): ${question}`, "worker");
+  }
+}
 
 async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: boolean | null): Promise<void> {
   const { mode, source, profile, pressesLand } = resolveRouting(task, patchPresent);
@@ -982,11 +1018,57 @@ async function main(): Promise<void> {
   });
   repo.getDb(); // surface schema errors up front
 
-  // Recover tasks a previous worker run left claimed when it died mid-dispatch (crash / hard kill):
-  // re-queue this assignee's in_progress tasks so they aren't stranded in_progress forever. Assumes
-  // one worker per assignee (the design — a single IPC pipe dispatches serially).
+  // Worktree lease + heartbeat (T7): at most one live worker per checkout. Keyed on the normalized cwd,
+  // so it holds whether the board is per-project or worktree-shared. claimWorktreeLease checks-and-claims
+  // atomically (one transaction), so two workers starting together can't both observe "no holder" and
+  // both proceed. The claim doubles as the first liveness heartbeat board_status reads.
+  const workerId = randomUUID();
+  const worktreeKey = normalizeWorkspacePath(process.cwd());
+  const beatMeta = { assignee: opts.assignee, pid: process.pid, worktree: worktreeKey };
   if (!opts.dryRun) {
-    const reclaimed = repo.reclaimStaleInProgress(opts.assignee);
+    let res = repo.claimWorktreeLease(workerId, beatMeta);
+    // A holder whose pid is provably dead (hard kill) is reclaimable; an unknown (null) pid counts as
+    // alive (conservative — never stomp a possibly-live worker). Reclaim a dead one, then retry the claim.
+    if (!res.claimed && !repo.holderIsLive(res.holder.pid, pidAlive)) {
+      console.log(`bob-worker: reclaiming a dead worker's lease (pid ${res.holder.pid ?? "?"}) on ${process.cwd()}.`);
+      repo.clearWorkerHeartbeat(res.holder.worker_id);
+      res = repo.claimWorktreeLease(workerId, beatMeta);
+    }
+    if (!res.claimed) {
+      const h = res.holder;
+      const who = `another worker (pid ${h.pid ?? "?"}, last beat ${h.last_beat_seconds_ago}s ago) owns this checkout's lease:\n  ${process.cwd()}`;
+      // For --once this is not an error — that worker drains the board and will run the queued task — so
+      // exit 0; a duplicate CONTINUOUS worker is a real misconfig that corrupts dispatch, so exit 1.
+      if (opts.once) {
+        console.log(`bob-worker: ${who}\nNothing to do — that worker is already draining this board (--once).`);
+        process.exit(0);
+      }
+      console.error(
+        `bob-worker: ✗ ${who}\nRefusing — two workers on one checkout corrupt each other's dispatch. Stop that ` +
+          `worker, or (after a hard kill) wait ${Math.ceil(repo.WORKER_HEARTBEAT_WINDOW_MS / 1000)}s for the lease to lapse.`,
+      );
+      emit(opts, "error", { message: `worktree lease held by pid ${h.pid ?? "?"} on ${process.cwd()}` });
+      process.exit(1);
+    }
+    // Lease held (the claim recorded the first beat). Refresh on a timer, independent of the dispatch
+    // loop, and clear on graceful exit; a hard kill is covered by the freshness window + pid reclaim.
+    setInterval(() => repo.recordWorkerHeartbeat(workerId, beatMeta), repo.WORKER_HEARTBEAT_INTERVAL_MS).unref();
+    process.on("exit", () => {
+      try {
+        repo.clearWorkerHeartbeat(workerId);
+      } catch {
+        /* best-effort on the way out */
+      }
+    });
+  }
+
+  // Recover tasks a previous worker run left claimed when it died mid-dispatch (crash / hard kill):
+  // re-queue this assignee's in_progress tasks so they aren't stranded forever. Scope it to this
+  // worker's --tag so that, on a shared board where several worktree workers run as the same default
+  // assignee, one worker's startup can't re-queue another worktree's in-flight task (no --tag → all,
+  // the single-worker default).
+  if (!opts.dryRun) {
+    const reclaimed = repo.reclaimStaleInProgress(opts.assignee, opts.tag);
     if (reclaimed) console.log(`bob-worker: re-queued ${reclaimed} stale in_progress task(s) from a prior run.`);
   }
 
@@ -1008,22 +1090,28 @@ async function main(): Promise<void> {
   }
   emit(opts, "connected", { pipe: resolvePipe(opts.pipe), maxRisk: opts.maxRisk });
 
-  // Heartbeat: announce this worker is alive and draining so board_status (and the dispatch
-  // skills' await_task) can tell the board is being serviced. Beats on a timer independent of the
-  // dispatch loop, so a long in-flight task doesn't read as "no worker". Cleared on graceful exit;
-  // a hard kill is covered by the liveness window. (A dry run isn't draining — skip it.)
+  // Layer-2 workspace handshake: ask the Bob we just connected to which folder it has open and confirm
+  // it's ours, so a misconfigured pipe pairing surfaces as a refusal instead of silently editing the
+  // wrong tree. Verdict applied per dispatch below (parking needs_input). Bob's reported folder can't
+  // change without a window reload, which drops the pipe — so a one-shot check at connect is enough.
+  let workspaceMismatch: WorkspaceMismatch | null = null;
   if (!opts.dryRun) {
-    const workerId = randomUUID();
-    const beat = () => repo.recordWorkerHeartbeat(workerId, { assignee: opts.assignee, pid: process.pid });
-    beat();
-    setInterval(beat, repo.WORKER_HEARTBEAT_INTERVAL_MS).unref();
-    process.on("exit", () => {
-      try {
-        repo.clearWorkerHeartbeat(workerId);
-      } catch {
-        /* best-effort on the way out */
-      }
-    });
+    const reported = await client.queryWorkspace();
+    workspaceMismatch = workspaceVerdict(reported, process.cwd());
+    if (!reported) {
+      console.log(
+        "bob-worker: ⚠ workspace handshake unavailable (Bob lacks the GetWorkspace patch, or no reply) — " +
+          "layer-2 guard inactive; relying on the pipe pairing (layer 1). Run `node tools/patch-bob-buttons.mjs` + restart Bob to enable it.",
+      );
+    } else if (workspaceMismatch) {
+      console.error(
+        `bob-worker: ✗ WRONG BOB — connected to a Bob open on "${reported}", but this worker is for ` +
+          `"${process.cwd()}". Tasks will be parked needs_input, NOT dispatched. Fix the pipe pairing and restart.`,
+      );
+      emit(opts, "error", { message: `workspace mismatch: bob=${reported} worker=${process.cwd()}` });
+    } else {
+      console.log(`bob-worker: ✓ workspace handshake OK — Bob is open on ${reported}.`);
+    }
   }
 
   let stopping = false;
@@ -1218,6 +1306,15 @@ async function main(): Promise<void> {
       }
       await sleep(opts.pollMs);
       continue;
+    }
+    // Wrong-Bob guard (layer 2): refuse to dispatch into a Bob open on a different workspace. Park this
+    // task needs_input (board-visible) and halt — every queued task would misroute the same way, so one
+    // loud signal beats churning the whole board. Exit non-zero: a fatal misroute is a failure, not a
+    // clean stop, so a supervisor/extension treats it as one (startup error + parked task explain it).
+    if (workspaceMismatch) {
+      await parkWorkspaceMismatch(task, opts, workspaceMismatch);
+      client.close();
+      process.exit(1);
     }
     pollStatus.enter("active");
     try {

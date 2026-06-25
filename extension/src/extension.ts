@@ -143,7 +143,9 @@ function startWorker(force = false): void {
     "--poll", String(c.get<number>("pollMs") ?? 3000),
     "--timeout", String(c.get<number>("timeoutMs") ?? 300000),
     "--assignee", c.get<string>("assignee") ?? "bob",
-    "--pipe", c.get<string>("pipe") ?? "\\\\.\\pipe\\pipe\\bob-ipc",
+    // Default to this host Bob's own socket so the worker targets the instance it runs in, not
+    // whichever Bob owns the shared global pipe; an explicit bobTasks.pipe still overrides.
+    "--pipe", c.get<string>("pipe") || process.env.ROO_CODE_IPC_SOCKET_PATH || "\\\\.\\pipe\\pipe\\bob-ipc",
     "--surface", c.get<string>("dispatch.surface") ?? "sidebar",
     "--defer-idle", String(c.get<number>("deferIdleMs") ?? 60000),
   ];
@@ -188,13 +190,26 @@ function startWorker(force = false): void {
   if (allowCommands && allowCommands.trim()) args.push("--allow-commands", allowCommands.trim());
 
   const env = { ...process.env };
-  // Per-session board: the worker reads the open project's own data/tasks.db, so each
-  // project Bob opens has its own queue (matching the plugin MCP's ${CLAUDE_PROJECT_DIR}
-  // board and that project's .bob/mcp.json). Without this the worker would fall back to
-  // db.ts's module-relative default = the connector's board, sharing one queue across
-  // every project. An explicit bobTasks.dbPath still overrides.
+  // Board selection, in precedence: explicit bobTasks.dbPath > worktree-shared > per-project. Per-project
+  // (default) gives each project its own queue (matching the plugin MCP's ${CLAUDE_PROJECT_DIR} board);
+  // without it the worker falls back to db.ts's module-relative default = the connector's board.
   const dbPath = c.get<string>("dbPath");
-  env.BOB_TASKS_DB = dbPath && dbPath.trim() ? dbPath.trim() : path.join(cwd, "data", "tasks.db");
+  // Honor an INHERITED BOB_TASKS_WORKTREE_SHARED too, not just the setting: the env var is the one opt-in
+  // every consumer (plugin MCP, statusline, CLI) reads, so the worker must agree or it'd drain a different
+  // board than the plugin fills. If we pinned BOB_TASKS_DB below, it would (rule 1) override that flag.
+  const worktreeShared = c.get<boolean>("worktreeShared") || !!process.env.BOB_TASKS_WORKTREE_SHARED;
+  if (dbPath && dbPath.trim()) {
+    env.BOB_TASKS_DB = dbPath.trim();
+  } else if (worktreeShared) {
+    // Every linked worktree drains the MAIN worktree's queue. Don't pin BOB_TASKS_DB (it would override
+    // the resolver). Pin CLAUDE_PROJECT_DIR to THIS worktree (cwd) so the resolver's base is deterministic
+    // — a stale CLAUDE_PROJECT_DIR inherited from the host process must not redirect it to another tree.
+    env.BOB_TASKS_WORKTREE_SHARED = "1";
+    env.CLAUDE_PROJECT_DIR = cwd;
+    delete env.BOB_TASKS_DB; // drop any inherited pin so the resolver runs
+  } else {
+    env.BOB_TASKS_DB = path.join(cwd, "data", "tasks.db");
+  }
 
   const node = c.get<string>("nodePath") || "node";
   out.appendLine(`[start] (cwd ${cwd}) ${node} ${args.join(" ")}`);

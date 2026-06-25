@@ -2,6 +2,11 @@
 REM Launch IBM Bob with its Roo Code IPC server enabled.
 REM IMPORTANT: fully QUIT Bob first (Bob is single-instance; relaunching while
 REM it runs just focuses the existing process and will NOT apply this env var).
+REM
+REM This is the LEGACY single-instance launcher: ONE global pipe (\\.\pipe\bob-ipc) + the default
+REM user-data-dir; pair it with a bare `launch-worker.cmd`. To run MULTIPLE Bobs at once (e.g. one per
+REM git worktree) without cross-firing dispatches, use `launch-bob.cmd <workspace>` (distinct
+REM per-instance pipe + user-data-dir) paired with `launch-worker.cmd <workspace>` instead.
 
 echo Ensuring Bob auto-approve is enabled (Bob must be closed)...
 node "%~dp0set-bob-autoapprove.mjs"

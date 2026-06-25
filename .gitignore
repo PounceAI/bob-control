@@ -45,3 +45,4 @@ test-deps.db
 *.db-shm
 *.db-wal
 *.db-journal
+test-worktree-pin.db

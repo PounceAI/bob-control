@@ -19,9 +19,11 @@
 //   1. argv[2]                 — explicit path (cross-platform, unlike an inline env
 //                                var which Windows `cmd` won't honor).
 //   2. $BOB_TASKS_DB           — explicit path via env.
-//   3. <project>/data/tasks.db — the current session's project board, if it exists
+//   3. $BOB_TASKS_WORKTREE_SHARED — the MAIN worktree's board (so a linked worktree shows the shared
+//                                queue), if that board file exists. Mirrors db.ts's resolver.
+//   4. <project>/data/tasks.db — the current session's project board, if it exists
 //                                (project dir comes from the session JSON on stdin).
-//   4. ~/.bob-tasks/tasks.db   — the shared portable board (fallback).
+//   5. ~/.bob-tasks/tasks.db   — the shared portable board (fallback).
 //
 // Claude Code pipes session JSON on stdin (model, workspace, …) and renders the
 // command's first stdout line. The board is read with a plain SELECT (NO migrate /
@@ -39,15 +41,46 @@ process.emitWarning = (w, ...a) => {
   return _emit(w, ...a);
 };
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve, basename } from "node:path";
+import { resolve, basename, join } from "node:path";
+
+// Main worktree's dir for a linked worktree (a .git FILE → "gitdir: <main>/.git/worktrees/<name>"),
+// else the dir itself for a main worktree / plain clone, else null. Sync, no git spawn — mirrors
+// sharedWorktreeBoard in src/db.ts (kept in sync by hand; the statusline can't import the bundle).
+function mainWorktreeDir(dir) {
+  const gitPath = join(dir, ".git");
+  let st;
+  try {
+    st = statSync(gitPath);
+  } catch {
+    return null;
+  }
+  if (st.isDirectory()) return dir;
+  let content;
+  try {
+    content = readFileSync(gitPath, "utf8").trim();
+  } catch {
+    return null;
+  }
+  if (!content.startsWith("gitdir:")) return null;
+  const gitdir = resolve(dir, content.slice(7).trim().replace(/\\/g, "/")).replace(/\\/g, "/");
+  const marker = gitdir.toLowerCase().lastIndexOf("/.git/worktrees/");
+  return marker === -1 ? null : gitdir.slice(0, marker);
+}
 
 function dbPath(projectDir) {
   if (process.argv[2]) return resolve(process.argv[2]); // explicit path wins
   if (process.env.BOB_TASKS_DB) return resolve(process.env.BOB_TASKS_DB);
-  // Per-session: the current project's own board, if it has one.
   if (projectDir) {
+    // Worktree-shared opt-in: a linked worktree shows the MAIN worktree's board. Return it
+    // unconditionally (like db.ts) so we never fall back to this worktree's OWN board and show a
+    // different queue than the worker drains; the caller's existsSync gates whether a segment renders.
+    if (process.env.BOB_TASKS_WORKTREE_SHARED) {
+      const main = mainWorktreeDir(projectDir);
+      if (main) return resolve(main, "data", "tasks.db");
+    }
+    // Per-session: the current project's own board, if it has one.
     const local = resolve(projectDir, "data", "tasks.db");
     if (existsSync(local)) return local;
   }

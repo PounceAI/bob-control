@@ -41,7 +41,7 @@ function workerLikelyActive(): boolean {
 
 const server = new McpServer({
   name: "bob-control",
-  version: "1.0.0",
+  version: "1.1.0",
 });
 
 type ToolResult = {
@@ -582,7 +582,8 @@ server.registerTool(
     description:
       "Dispatch state, counts, and the live task list: whether the board is `armed`, task `counts` by " +
       "status, whether a worker looks active, whether a worker is currently draining the board " +
-      "(`worker_draining` — a live heartbeat), and `open_tasks` — the non-terminal tasks (staged / " +
+      "(`worker_draining` — a live heartbeat), `worker_leases` (which checkout each live worker owns), " +
+      "and `open_tasks` — the non-terminal tasks (staged / " +
       "pending / in_progress / needs_input / blocked) as compact {id,title,status,mode,tags,priority} " +
       "rows for deduping before create_task (capped; see open_tasks_truncated). Check " +
       "`worker_draining.draining` before await_task: if false, nothing will pull the task, so don't " +
@@ -599,6 +600,7 @@ server.registerTool(
       armed: repo.isBoardArmed(),
       worker_likely_active: workerLikelyActive(),
       worker_draining: repo.getWorkerLiveness(),
+      worker_leases: repo.getWorkerLeases(), // T7: which worktree each live worker owns
       counts: repo.countByStatus(tasks),
       total: tasks.length,
       open_tasks,

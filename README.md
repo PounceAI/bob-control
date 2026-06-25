@@ -16,6 +16,10 @@ The worker pulls each task in dependency and priority order and dispatches it to
 connects to — and Claude Code speaks the same MCP, so it can work the **same board** as
 foreman (provision / route / triage) or worker.
 
+> **Compatibility:** this release targets **IBM Bob 1.x**. IBM Bob 2.0 removes the IPC pipe Bob
+> Control drives, so 2.0 support (plugin 2.0, in-process) is a separate line of work **in this same
+> repo** — see [CHANGELOG → Compatibility](CHANGELOG.md#compatibility-1x-vs-2x).
+
 ### Where it fits
 
 This is the **runtime execution + orchestration** layer: it actually drives a live agent,
@@ -36,9 +40,11 @@ npm run smoke      # optional self-test
 
 Needs Node 22.5+ (uses the built-in `node:sqlite`, so there's no native build step).
 Board path resolution: `BOB_TASKS_DB` (explicit) › `BOB_TASKS_PORTABLE=1` (a shared
-`~/.bob-tasks/tasks.db`) › `CLAUDE_PROJECT_DIR/data/tasks.db` (Claude Code sets
-`CLAUDE_PROJECT_DIR` in every MCP server it spawns — plugin **and** a plain terminal/project
-`.mcp.json` — so both resolve the same project board) › repo-local module-relative `data/tasks.db`.
+`~/.bob-tasks/tasks.db`) › `BOB_TASKS_WORKTREE_SHARED=1` (every linked git worktree resolves the
+**main** worktree's `data/tasks.db`; a no-op for non-worktree dirs) › `CLAUDE_PROJECT_DIR/data/tasks.db`
+(Claude Code sets `CLAUDE_PROJECT_DIR` in every MCP server it spawns — plugin **and** a plain
+terminal/project `.mcp.json` — so both resolve the same project board) › repo-local module-relative
+`data/tasks.db`.
 The plugin points each project at **its own** board (see
 [Boards are per project](#boards-are-per-project)). On first open the store also writes a
 `.gitignore` beside itself, so the board never lands as untracked state in a consuming repo.
@@ -554,6 +560,80 @@ node bob-control.mjs --list-pipes
 To enable it, fully quit Bob, then relaunch from the Start menu or
 [launch-bob-ipc.cmd](launch-bob-ipc.cmd) (which also enables auto-approve for
 unattended runs — see above).
+
+## Worktrees: run N in parallel
+
+Keep `main`, `feat-a`, … checked out at once and let Bob work in each at the same time on **one
+shared board**, without two workers racing the same checkout.
+
+**The model: one Bob window *and* one worker per worktree, sharing the main worktree's
+`data/tasks.db`.** A task is *pinned* to a worktree with a `worktree:<name>` tag (routing); a
+worktree is *leased* by one live worker at a time (exclusivity). Both are required: a Bob window
+owns one IPC pipe and edits one folder, so a task only reaches worktree X if a Bob+worker already
+bound to X pulls it.
+
+**1. Add the worktrees** (each on its own branch) and build once in the main checkout — the
+launcher and worker run *its* `dist/`:
+
+```powershell
+git worktree add ..\bob-control-feat-a feat-a
+git worktree add ..\bob-control-feat-b feat-b
+npm run build
+```
+
+**2. Launch one Bob per worktree.** [launch-bob.cmd](launch-bob.cmd) binds a Bob to one workspace
+on a **distinct pipe + `--user-data-dir`** (so two Electron instances coexist), seeds auto-approve
+into `%LOCALAPPDATA%\bob-instances\<slug>`, and scaffolds `bobTasks.pipe` into that worktree's
+`.vscode/settings.json`. The pipe is derived from the **workspace path** by
+[tools/print-pipe-name.mjs](tools/print-pipe-name.mjs) — the single source of truth, shared by the
+launcher and the worker — so concurrent windows never collide on one global pipe:
+
+```powershell
+.\launch-bob.cmd C:\dev\bob-control            # main window
+.\launch-bob.cmd C:\dev\bob-control-feat-a     # feat-a window
+```
+
+**3. Start one worker per worktree** — cwd = the worktree (so checkpoints / diffs / evidence run
+against *its* files and the lease keys on *its* path), the shared board on, pinned to its tag, and
+pointed at its Bob's pipe:
+
+```powershell
+cd C:\dev\bob-control-feat-a                                                  # worker cwd = the worktree
+$env:BOB_TASKS_WORKTREE_SHARED = "1"                                          # resolve the MAIN worktree's board
+$env:ROO_CODE_IPC_SOCKET_PATH  = (node C:\dev\bob-control\tools\print-pipe-name.mjs C:\dev\bob-control-feat-a)
+node C:\dev\bob-control\dist\worker.js --tag worktree:feat-a
+```
+
+`BOB_TASKS_WORKTREE_SHARED=1` makes `defaultDbPath()` resolve the **main** worktree's board from any
+linked worktree (a no-op for non-worktree dirs — see [Setup](#setup)). The **lease** refuses a 2nd
+worker on the same checkout and reclaims a dead one after the heartbeat window; `board_status`
+lists `worker_leases` so a foreman sees who owns what. *(In-editor: set `bobTasks.tag` +
+`bobTasks.worktreeShared`; `bobTasks.pipe` is scaffolded by step 2.)*
+
+**4. Pin tasks to a worktree** and each dispatches only into that window:
+
+```powershell
+node dist/cli.js create "Add export to feat-a" --tags worktree:feat-a
+node dist/cli.js create "Fix feat-b regression" --tags worktree:feat-b
+```
+
+**Rules that keep it isolated** — the pin is a convention the tag filter enforces at *discovery*,
+not at claim, so:
+
+- **Tag every worker and every task; never run an untagged worker beside them** — an untagged
+  puller (`worker` with no `--tag`, `bob next`, `/bob-work`) sees every pinned task.
+- **Keep a task's `depends_on` in its own worktree** — a `worktree:feat-a` task waiting on a
+  `worktree:feat-b` task deadlocks: feat-a's worker never pulls the prerequisite.
+- **One `worktree:` tag per task** — two would make both workers eligible.
+- Workers can share the default assignee `bob`: startup reclaim is tag-scoped, so a restart
+  re-queues only that worker's own `worktree:<name>` slice.
+
+**Verify:** create one task per worktree, confirm each lands in its own window and edits its own
+checkout, that `board_status` shows one lease per worktree, and that feat-a's worker never pulls
+feat-b's task.
+
+> **Bob-1.x only** — worktree parallelism rides Bob's IPC pipe, which IBM Bob 2.0 removes; see
+> [CHANGELOG → Compatibility](CHANGELOG.md#compatibility-1x-vs-2x).
 
 ## Task model
 

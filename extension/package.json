@@ -2,7 +2,7 @@
   "name": "bob-tasks",
   "displayName": "Bob Tasks",
   "description": "Auto-dispatch queued tasks to IBM Bob, with mode routing, a safety gate, defer-while-chatting, and native notifications.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "local",
   "license": "Apache-2.0",
   "engines": { "vscode": "^1.94.0" },
@@ -34,10 +34,14 @@
           "default": "",
           "description": "SQLite task DB (BOB_TASKS_DB). Empty = the project's data/tasks.db. Must match the MCP server's DB."
         },
+        "bobTasks.worktreeShared": {
+          "type": "boolean",
+          "default": false,
+          "description": "Share ONE board across all linked git worktrees of a repo: this worktree's worker drains the MAIN worktree's data/tasks.db. Governs the WORKER only — to also make a Claude session running INSIDE a linked worktree file to the shared board, set the BOB_TASKS_WORKTREE_SHARED=1 environment variable (every consumer reads it). Ignored when bobTasks.dbPath is set; a no-op for non-worktree projects."
+        },
         "bobTasks.pipe": {
           "type": "string",
-          "default": "\\\\.\\pipe\\pipe\\bob-ipc",
-          "description": "Bob IPC named pipe."
+          "description": "Bob IPC named pipe. Blank = auto-detect this instance's own pipe from ROO_CODE_IPC_SOCKET_PATH (needed when multiple Bob instances run at once). Set only to override."
         },
         "bobTasks.maxRisk": {
           "type": "string",

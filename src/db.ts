@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -19,21 +19,59 @@ const requireModule = createRequire(import.meta.url);
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * Map a worktree dir to the board it shares (the MAIN worktree's data/tasks.db), so concurrent linked
+ * worktrees of one repo drain ONE queue. Sync (no git spawn) — defaultDbPath must stay sync — by reading
+ * `<dir>/.git`:
+ *   - a `.git` DIRECTORY → this is the main worktree (or a plain clone): board lives right here.
+ *   - a `.git` FILE → `gitdir: <main>/.git/worktrees/<name>`; strip `/.git/worktrees/<name>` → `<main>`.
+ * Returns null when `dir` isn't a git worktree at all, so the caller falls through to per-dir resolution.
+ */
+export function sharedWorktreeBoard(dir: string): string | null {
+  const gitPath = join(dir, ".git");
+  let st;
+  try {
+    st = statSync(gitPath);
+  } catch {
+    return null; // no .git → not a worktree
+  }
+  if (st.isDirectory()) return resolve(dir, "data", "tasks.db");
+  let content: string;
+  try {
+    content = readFileSync(gitPath, "utf8").trim();
+  } catch {
+    return null;
+  }
+  if (!content.startsWith("gitdir:")) return null;
+  // gitdir may be relative to the worktree dir; resolve, fold to forward slashes, strip the suffix.
+  const gitdir = resolve(dir, content.slice(7).trim().replace(/\\/g, "/")).replace(/\\/g, "/");
+  const marker = gitdir.toLowerCase().lastIndexOf("/.git/worktrees/");
+  if (marker === -1) return null;
+  return resolve(gitdir.slice(0, marker), "data", "tasks.db");
+}
+
 // SQLite path resolution, in order:
-//   1. BOB_TASKS_DB         — explicit path wins.
-//   2. BOB_TASKS_PORTABLE   — a shared board in the user's home (~/.bob-tasks/tasks.db),
+//   1. BOB_TASKS_DB             — explicit path wins.
+//   2. BOB_TASKS_PORTABLE       — a shared board in the user's home (~/.bob-tasks/tasks.db),
 //      so the Claude Code plugin and Bob can agree on one queue from any repo.
-//   3. CLAUDE_PROJECT_DIR   — the open project's <dir>/data/tasks.db. Claude Code sets this in every
+//   3. BOB_TASKS_WORKTREE_SHARED — opt-in: every linked worktree resolves the MAIN worktree's board
+//      (base = CLAUDE_PROJECT_DIR or cwd). A no-op for a plain clone / non-git dir (resolves to its own
+//      data/tasks.db, same as 4), so it only changes behavior for actual linked worktrees.
+//   4. CLAUDE_PROJECT_DIR       — the open project's <dir>/data/tasks.db. Claude Code sets this in every
 //      MCP server it spawns (plugin AND a terminal/project .mcp.json), so a terminal-configured
 //      server lands on the SAME project board the plugin does without an explicit BOB_TASKS_DB —
-//      otherwise the module-relative fallback (4) reads a different board than the worker writes.
-//   4. else                 — the repo-local <project-root>/data/tasks.db (module-relative).
+//      otherwise the module-relative fallback (5) reads a different board than the worker writes.
+//   5. else                     — the repo-local <project-root>/data/tasks.db (module-relative).
 export function defaultDbPath(): string {
   // .trim() so a whitespace-only value doesn't resolve to a bogus path ("" is already falsy).
   const explicit = process.env.BOB_TASKS_DB?.trim();
   if (explicit) return resolve(explicit);
   if (process.env.BOB_TASKS_PORTABLE) return resolve(homedir(), ".bob-tasks", "tasks.db");
   const projectDir = process.env.CLAUDE_PROJECT_DIR?.trim();
+  if (process.env.BOB_TASKS_WORKTREE_SHARED) {
+    const shared = sharedWorktreeBoard(projectDir || process.cwd());
+    if (shared) return shared; // not a git worktree → fall through to per-dir resolution below
+  }
   if (projectDir) return resolve(projectDir, "data", "tasks.db");
   return resolve(moduleDir, "..", "data", "tasks.db");
 }
@@ -155,6 +193,7 @@ function migrate(d: DatabaseSync): void {
       worker_id  TEXT PRIMARY KEY,
       assignee   TEXT,
       pid        INTEGER,
+      worktree   TEXT,
       started_at TEXT NOT NULL,
       last_beat  TEXT NOT NULL
     );
@@ -166,6 +205,7 @@ function migrate(d: DatabaseSync): void {
   addColumnIfMissing(d, "tasks", "retry_attempts", "INTEGER DEFAULT 0");
   addColumnIfMissing(d, "tasks", "checkpoint", "TEXT");
   addColumnIfMissing(d, "tasks", "estimated_tokens", "INTEGER");
+  addColumnIfMissing(d, "worker_heartbeats", "worktree", "TEXT"); // T7 worktree lease
 }
 
 /**
@@ -591,18 +631,107 @@ export interface WorkerLiveness {
 }
 
 /** A draining worker announces it's alive. Upsert keyed by a stable per-process id; refresh
- *  last_beat each call. */
+ *  last_beat each call. `worktree` is the checkout the worker is bound to (its normalized cwd) —
+ *  the key the lease (worktreeLeaseHolder) guards so two workers can't bind one checkout. */
 export function recordWorkerHeartbeat(
   workerId: string,
-  meta: { assignee?: string | null; pid?: number | null } = {},
+  meta: { assignee?: string | null; pid?: number | null; worktree?: string | null } = {},
 ): void {
   const now = nowIso();
   getDb()
     .prepare(
-      `INSERT INTO worker_heartbeats (worker_id, assignee, pid, started_at, last_beat) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(worker_id) DO UPDATE SET assignee = excluded.assignee, pid = excluded.pid, last_beat = excluded.last_beat`,
+      `INSERT INTO worker_heartbeats (worker_id, assignee, pid, worktree, started_at, last_beat) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(worker_id) DO UPDATE SET assignee = excluded.assignee, pid = excluded.pid, worktree = excluded.worktree, last_beat = excluded.last_beat`,
     )
-    .run(workerId, meta.assignee ?? null, meta.pid ?? null, now, now);
+    .run(workerId, meta.assignee ?? null, meta.pid ?? null, meta.worktree ?? null, now, now);
+}
+
+export interface WorktreeLeaseHolder {
+  worker_id: string;
+  pid: number | null;
+  last_beat_seconds_ago: number;
+}
+
+/** The live lease holder for a worktree (a DIFFERENT worker that beat within `windowMs`), or null.
+ *  `worktree` is a normalized cwd key; the caller passes its own id to exclude itself. The worker
+ *  uses this at startup to refuse a second worker on the same checkout (and may reclaim a holder whose
+ *  pid is dead — see clearWorkerHeartbeat). `nowMs` injectable for tests. */
+export function worktreeLeaseHolder(
+  worktree: string,
+  excludeWorkerId: string,
+  windowMs = WORKER_HEARTBEAT_WINDOW_MS,
+  nowMs = Date.now(),
+): WorktreeLeaseHolder | null {
+  const row = getDb()
+    .prepare(
+      "SELECT worker_id, pid, last_beat FROM worker_heartbeats WHERE worktree = ? AND worker_id != ? ORDER BY last_beat DESC LIMIT 1",
+    )
+    .get(worktree, excludeWorkerId) as { worker_id: string; pid: number | null; last_beat: string } | undefined;
+  if (!row) return null;
+  const beat = Date.parse(row.last_beat);
+  if (!Number.isFinite(beat) || beat < nowMs - windowMs) return null; // unparseable or stale → not a live lease
+  return {
+    worker_id: row.worker_id,
+    pid: row.pid,
+    last_beat_seconds_ago: Math.max(0, Math.round((nowMs - beat) / 1000)),
+  };
+}
+
+export type LeaseClaim = { claimed: true } | { claimed: false; holder: WorktreeLeaseHolder };
+
+/** Atomically claim a worktree's lease: in ONE transaction, check for a live holder and — finding none —
+ *  record this worker's heartbeat (the claim). Returns {claimed:false, holder} if another live worker
+ *  already owns it. BEGIN IMMEDIATE serializes concurrent claimers, so two workers starting together
+ *  can't both observe "no holder" and both proceed (the check-then-claim race). The caller decides
+ *  refuse-vs-reclaim on a lost claim (see holderIsLive). */
+export function claimWorktreeLease(
+  workerId: string,
+  meta: { assignee?: string | null; pid?: number | null; worktree: string },
+  windowMs = WORKER_HEARTBEAT_WINDOW_MS,
+  nowMs = Date.now(),
+): LeaseClaim {
+  return transaction(() => {
+    const holder = worktreeLeaseHolder(meta.worktree, workerId, windowMs, nowMs);
+    if (holder) return { claimed: false, holder };
+    recordWorkerHeartbeat(workerId, meta);
+    return { claimed: true };
+  });
+}
+
+/** Conservative liveness of a lease holder for the reclaim decision: an unknown (null) pid counts as
+ *  ALIVE, so we never reclaim a possibly-live worker's lease — only a pid `isPidAlive` reports dead is
+ *  reclaimable. `isPidAlive` is injected (the worker passes a `process.kill(pid, 0)` probe), so this
+ *  stays pure and testable. */
+export function holderIsLive(pid: number | null, isPidAlive: (pid: number) => boolean): boolean {
+  return pid == null ? true : isPidAlive(pid);
+}
+
+export interface WorkerLease {
+  worktree: string | null;
+  worker_id: string;
+  pid: number | null;
+  last_beat_seconds_ago: number;
+}
+
+/** Live worker leases (beat within `windowMs`), most-recent first — surfaced in board_status so a
+ *  foreman sees which worktree each worker owns. `nowMs` injectable for tests. */
+export function getWorkerLeases(windowMs = WORKER_HEARTBEAT_WINDOW_MS, nowMs = Date.now()): WorkerLease[] {
+  const rows = getDb()
+    .prepare("SELECT worker_id, pid, worktree, last_beat FROM worker_heartbeats ORDER BY last_beat DESC")
+    .all() as { worker_id: string; pid: number | null; worktree: string | null; last_beat: string }[];
+  const liveCutoff = nowMs - windowMs;
+  return (
+    rows
+      // Only rows that actually claimed a worktree are leases; a null-worktree beat (pre-T7 / non-worktree
+      // worker) shows under worker_draining, not here, so worker_leases is always {worktree:string,…}.
+      .filter((r) => r.worktree != null && Date.parse(r.last_beat) >= liveCutoff)
+      .map((r) => ({
+        worktree: r.worktree,
+        worker_id: r.worker_id,
+        pid: r.pid,
+        last_beat_seconds_ago: Math.max(0, Math.round((nowMs - Date.parse(r.last_beat)) / 1000)),
+      }))
+  );
 }
 
 /** Drop a worker's heartbeat on graceful shutdown (best-effort; the window covers a hard kill). */
@@ -964,11 +1093,13 @@ export function incrementRetryAttempts(id: number): Task | null {
 /**
  * Re-queue this assignee's in_progress tasks back to pending — called at worker startup to recover
  * tasks a previous run left claimed when it died mid-dispatch (crash / hard kill), so they aren't
- * stranded in_progress forever. Assumes a single worker per assignee (the design — one IPC pipe
- * dispatches serially). Returns the number re-queued.
+ * stranded in_progress forever. `tag` scopes the reclaim to the worker's own slice (e.g. its
+ * `worktree:<name>` pin) so that, on a shared board where several worktree workers run as the same
+ * default assignee, one worker's startup can't re-queue another worktree's in-flight task. Returns
+ * the number re-queued.
  */
-export function reclaimStaleInProgress(assignee: string): number {
-  const stale = listTasks({ status: "in_progress" }).filter((t) => t.assignee === assignee);
+export function reclaimStaleInProgress(assignee: string, tag?: string): number {
+  const stale = listTasks({ status: "in_progress", tag }).filter((t) => t.assignee === assignee);
   for (const t of stale) {
     updateStatus(t.id, "pending");
     addNote(

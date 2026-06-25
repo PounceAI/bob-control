@@ -142,9 +142,20 @@ interface ActiveDispatch {
   pendingAskText?: string;
 }
 
-/** Default to the node-ipc-mangled doubled pipe that Bob actually registers. */
+/**
+ * Pick the IPC pipe to dispatch over: explicit arg › BOB_IPC_PIPE › the host Bob's own
+ * ROO_CODE_IPC_SOCKET_PATH (so a worker pairs with ITS instance, not whichever owns the shared global
+ * pipe) › the legacy pre-doubled default. Blank/whitespace at any level falls through, so a set-but-empty
+ * env var (or `--pipe ""`) can't resolve to "" and strand the worker on net.connect("").
+ */
 export function resolvePipe(p?: string): string {
-  return p ?? process.env.BOB_IPC_PIPE ?? "\\\\.\\pipe\\pipe\\bob-ipc";
+  const nonBlank = (s: string | undefined): string | undefined => (s && s.trim() ? s : undefined);
+  return (
+    nonBlank(p) ??
+    nonBlank(process.env.BOB_IPC_PIPE) ??
+    nonBlank(process.env.ROO_CODE_IPC_SOCKET_PATH) ??
+    "\\\\.\\pipe\\pipe\\bob-ipc"
+  );
 }
 
 /**
@@ -171,6 +182,9 @@ export class BobClient {
   private connectSettle: { resolve: () => void; reject: (e: Error) => void } | null = null;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private observer: ((ev: TaskLifecycleEvent) => void) | null = null;
+  // One-shot waiter for a GetWorkspace reply (the layer-2 workspace handshake). Set by queryWorkspace,
+  // resolved by handle() on the workspaceInfo TaskEvent, cleared on resolve/timeout.
+  private workspaceWaiter: ((fsPath: string | null) => void) | null = null;
   // Owns the dispatch→task-id binding, ignoring foreign (chat) tasks so an open Bob chat
   // can't steal it. Long-lived (not per-dispatch) so foreign chats stay tracked across runs.
   private binder = new TaskBinder();
@@ -216,6 +230,7 @@ export class BobClient {
 
   /** Detach + destroy the current socket so a stale one can't fire handlers or leak a handle. */
   private teardownSocket(): void {
+    this.workspaceWaiter?.(null); // settle a handshake query awaiting this socket (close()/connect-timeout)
     const sock = this.sock;
     this.sock = null;
     this.connected = false;
@@ -316,6 +331,17 @@ export class BobClient {
       const ev = msg.data ?? {};
       const name: string = ev.eventName ?? ev.event ?? ev.type ?? "event";
       const payload = ev.payload ?? ev.data ?? ev;
+
+      // GetWorkspace reply (layer-2 handshake): not a task event — resolve the waiter and stop, so it
+      // never reaches the binder/dispatch logic. fsPath blank/non-string → null (unverifiable).
+      if (/^workspaceInfo$/i.test(name)) {
+        if (this.workspaceWaiter) {
+          const raw = typeof payload?.fsPath === "string" ? payload.fsPath.trim() : "";
+          this.workspaceWaiter(raw || null);
+        }
+        return;
+      }
+
       const rawTaskId =
         payload?.taskId ??
         (Array.isArray(payload) ? (typeof payload[0] === "string" ? payload[0] : payload[0]?.taskId) : undefined);
@@ -452,6 +478,9 @@ export class BobClient {
   }
 
   private finish(status: DispatchResult["status"]): void {
+    // On a pipe drop, settle a pending handshake query null — else its unref'd timer can't keep the
+    // worker alive and queryWorkspace's promise never resolves (silent exit). Only on "aborted".
+    if (status === "aborted") this.workspaceWaiter?.(null);
     const a = this.active;
     if (!a || a.done) return;
     a.done = true;
@@ -607,6 +636,33 @@ export class BobClient {
       origin: "client",
       clientId: this.clientId,
       data: { commandName: "SendMessage", data: { text, images: [] } },
+    });
+  }
+
+  /**
+   * Layer-2 handshake: ask the connected Bob which workspace folder it has open, so the worker can
+   * refuse to run git/edits against the wrong tree. Resolves the reported fsPath, or null when it
+   * can't be learned — Bob lacks the GetWorkspace patch (the command is dropped, no reply), the reply
+   * is malformed, or no reply lands within `timeoutMs`. Requires the bundle patch (patch-bob-buttons.mjs).
+   */
+  queryWorkspace(timeoutMs = 1500): Promise<string | null> {
+    if (!this.connected || !this.sock) return Promise.resolve(null);
+    return new Promise<string | null>((resolve) => {
+      const finish = (fsPath: string | null): void => {
+        clearTimeout(timer);
+        if (this.workspaceWaiter === finish) this.workspaceWaiter = null;
+        resolve(fsPath);
+      };
+      const timer = setTimeout(() => finish(null), timeoutMs);
+      timer.unref?.();
+      this.workspaceWaiter = finish;
+      const sent = this.send({
+        type: "TaskCommand",
+        origin: "client",
+        clientId: this.clientId,
+        data: { commandName: "GetWorkspace" },
+      });
+      if (!sent) finish(null);
     });
   }
 

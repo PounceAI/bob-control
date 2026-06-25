@@ -122,6 +122,49 @@ export async function runDispatch(events: TaskEventFrame[], opts: RunOptions = {
   }
 }
 
+/**
+ * Stand up a stub Bob over a real in-process pipe for non-dispatch query tests (e.g. GetWorkspace): Ack
+ * on connect, then invoke `onGetWorkspace(sock)` for each GetWorkspace TaskCommand — write a reply with
+ * `frame(taskEvent("workspaceInfo", {...}))`, or do nothing to emulate an unpatched Bob. Connects a
+ * BobClient, runs `body`, tears both down. Keeps the wire protocol in this one harness, not the suites.
+ */
+export async function withStubBob(
+  onGetWorkspace: (sock: net.Socket) => void,
+  body: (client: BobClient) => Promise<void>,
+): Promise<void> {
+  const path = pipePath();
+  const server = net.createServer((sock) => {
+    sock.write(frame({ type: "Ack", data: { clientId: "test" } }));
+    let buf = "";
+    sock.on("data", (chunk) => {
+      buf += chunk.toString("utf8");
+      let i: number;
+      while ((i = buf.indexOf(DELIM)) !== -1) {
+        const raw = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        if (!raw.trim()) continue;
+        let m: { type?: string; data?: { data?: { commandName?: string } } };
+        try {
+          m = JSON.parse(raw);
+        } catch {
+          continue;
+        }
+        const inner = m?.type === "message" ? m.data : (m as { data?: { commandName?: string } });
+        if (inner?.data?.commandName === "GetWorkspace") onGetWorkspace(sock);
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(path, resolve));
+  const client = new BobClient(path);
+  try {
+    await client.connect();
+    await body(client);
+  } finally {
+    client.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
 /** Lookup helper: isOwn for the (taskId, eventName) lifecycle event the observer saw. */
 export const ownOf =
   (seen: TaskLifecycleEvent[]) =>

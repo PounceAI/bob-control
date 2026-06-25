@@ -38,6 +38,13 @@ npm run lint && npm run format:check && npm test
 (`npm run format` auto-fixes formatting.) CI runs lint → format:check → build → test+coverage on
 Windows for Node 22 and 24; a red check blocks the merge.
 
+## Worktrees (run several in parallel)
+
+Several worktrees of this repo can run in parallel on **one shared board**: one Bob window + one
+worker per worktree, each pinned `--tag worktree:<name>`, board shared via `BOB_TASKS_WORKTREE_SHARED=1`.
+Launch a per-worktree Bob with `launch-bob.cmd <worktree-path>`; a per-worktree lease keeps one worker
+per checkout. Full runbook (and the Bob-1.x-only caveat): [README → Worktrees](README.md#worktrees-run-n-in-parallel).
+
 ## Notes
 
 - The board is a pull queue: creating a task does not start Bob. Bob runs it when its
