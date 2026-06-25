@@ -22,7 +22,8 @@ All settings are under the `bobTasks.*` namespace:
 - **`bobTasks.projectRoot`** — Working directory the worker runs in — the project Bob operates on (verify/judge run git here). Empty = the first workspace folder. To locate `dist/worker.js`, use `bobTasks.connectorPath` instead.
 - **`bobTasks.nodePath`** — Node executable used to run the worker. Must be Node >= 22.5 (for `node:sqlite`). Set an absolute path if `node` on PATH is older.
 - **`bobTasks.dbPath`** — SQLite task DB (`BOB_TASKS_DB`). Empty = the project's `data/tasks.db`. Must match the MCP server's DB.
-- **`bobTasks.pipe`** — Bob IPC named pipe. Default: `\\.\pipe\pipe\bob-ipc` (the doubled form node-ipc registers).
+- **`bobTasks.worktreeShared`** — Share ONE board across all linked git worktrees of a repo: this worktree's worker drains the **main** worktree's `data/tasks.db`. Governs the worker only — to also make a Claude session running *inside* a linked worktree file to the shared board, set `BOB_TASKS_WORKTREE_SHARED=1` in the environment (every consumer reads it). Ignored when `bobTasks.dbPath` is set; a no-op for non-worktree projects.
+- **`bobTasks.pipe`** — Bob IPC named pipe. Blank = auto-detect this instance's own pipe from `ROO_CODE_IPC_SOCKET_PATH` (needed when multiple Bob instances run at once); set only to override. Fallback: `\\.\pipe\pipe\bob-ipc`.
 - **`bobTasks.maxRisk`** — Only auto-dispatch tasks whose mode risk is at or below this. Options: `safe`, `standard`, `elevated`. Default: `standard`. (`advanced` mode is elevated.)
 - **`bobTasks.pollMs`** — Idle poll interval (ms). Default: `3000`.
 - **`bobTasks.timeoutMs`** — Per-task dispatch timeout (ms). Default: `300000` (5 minutes).
@@ -136,7 +137,7 @@ This compiles the TypeScript source to `extension/out/extension.js`.
 npm run package
 ```
 
-This creates `bob-tasks-1.0.0.vsix`. Then in Bob:
+This creates `bob-tasks-1.1.0.vsix`. Then in Bob:
 
 1. Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`)
 2. Run **Extensions: Install from VSIX…**
@@ -147,8 +148,8 @@ This creates `bob-tasks-1.0.0.vsix`. Then in Bob:
 
 Copy the entire `extension/` directory to Bob's extensions folder:
 
-- Windows: `%USERPROFILE%\.bobide\extensions\local.bob-tasks-1.0.0\`
-- macOS/Linux: `~/.bobide/extensions/local.bob-tasks-1.0.0/`
+- Windows: `%USERPROFILE%\.bobide\extensions\local.bob-tasks-1.1.0\`
+- macOS/Linux: `~/.bobide/extensions/local.bob-tasks-1.1.0/`
 
 Then reload Bob.
 

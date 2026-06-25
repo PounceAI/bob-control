@@ -5,7 +5,7 @@
       "command": "node",
       "args": ["${CLAUDE_PLUGIN_ROOT}/server/server.mjs"],
       "env": {
-        "BOB_TASKS_DB": "${CLAUDE_PROJECT_DIR}/data/tasks.db"
+        "CLAUDE_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}"
       }
     }
   }

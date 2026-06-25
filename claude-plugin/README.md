@@ -12,9 +12,11 @@ connector is plain TypeScript on the built-in `node:sqlite`.
 
 ## What's in it
 
-- **MCP server** (`.mcp.json` → `server/server.mjs`) — the board's task tools, with
-  `BOB_TASKS_DB=${CLAUDE_PROJECT_DIR}/data/tasks.db` so **each project you open gets its
-  own board** (the per-project model the root README describes).
+- **MCP server** (`.mcp.json` → `server/server.mjs`) — the board's task tools. It injects
+  `CLAUDE_PROJECT_DIR`, so the server resolves **each project's own board**
+  (`<project>/data/tasks.db`, the per-project model the root README describes). Set
+  `BOB_TASKS_WORKTREE_SHARED=1` in your environment to instead share the main worktree's board
+  across all linked worktrees of a repo.
 - **Foreman commands**
   - `/bob-new <rough description>` — turn a rough ask into one well-formed task.
   - `/bob-board [tag]` — the board grouped by status, in pull order.

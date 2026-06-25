@@ -2,6 +2,8 @@
 // Reversible patch: let an external worker approve/deny a pending command ask over
 // the IPC pipe (the IPC switch otherwise forwards only StartNewTask/CancelTask/
 // CloseTask/ResumeTask/SendMessage — SendMessage can reject, nothing can approve).
+// The same schema+switch mechanism also carries two read-only queries the worker needs:
+// GetReviewFindings (review output) and GetWorkspace (the open folder, for the wrong-Bob guard).
 //
 // TWO edits are required, and BOTH must be present or presses are silently dropped:
 //
@@ -75,7 +77,8 @@ const SCHEMA_ANCHOR =
 const SCHEMA_MEMBERS =
   `,ye.object({commandName:ye.literal("PressPrimaryButton"),data:ye.any().optional()})` +
   `,ye.object({commandName:ye.literal("PressSecondaryButton"),data:ye.any().optional()})` +
-  `,ye.object({commandName:ye.literal("GetReviewFindings"),data:ye.any().optional()})`;
+  `,ye.object({commandName:ye.literal("GetReviewFindings"),data:ye.any().optional()})` +
+  `,ye.object({commandName:ye.literal("GetWorkspace"),data:ye.any().optional()})`;
 const SCHEMA_INJECT = SCHEMA_ANCHOR.replace(/\]\)$/, SCHEMA_MEMBERS + "])");
 // Unique to the schema edit; "PressPrimaryButton" also appears in the switch, so we
 // match the zod-literal form specifically.
@@ -112,11 +115,20 @@ const getFindings =
   `if(this.ipc&&this.ipc.broadcast)this.ipc.broadcast({type:"TaskEvent",origin:"server",` +
   `data:{eventName:"reviewFindings",payload:{taskId:(c&&c.taskId)||null,reachedVia:_via,serialized:_ser,allFindings:_all}}})` +
   `}catch{}break}`;
+// GetWorkspace: report which folder this Bob has open so the worker's layer-2 guard can refuse a
+// board↔workspace misroute (running git/edits against the wrong tree). this.sidebarProvider.cwd is the
+// open workspace root — it falls back to getWorkspacePath() even with no task running — broadcast back
+// as a normal TaskEvent (eventName:"workspaceInfo"), reusing this.ipc.broadcast like GetReviewFindings.
+const getWorkspace =
+  `{try{const _p=this.sidebarProvider,_ws=(_p&&_p.cwd)||null;` +
+  `if(this.ipc&&this.ipc.broadcast)this.ipc.broadcast({type:"TaskEvent",origin:"server",` +
+  `data:{eventName:"workspaceInfo",payload:{fsPath:_ws,pid:process.pid}}})}catch{}break}`;
 const SWITCH_INJECT =
   SWITCH_ANCHOR +
   `;case"PressPrimaryButton":${press("primaryButtonClick", "yesButtonClicked")}` +
   `;case"PressSecondaryButton":${press("secondaryButtonClick", "noButtonClicked")}` +
-  `;case"GetReviewFindings":${getFindings}`;
+  `;case"GetReviewFindings":${getFindings}` +
+  `;case"GetWorkspace":${getWorkspace}`;
 // Unique to the switch edit (the direct handleWebviewAskResponse call).
 const SWITCH_MARKER = `handleWebviewAskResponse("yesButtonClicked")`;
 
@@ -177,4 +189,5 @@ console.log(`  backup: ${backup}`);
 console.log(`  edit 1: PressPrimaryButton/PressSecondaryButton added to the commandName schema (jls union)`);
 console.log(`  edit 2: PressPrimaryButton/PressSecondaryButton cases added to the IPC switch (select owning instance [id-match, else sole runner], then call getCurrentTask().handleWebviewAskResponse directly; webview-post fallback)`);
 console.log(`  edit 3: GetReviewFindings case added to the IPC switch (serialize the findings store and broadcast it back as a TaskEvent[reviewFindings]; reachedVia self-diagnoses the findings reference)`);
+console.log(`  edit 4: GetWorkspace case added to the IPC switch (broadcast the open folder back as a TaskEvent[workspaceInfo] for the worker's layer-2 wrong-Bob guard)`);
 console.log(`  → Restart Bob (reload window) for the change to load.`);

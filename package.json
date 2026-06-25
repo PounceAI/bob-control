@@ -1,6 +1,6 @@
 {
   "name": "bob-control",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Bob Control: MCP server + CLI + worker that runs IBM Bob (and any MCP-capable agent) unattended against a SQLite task board.",
   "author": "Joshua Gilbert",
   "license": "Apache-2.0",
