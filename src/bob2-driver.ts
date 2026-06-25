@@ -1,23 +1,25 @@
 import type { BobDriver } from "./bob-driver.js";
 import type { DispatchCore, DispatchResult } from "./bob-ipc.js";
-import { Bob2TaskStore, awaitTurnSettled, type Bob2TaskRow } from "./bob2-taskstore.js";
+import { Bob2TaskStore, awaitTurnSettled, bob2DbExists, sleep, type Bob2TaskRow } from "./bob2-taskstore.js";
 import { writeAutoApprove } from "./bob2-config.js";
 
 // V5: the Bob 2.0 in-process driver. Bob 2.0 removed the node-ipc pipe, so the only way to start a task
 // is the extension's exported activate() API (`getExtension('IBM.bob-code').exports.startTask`), callable
 // only from a sibling extension in the same window. startTask resolves on DISPATCH, returns no id, and
-// emits no event stream — so completion is observed by correlating OUR task's row in ~/.bob/db/bob.db
-// (V3) and polling its status, and auto-approve is pre-written to settings.json (V4), not pressed.
+// emits no event stream — so completion is observed by snapshotting Bob's task store (~/.bob/db/bob.db),
+// calling startTask, correlating OUR task as the new root row that appears (id is a uuid → order by
+// created_at), and polling its status; auto-approve is pre-written to settings.json (V4), not pressed.
 //
 // Everything Bob-host-specific is behind the Bob2Host seam, so the driver is unit-testable with a fake
-// host + synthetic db. The thin production binding (the real `vscode.extensions.getExtension` /
-// `vscode.workspace`) and the live-2.0 behaviors (does bob.db materialize? does the dir string match?)
-// are the V5 tail / V7 gate — see docs/bob-2-inprocess.md. UNVERIFIED against a live Bob 2.0.
+// host + synthetic db. The production binding (the real `vscode.extensions.getExtension` / `vscode.
+// workspace`) is the V5 tail, and one behavior stays UNVERIFIED until a task is dispatched on a live 2.0:
+// the exact `directory` Bob stores (migrated rows show "") — so correlation deliberately does NOT filter
+// by directory; it relies on snapshot-diff + sequential dispatch (the busy guard). See docs/bob-2-inprocess.md.
 
 /**
- * The slice of Bob 2.0's exported activate() API the driver needs. The full surface
- * (openNewTask/startWorkflow/setChatContent/registerSource/setFindings) is unused at MVP.
- * `startTask` resolves on dispatch (not completion) and returns no task id.
+ * The slice of Bob 2.0's exported activate() API the driver needs (full surface:
+ * openNewTask/startWorkflow/setChatContent/registerSource/setFindings). `startTask` resolves on dispatch,
+ * not completion, and returns no task id. Bob forwards `workspaceFolder` into `openTask({useWorkspace})`.
  */
 export interface Bob2StartTask {
   startTask(opts: { content: string; mode?: string; workspaceFolder?: string }): Promise<unknown> | unknown;
@@ -36,8 +38,9 @@ export interface Bob2Host {
 }
 
 export interface InProcessDriverOptions {
-  /** Open the task store. Default: the live `~/.bob/db/bob.db` (read-only). Tests inject a synthetic db. */
-  openStore?: () => Bob2TaskStore;
+  /** Open the task store. Default: the live `~/.bob/db/bob.db` (read-only), or null when it doesn't exist
+   *  yet (cold start). Tests inject a synthetic db (return null to simulate a not-yet-created store). */
+  openStore?: () => Bob2TaskStore | null;
   /** Apply the 2.0 auto-approve config once on connect. Default: V4 `writeAutoApprove` to settings.json. */
   writeApproval?: () => void;
   /** Completion-watch poll cadence (ms). */
@@ -46,27 +49,26 @@ export interface InProcessDriverOptions {
   correlateTimeoutMs?: number;
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
 /**
- * Map a settled task-store row to a DispatchResult. `settled:false` means the wall-clock elapsed while
- * the turn was still running ⇒ timeout. Otherwise the terminal status decides: `completed` → completed,
- * `error` → aborted; anything else after the turn ran (the row went back to `active`/`paused` without
- * completing, or the row vanished) → idle, the closest 1.x analog the worker already handles. No result
- * text or token usage on 2.0's documented columns — result-text capture and `costs` budget are deferred
- * (V6); see docs/bob-2-inprocess.md.
+ * Map a settled task-store row to a DispatchResult. Terminal status is honored FIRST, regardless of
+ * `settled`, so a row that reached `completed`/`error` in the same tick the wall-clock elapsed isn't
+ * discarded as a timeout. `error` (or a non-null last_error) → aborted; only a genuine wall-clock
+ * timeout with a still-live row → timeout. The raw Bob status is carried in lastText for diagnostics
+ * (the 1.x status vocabulary can't express paused/compacting). Result text + costs are deferred to V6.
  */
 export function mapOutcome(row: Bob2TaskRow | null, settled: boolean): DispatchResult {
-  const base = { taskId: row ? String(row.id) : null, result: "", lastText: "", tokensUsed: 0, turns: 0 };
-  if (!settled) return { ...base, status: "timeout" };
+  const detail = row ? `bob2 status=${row.status}${row.last_error ? ` error=${row.last_error}` : ""}` : "";
+  const base = { taskId: row ? row.id : null, result: "", lastText: detail, tokensUsed: 0, turns: 0 };
   if (row?.status === "completed") return { ...base, status: "completed" };
-  if (row?.status === "error") return { ...base, status: "aborted" };
+  if (row?.status === "error" || row?.last_error != null) return { ...base, status: "aborted" };
+  if (!settled) return { ...base, status: "timeout" };
   return { ...base, status: "idle" };
 }
 
 export class InProcessDriver implements BobDriver {
   private handle: Bob2StartTask | null = null;
   private approvalWritten = false;
+  private busy = false;
   private readonly pollMs: number;
   private readonly correlateTimeoutMs: number;
 
@@ -79,7 +81,8 @@ export class InProcessDriver implements BobDriver {
   }
 
   /** Resolve the in-process handle and apply auto-approve once. Throws when startTask isn't reachable
-   *  (not a Bob 2.0 window) so the caller can fall back to the IPC driver. Re-callable (idempotent). */
+   *  (not a Bob 2.0 window) so the caller can fall back to the IPC driver. The handle is set LAST, so a
+   *  failed approval write leaves the driver unconnected and a later connect retries it. */
   async connect(): Promise<void> {
     const ex = this.host.exports();
     if (!ex || typeof ex.startTask !== "function") {
@@ -87,13 +90,13 @@ export class InProcessDriver implements BobDriver {
         "Bob 2.0 in-process driver: IBM.bob-code exports.startTask is not reachable (not a Bob 2.0 window?)",
       );
     }
-    this.handle = ex;
-    // Auto-approve is config-driven on 2.0 (no per-prompt press to drive headless), so write it once
-    // up front; a dispatch with the gate still armed would wedge on the first permission prompt.
+    // Auto-approve is config-driven on 2.0 (no per-prompt press to drive headless), so write it once up
+    // front; a dispatch with the gate still armed would wedge on the first permission prompt.
     if (!this.approvalWritten) {
       (this.opts.writeApproval ?? (() => void writeAutoApprove()))();
       this.approvalWritten = true;
     }
+    this.handle = ex;
   }
 
   /** Native on 2.0: the open folder comes straight from the VS Code API via the host (no IPC handshake). */
@@ -101,23 +104,68 @@ export class InProcessDriver implements BobDriver {
     return Promise.resolve(this.host.workspaceFolder());
   }
 
+  /**
+   * Dispatch one task and resolve to a terminal DispatchResult — never reject (the BobDriver contract a
+   * BobClient also upholds), except the busy guard, which throws like BobClient so two overlapping
+   * dispatches can't both correlate the same newest root.
+   */
   async dispatch(opts: DispatchCore): Promise<DispatchResult> {
-    if (!this.handle) await this.connect();
-    const dir = this.host.workspaceFolder();
-    if (!dir) throw new Error("Bob 2.0 driver: no open workspace folder to correlate the dispatch against");
-    const correlationDir = this.correlationDir(dir);
-
-    // Snapshot the directory's high-water id BEFORE startTask, so the row whose id > baseline is ours.
-    // The store may not exist yet on the very first task (Bob creates bob.db lazily) — baseline 0 then,
-    // and correlate() waits for the file to appear.
-    let store = this.tryOpenStore();
-    const baseline = store ? store.maxIdInDir(correlationDir) : 0;
+    if (this.busy) throw new Error("InProcessDriver is busy — dispatch tasks sequentially");
+    this.busy = true;
     try {
-      await this.handle!.startTask({ content: opts.text, mode: opts.mode ?? undefined, workspaceFolder: dir });
-      const correlated = await this.correlate(store, correlationDir, baseline);
-      store = correlated.store; // correlate may have opened the store if it didn't exist at baseline time
-      if (correlated.id === null) return mapOutcome(null, true); // never appeared ⇒ idle (couldn't correlate)
-      const { settled, row } = await awaitTurnSettled(store!, correlated.id, {
+      return await this.runDispatch(opts);
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /** No persistent watcher between dispatches (the store is opened per-dispatch), so close is a no-op. */
+  close(): void {}
+
+  private async runDispatch(opts: DispatchCore): Promise<DispatchResult> {
+    // Validate the workspace BEFORE connect(), which writes settings.json — a doomed dispatch must not
+    // mutate the user's global config as a side effect.
+    const dir = this.host.workspaceFolder();
+    if (!dir) return fail("no open workspace folder to dispatch into");
+    if (!this.handle) {
+      try {
+        await this.connect();
+      } catch (e) {
+        return fail((e as Error).message);
+      }
+    }
+
+    // Open the store (held for the whole dispatch, closed once in finally). A genuinely-absent db is the
+    // cold-start case (null → correlate after startTask creates it); a present-but-unopenable db is a
+    // real fault we surface, NOT silently swallowed as "not created yet".
+    let store: Bob2TaskStore | null;
+    try {
+      store = this.openStore();
+    } catch (e) {
+      return fail(`task store: ${(e as Error).message}`);
+    }
+    const snapshot = store ? store.snapshotRoots() : { ids: new Set<string>(), sinceMs: 0 };
+    try {
+      try {
+        await this.handle!.startTask({ content: opts.text, mode: opts.mode ?? undefined, workspaceFolder: dir });
+      } catch (e) {
+        return fail(`startTask failed: ${(e as Error).message}`);
+      }
+      if (!store) {
+        // Cold start: startTask just created bob.db — open it now to correlate.
+        try {
+          store = this.openStore();
+        } catch (e) {
+          return fail(`task store (post-start): ${(e as Error).message}`);
+        }
+      }
+      const id = store ? await this.correlate(store, snapshot) : null;
+      if (!store || id === null) {
+        // startTask returned but no new root row matched within the window: a hard wiring failure
+        // (db never materialized, or directory/timing assumptions wrong) — surface it, don't fake idle.
+        return fail("dispatched task did not appear in bob.db (could not correlate)");
+      }
+      const { settled, row } = await awaitTurnSettled(store, id, {
         pollMs: this.pollMs,
         timeoutMs: opts.timeoutMs ?? 300_000,
       });
@@ -127,47 +175,36 @@ export class InProcessDriver implements BobDriver {
     }
   }
 
-  /** No persistent watcher between dispatches (the store is opened per-dispatch), so close is a no-op. */
-  close(): void {}
-
-  /**
-   * The directory string used to correlate our task in bob.db. Verbatim today: we pass `workspaceFolder`
-   * to startTask and filter `tasks.directory` by the same value, so it matches IF Bob stores our arg
-   * unchanged. The ONE place to normalize once V7 reveals Bob's exact stored form (drive-letter case /
-   * separators / trailing slash) — see docs/bob-2-inprocess.md.
-   */
-  private correlationDir(fsPath: string): string {
-    return fsPath;
-  }
-
-  private tryOpenStore(): Bob2TaskStore | null {
-    try {
-      return (this.opts.openStore ?? (() => Bob2TaskStore.open()))();
-    } catch {
-      return null; // bob.db not created yet (no task has ever run) — correlate() retries until it is
-    }
+  /** The injected opener, or the live store — null when bob.db doesn't exist yet (cold start), throwing
+   *  only on a real open error (the caller maps that to a failure, not a retry). */
+  private openStore(): Bob2TaskStore | null {
+    if (this.opts.openStore) return this.opts.openStore();
+    if (!bob2DbExists()) return null;
+    return Bob2TaskStore.open();
   }
 
   /**
-   * Find our task's row id after startTask (which returns none). Polls `newRootTaskSince` until the new
-   * root row appears, opening the store first if it didn't exist at baseline time. Returns id null if
-   * nothing materializes within correlateTimeoutMs (the driver maps that to idle).
+   * Find our task's row after startTask (which returns none): poll for the new root that wasn't in the
+   * pre-dispatch snapshot. Returns its id, or null if nothing materializes within correlateTimeoutMs.
    */
   private async correlate(
-    initial: Bob2TaskStore | null,
-    dir: string,
-    baseline: number,
-  ): Promise<{ store: Bob2TaskStore | null; id: number | null }> {
-    let store = initial;
+    store: Bob2TaskStore,
+    snapshot: { ids: Set<string>; sinceMs: number },
+  ): Promise<string | null> {
     const deadline = Date.now() + this.correlateTimeoutMs;
     for (;;) {
-      if (!store) store = this.tryOpenStore();
-      const row = store?.newRootTaskSince(dir, baseline);
-      if (row) return { store, id: row.id };
-      if (Date.now() >= deadline) return { store, id: null };
+      const row = store.newRootSince(snapshot.ids, snapshot.sinceMs);
+      if (row) return row.id;
+      if (Date.now() >= deadline) return null;
       await sleep(this.pollMs);
     }
   }
+}
+
+/** A non-success dispatch that ended before (or without) a correlated task — mapped to 'aborted' (a hard
+ *  failure the worker surfaces), never thrown, so callers can treat both drivers interchangeably. */
+function fail(reason: string): DispatchResult {
+  return { taskId: null, result: "", lastText: reason, status: "aborted", tokensUsed: 0, turns: 0 };
 }
 
 /**
