@@ -3,6 +3,7 @@ import { IdleWatchdog } from "./watchdog.js";
 import { BudgetTracker, budgetExceeded, parseApiReqUsage } from "./budget.js";
 import { TaskBinder } from "./task-binder.js";
 import { isCommandAsk } from "./command-policy.js";
+import type { BobDriver } from "./bob-driver.js";
 
 /**
  * Async client for IBM Bob's Roo Code IPC socket. Wire protocol (from
@@ -173,7 +174,7 @@ export function parseIsSubtask(payload: unknown): boolean | undefined {
   return undefined;
 }
 
-export class BobClient {
+export class BobClient implements BobDriver {
   private sock: net.Socket | null = null;
   private buffer = "";
   private clientId: string | null = null;
