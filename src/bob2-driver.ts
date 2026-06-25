@@ -17,12 +17,19 @@ import { writeAutoApprove } from "./bob2-config.js";
 // by directory; it relies on snapshot-diff + sequential dispatch (the busy guard). See docs/bob-2-inprocess.md.
 
 /**
- * The slice of Bob 2.0's exported activate() API the driver needs (full surface:
+ * The slice of Bob 2.0's exported activate() API the driver needs (fuller surface:
  * openNewTask/startWorkflow/setChatContent/registerSource/setFindings). `startTask` resolves on dispatch,
- * not completion, and returns no task id. Bob forwards `workspaceFolder` into `openTask({useWorkspace})`.
+ * not completion, and returns no task id. `workspaceFolder` must be a real `vscode.WorkspaceFolder` OBJECT
+ * — Bob does `useWorkspace.uri.fsPath`, so an fsPath string throws "…reading 'fsPath'" (live 2026-06-25);
+ * omit it to let Bob default to its open folder. `mask` is the task's UI label. Opaque (driver stays vscode-free).
  */
 export interface Bob2StartTask {
-  startTask(opts: { content: string; mode?: string; workspaceFolder?: string }): Promise<unknown> | unknown;
+  startTask(opts: {
+    content: string;
+    mode?: string;
+    workspaceFolder?: unknown;
+    mask?: string;
+  }): Promise<unknown> | unknown;
 }
 
 /**
@@ -33,8 +40,11 @@ export interface Bob2StartTask {
 export interface Bob2Host {
   /** Bob 2.0's extension exports, or null when the extension isn't present/activated (⇒ not a 2.x window). */
   exports(): Bob2StartTask | null;
-  /** fsPath of the workspace folder Bob has open, or null when unknowable. */
+  /** fsPath of Bob's open folder (dispatch guard, queryWorkspace, logging) — NOT for startTask; null if none. */
   workspaceFolder(): string | null;
+  /** Bob's open folder as the genuine `vscode.WorkspaceFolder` to pass to startTask (Bob reads `.uri.fsPath`
+   *  off it). Opaque so the driver carries no `vscode` type; null when none open. */
+  workspaceFolderObject(): unknown;
 }
 
 export interface InProcessDriverOptions {
@@ -65,6 +75,20 @@ export function mapOutcome(row: Bob2TaskRow | null, settled: boolean): DispatchR
   if (err) return { ...base, status: "aborted" };
   if (settled) return { ...base, status: "completed" };
   return { ...base, status: "timeout" };
+}
+
+// Removed 1.x built-ins our auto-router still emits; Bob 2.0 throws `Mode with id "<x>" not found` on them
+// (built-ins are agent/ask/plan/review, coding = agent). Nothing else is rewritten.
+const BOB2_REMOVED_BUILTIN_MODES: Record<string, string> = { code: "agent", advanced: "agent", orchestrator: "agent" };
+
+/**
+ * Board slug → a mode Bob 2.0 resolves. Only the removed 1.x built-ins are rewritten; the 2.0 built-ins
+ * and every custom mode pass through, since Bob 2.0 loads custom_modes.yaml (so review/refactor/devsecops
+ * dispatch as themselves; an unregistered slug then surfaces Bob's clean "Mode not found"). No mode → agent.
+ */
+export function toBob2Mode(mode: string | undefined | null): string {
+  if (!mode) return "agent";
+  return BOB2_REMOVED_BUILTIN_MODES[mode] ?? mode;
 }
 
 export class InProcessDriver implements BobDriver {
@@ -151,7 +175,12 @@ export class InProcessDriver implements BobDriver {
     const snapshot = store ? store.snapshotRoots() : { ids: new Set<string>(), sinceMs: 0 };
     try {
       try {
-        await this.handle!.startTask({ content: opts.text, mode: opts.mode ?? undefined, workspaceFolder: dir });
+        // workspaceFolder = the WorkspaceFolder object; mode a slug Bob resolves (see Bob2StartTask / toBob2Mode).
+        await this.handle!.startTask({
+          content: opts.text,
+          mode: toBob2Mode(opts.mode),
+          workspaceFolder: this.host.workspaceFolderObject() ?? undefined,
+        });
       } catch (e) {
         return fail(`startTask failed: ${(e as Error).message}`);
       }

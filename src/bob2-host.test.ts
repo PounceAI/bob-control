@@ -34,6 +34,13 @@ test("workspaceFolder() returns the first folder's fsPath, null when none/blank"
   assert.equal(createBob2Host(deps({ folder: "   " })).workspaceFolder(), null);
 });
 
+test("workspaceFolderObject() returns the first WorkspaceFolder object (for startTask), null when none", () => {
+  const folder = { uri: { fsPath: "C:/wt/a" } };
+  const host = createBob2Host({ getExtension: () => undefined, workspaceFolders: () => [folder] });
+  assert.equal(host.workspaceFolderObject(), folder); // verbatim object — Bob reads `.uri.fsPath` off it
+  assert.equal(createBob2Host(deps({ folder: null })).workspaceFolderObject(), null);
+});
+
 test("uses the configured extension id", () => {
   const seen: string[] = [];
   const host = createBob2Host(

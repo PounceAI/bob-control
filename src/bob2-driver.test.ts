@@ -7,6 +7,7 @@ import {
   isBob2Window,
   selectDriver,
   mapOutcome,
+  toBob2Mode,
   type Bob2Host,
   type Bob2StartTask,
 } from "./bob2-driver.js";
@@ -64,9 +65,14 @@ function makeHost(opts: {
     : opts.startTask === null
       ? ({} as Bob2StartTask)
       : { startTask: opts.startTask ?? (() => {}) };
+  const folder = opts.folder === undefined ? DIR : opts.folder;
+  // Mirror the real vscode.WorkspaceFolder shape Bob reads (`.uri.fsPath`), so a test can assert the
+  // driver forwards the OBJECT (not the fsPath string) into startTask.
+  const folderObj = folder === null ? null : { uri: { fsPath: folder } };
   return {
     exports: () => ex,
-    workspaceFolder: () => (opts.folder === undefined ? DIR : opts.folder),
+    workspaceFolder: () => folder,
+    workspaceFolderObject: () => folderObj,
   };
 }
 
@@ -242,6 +248,40 @@ test("dispatch tolerates a bob.db that doesn't exist until the first task runs (
   );
   setTimeout(() => bump(id, "active"), 15);
   assert.equal((await driver.dispatch({ text: "do it" })).status, "completed");
+});
+
+test("toBob2Mode remaps removed 1.x built-ins to agent; passes through 2.0 built-ins and custom modes", () => {
+  // removed 1.x built-ins our router still emits → agent (Bob 2.0 throws "Mode not found" on these)
+  for (const m of ["code", "advanced", "orchestrator"]) assert.equal(toBob2Mode(m), "agent");
+  // 2.0 built-ins pass through
+  for (const m of ["agent", "ask", "plan", "review"]) assert.equal(toBob2Mode(m), m);
+  // CUSTOM modes pass through unchanged — Bob 2.0 loads custom_modes.yaml and resolves them
+  for (const m of ["refactor", "devsecops", "my-custom-mode"]) assert.equal(toBob2Mode(m), m);
+  // no mode → Bob's default coding mode
+  assert.equal(toBob2Mode(undefined), "agent");
+  assert.equal(toBob2Mode(null), "agent");
+});
+
+test("dispatch forwards the WorkspaceFolder OBJECT (not the string) and the translated mode into startTask", async () => {
+  const { store, seedRoot, bump } = makeStore();
+  let seenWs: unknown = "UNSET"; // sentinel: stays unset if startTask is never called
+  let seenMode: unknown = "UNSET";
+  let id = "";
+  const host = makeHost({
+    folder: "C:/wt/q",
+    startTask: (o) => {
+      seenWs = o.workspaceFolder;
+      seenMode = o.mode;
+      id = seedRoot("running");
+    },
+  });
+  const driver = new InProcessDriver(host, { openStore: () => store, ...fast });
+  setTimeout(() => bump(id, "active"), 15);
+  await driver.dispatch({ text: "do it", mode: "code" });
+  // the exact object the host hands out — Bob reads `.uri.fsPath` off it; a bare fsPath string throws in Bob
+  assert.equal(seenWs, host.workspaceFolderObject());
+  assert.notEqual(typeof seenWs, "string");
+  assert.equal(seenMode, "agent"); // board "code" → Bob 2.0 "agent"
 });
 
 // ── never-throw contract + busy guard ─────────────────────────────────────────────────────────────

@@ -36,5 +36,9 @@ export function createBob2Host(deps: VscodeBob2Deps, extensionId = BOB2_EXTENSIO
       const fsPath = deps.workspaceFolders()?.[0]?.uri.fsPath;
       return fsPath && fsPath.trim() ? fsPath : null;
     },
+    workspaceFolderObject(): unknown {
+      // The genuine vscode.WorkspaceFolder, passed through verbatim to startTask (Bob reads `.uri.fsPath`).
+      return deps.workspaceFolders()?.[0] ?? null;
+    },
   };
 }
