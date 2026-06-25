@@ -1,20 +1,27 @@
 import * as vscode from "vscode";
 import { ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { StringDecoder } from "string_decoder";
+import { pathToFileURL } from "url";
 import * as path from "path";
 import * as fs from "fs";
 
 /**
- * Bob Tasks extension. Drives dist/worker.js as a child process (real Node >=22.5
- * so node:sqlite works) and wraps it with VS Code UI: settings map to worker flags,
- * native notifications come from the worker's @@WORKER {json} stream, plus optional
- * bring-to-front focus, start/stop commands, and a status-bar item.
+ * Bob Tasks extension. Two transports, auto-detected:
+ *   - Bob 2.0 (in-process): the node-ipc pipe is gone, so the board-pull loop runs HERE in the extension
+ *     host (the only place that can reach `getExtension('IBM.bob-code').exports.startTask`). We import the
+ *     connector's compiled driver-loop + in-process driver and run them in-process.
+ *   - Bob 1.x (child process): spawn dist/worker.js (real Node >=22.5 for node:sqlite) which dispatches
+ *     over the IPC pipe, wired to this UI via its @@WORKER {json} stdout stream.
+ * Either way: settings map to worker options, native notifications, optional bring-to-front, start/stop
+ * commands, and a status-bar item.
  */
 
 let worker: ChildProcessWithoutNullStreams | null = null;
 let starting = false; // set between spawn() and child going live; blocks double-start
 let connected = false; // true once the worker reports `connected`; reset on each start
 let connectTimer: ReturnType<typeof setTimeout> | null = null; // startup watchdog
+// Bob 2.0 in-process loop handle (mutually exclusive with `worker`): stop() signals it to finish.
+let loop: { stop: () => void } | null = null;
 let status: vscode.StatusBarItem;
 let out: vscode.OutputChannel;
 
@@ -98,21 +105,12 @@ function setStatus(state: "stopped" | "running" | "deferred" | "idle", detail = 
     state === "deferred" ? "$(debug-pause)" :
     state === "idle" ? "$(watch)" : "$(circle-slash)";
   status.text = `${icon} Bob Tasks: ${state}${detail ? ` ${detail}` : ""}`;
-  status.tooltip = worker ? "Click to stop the Bob Tasks worker" : "Click to start the Bob Tasks worker";
+  status.tooltip = worker || loop ? "Click to stop the Bob Tasks worker" : "Click to start the Bob Tasks worker";
 }
 
 function startWorker(force = false): void {
-  if (worker || starting) {
+  if (worker || starting || loop) {
     vscode.window.showInformationMessage("Bob Tasks worker is already running.");
-    return;
-  }
-  // launch-bob-ipc.cmd exports ROO_CODE_IPC_SOCKET_PATH (so Bob opens the IPC pipe we
-  // dispatch over); this host inherits it, so an absent var means Bob was started the wrong
-  // way and the worker can't connect. Warn rather than spawn a worker that would only burn
-  // the 30s connect watchdog. Done here, not at activation, so CLI/MCP-only users aren't
-  // nagged; `force` is the "Start anyway" bypass.
-  if (!force && !process.env.ROO_CODE_IPC_SOCKET_PATH) {
-    warnLaunchEnvironment();
     return;
   }
   const connector = connectorRoot();
@@ -123,6 +121,55 @@ function startWorker(force = false): void {
     );
     return;
   }
+  // Detect the transport (Bob 2.0 in-process vs 1.x IPC child) — async because the 2.0 driver lives in
+  // the connector's compiled dist, dynamically imported. Block double-starts during detection.
+  starting = true;
+  void detectAndStart(connector, force).catch((err) => {
+    starting = false;
+    setStatus("stopped");
+    out.appendLine(`[start] detection failed: ${(err as Error).message}`);
+    vscode.window.showErrorMessage(`Bob Tasks: failed to start — ${(err as Error).message}`);
+  });
+}
+
+/**
+ * Resolve which Bob this window is and start the matching transport: the in-process loop when Bob 2.0's
+ * exports are reachable, else the 1.x IPC child. The 2.0 path needs no ROO_CODE_IPC_SOCKET_PATH (no pipe).
+ */
+async function detectAndStart(connector: string, force: boolean): Promise<void> {
+  // bob-code's exports are only populated once it has activated. At autostart it may not have yet, which
+  // would misdetect a 2.0 window as 1.x — so activate it first (no-op if absent or already active).
+  const bobExt = vscode.extensions.getExtension("IBM.bob-code");
+  if (bobExt && !bobExt.isActive) {
+    try {
+      await bobExt.activate();
+    } catch {
+      /* fall through — isBob2Window will be false and we take the 1.x path */
+    }
+  }
+  const mods = await loadConnector(connector);
+  const host = mods.createBob2Host({
+    getExtension: (id: string) => vscode.extensions.getExtension(id),
+    workspaceFolders: () => vscode.workspace.workspaceFolders,
+  });
+  if (mods.isBob2Window(host)) {
+    out.appendLine("[start] Bob 2.0 detected — running the board loop in-process (no IPC child).");
+    startInProcessLoop(connector, mods, host);
+    return;
+  }
+  // Bob 1.x: the worker connects over the IPC pipe, which launch-bob-ipc.cmd opens via
+  // ROO_CODE_IPC_SOCKET_PATH. An absent var means Bob was started the wrong way; warn rather than burn
+  // the 30s connect watchdog. `force` is the "Start anyway" bypass.
+  starting = false;
+  if (!force && !process.env.ROO_CODE_IPC_SOCKET_PATH) {
+    warnLaunchEnvironment();
+    return;
+  }
+  spawnWorker(connector);
+}
+
+function spawnWorker(connector: string): void {
+  if (worker || starting || loop) return; // re-entrancy guard (detection already passed)
   const c = cfg();
   const workerJs = path.join(connector, "dist", "worker.js");
   if (!fs.existsSync(workerJs)) {
@@ -297,6 +344,115 @@ function startWorker(force = false): void {
   vscode.window.showInformationMessage("Bob Tasks worker started.");
 }
 
+/** The connector exports the in-process loop needs — dynamically imported from the install's compiled
+ *  dist (ESM), since the connector path is configurable and not bundled into the extension. */
+interface ConnectorModules {
+  createBob2Host: (deps: {
+    getExtension: (id: string) => unknown;
+    workspaceFolders: () => readonly { uri: { fsPath: string } }[] | undefined;
+  }) => unknown;
+  isBob2Window: (host: unknown) => boolean;
+  InProcessDriver: new (host: unknown, opts?: unknown) => unknown;
+  runDriverLoop: (cfg: unknown, shouldStop?: () => boolean) => Promise<void>;
+  parseOpts: (argv: string[]) => unknown;
+}
+
+async function loadConnector(connector: string): Promise<ConnectorModules> {
+  // import() (not require) so Node loads the connector's ESM dist from a CJS extension; Node16 module
+  // mode preserves the dynamic import. file:// URL so Windows paths resolve.
+  const load = (f: string): Promise<Record<string, unknown>> =>
+    import(pathToFileURL(path.join(connector, "dist", f)).href) as Promise<Record<string, unknown>>;
+  const [host, driver, loopMod, workerMod] = await Promise.all([
+    load("bob2-host.js"),
+    load("bob2-driver.js"),
+    load("driver-loop.js"),
+    load("worker.js"),
+  ]);
+  return {
+    createBob2Host: host.createBob2Host as ConnectorModules["createBob2Host"],
+    isBob2Window: driver.isBob2Window as ConnectorModules["isBob2Window"],
+    InProcessDriver: driver.InProcessDriver as ConnectorModules["InProcessDriver"],
+    runDriverLoop: loopMod.runDriverLoop as ConnectorModules["runDriverLoop"],
+    parseOpts: workerMod.parseOpts as ConnectorModules["parseOpts"],
+  };
+}
+
+/**
+ * Point the connector's board resolver at the right DB by setting the same env vars the 1.x child got —
+ * but on THIS process, since the loop runs in-process. Precedence: explicit dbPath > worktree-shared
+ * (drain the main worktree's board) > per-project data/tasks.db. Matches the spawn path's env logic.
+ */
+function applyBoardEnv(cwd: string): void {
+  const c = cfg();
+  const dbPath = c.get<string>("dbPath");
+  const worktreeShared = c.get<boolean>("worktreeShared") || !!process.env.BOB_TASKS_WORKTREE_SHARED;
+  if (dbPath && dbPath.trim()) {
+    process.env.BOB_TASKS_DB = dbPath.trim();
+  } else if (worktreeShared) {
+    process.env.BOB_TASKS_WORKTREE_SHARED = "1";
+    process.env.CLAUDE_PROJECT_DIR = cwd;
+    delete process.env.BOB_TASKS_DB; // let the resolver run; a stale pin must not redirect the board
+  } else {
+    process.env.BOB_TASKS_DB = path.join(cwd, "data", "tasks.db");
+  }
+}
+
+/**
+ * Start the Bob 2.0 board loop IN this extension host. No child process, no pipe: the loop calls
+ * exports.startTask and watches ~/.bob/db/bob.db. The 1.x-only flags (classifier/followups/verify/defer/
+ * pipe/surface) don't apply — 2.0 auto-approves via config (V4) and exposes no event stream to gate on.
+ */
+function startInProcessLoop(connector: string, mods: ConnectorModules, host: unknown): void {
+  const c = cfg();
+  const cwd = projectRoot() ?? connector; // git evidence / checkpoint run here (the open project)
+  applyBoardEnv(cwd);
+  const args = [
+    "--max-risk", c.get<string>("maxRisk") ?? "standard",
+    "--poll", String(c.get<number>("pollMs") ?? 3000),
+    "--timeout", String(c.get<number>("timeoutMs") ?? 300000),
+    "--assignee", c.get<string>("assignee") ?? "bob",
+  ];
+  const tag = c.get<string>("tag");
+  if (tag && tag.trim()) args.push("--tag", tag.trim());
+  const maxRetry = c.get<number>("maxRetryAttempts") ?? 0;
+  if (maxRetry > 0) args.push("--retry", String(maxRetry));
+  const opts = mods.parseOpts(args);
+  const driver = new mods.InProcessDriver(host);
+
+  let stopped = false;
+  loop = { stop: () => void (stopped = true) };
+  starting = false;
+  connected = false;
+  setStatus("running");
+  out.appendLine(`[start] (cwd ${cwd}) in-process 2.0 loop — ${args.join(" ")}`);
+
+  void mods
+    .runDriverLoop(
+      {
+        driver,
+        opts,
+        cwd,
+        log: (m: string) => out.appendLine(m),
+        emit: (type: string, data: Record<string, unknown>) => handleEventObj({ type, ...data }),
+      },
+      () => stopped,
+    )
+    .then(
+      () => {
+        loop = null;
+        setStatus("stopped");
+        out.appendLine("[exit] in-process loop ended");
+      },
+      (err: unknown) => {
+        loop = null;
+        setStatus("stopped");
+        const msg = (err as Error).message;
+        out.appendLine(`[error] in-process loop: ${msg}`);
+        vscode.window.showErrorMessage(`Bob Tasks loop error: ${msg}`);
+      },
+    );
+}
+
 /**
  * Warn that Bob was started without launch-bob-ipc.cmd, and offer a fix or a one-shot bypass.
  * Fires only on an actual start attempt — no persisted suppression that could later hide a
@@ -334,6 +490,14 @@ function stopWorker(): void {
     connectTimer = null;
   }
   starting = false;
+  // Bob 2.0 in-process loop: signal it to stop. It finishes the current dispatch (if any) then resolves,
+  // which nulls `loop`. Reflect intent in the UI now.
+  if (loop) {
+    out.appendLine("[stop] stopping in-process loop");
+    loop.stop();
+    setStatus("stopped");
+    return;
+  }
   if (!worker) return;
   out.appendLine("[stop] terminating worker");
   // Leave `worker = null` to the exit handler so a quick stop->start can't race
@@ -343,7 +507,7 @@ function stopWorker(): void {
 }
 
 function toggleWorker(): void {
-  if (worker) stopWorker();
+  if (worker || loop) stopWorker();
   else startWorker();
 }
 
@@ -379,6 +543,12 @@ function handleEvent(json: string): void {
   } catch {
     return;
   }
+  handleEventObj(ev);
+}
+
+/** The parsed-event handler, shared by the 1.x child's @@WORKER stream and the 2.0 in-process loop's
+ *  emit(). Both speak the same event vocabulary (connected/taskStart/taskDone/taskFail/idle/stopped/error). */
+function handleEventObj(ev: any): void {
   switch (ev.type) {
     case "connected":
       connected = true; // the exit handler uses this to tell a clean stop from a failed start
