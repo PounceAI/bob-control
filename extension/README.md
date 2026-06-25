@@ -131,25 +131,29 @@ This compiles the TypeScript source to `extension/out/extension.js`.
 
 ### Install into Bob
 
-**Option 1: Install from VSIX (recommended)**
+**Option 1: Download the released VSIX (recommended)**
 
-```bash
-npm run package
-```
-
-This creates `bob-tasks-1.1.0.vsix`. Then in Bob:
+Download the latest `bob-tasks-*.vsix` from the [Releases page](https://github.com/PounceAI/bob-control/releases). Then in Bob:
 
 1. Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`)
 2. Run **Extensions: Install from VSIX…**
 3. Select the `.vsix` file
 4. Reload Bob
 
-**Option 2: Manual install**
+**Option 2: Build the VSIX yourself**
+
+```bash
+npm run package
+```
+
+This creates `bob-tasks-<version>.vsix`; install it as in Option 1.
+
+**Option 3: Manual install**
 
 Copy the entire `extension/` directory to Bob's extensions folder:
 
-- Windows: `%USERPROFILE%\.bobide\extensions\local.bob-tasks-1.1.0\`
-- macOS/Linux: `~/.bobide/extensions/local.bob-tasks-1.1.0/`
+- Windows: `%USERPROFILE%\.bobide\extensions\local.bob-tasks-<version>\`
+- macOS/Linux: `~/.bobide/extensions/local.bob-tasks-<version>/`
 
 Then reload Bob.
 
