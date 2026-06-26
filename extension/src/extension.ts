@@ -24,10 +24,14 @@ let connectTimer: ReturnType<typeof setTimeout> | null = null; // startup watchd
 let loop: { stop: () => void } | null = null;
 let status: vscode.StatusBarItem;
 let out: vscode.OutputChannel;
+let memento: vscode.Memento | null = null; // globalState, for the one-time auto-approve notice
 
 const CONNECT_TIMEOUT_MS = 30_000;
+// globalState key: have we shown the "auto-approve is a global, persistent change" notice yet?
+const AUTO_APPROVE_NOTICE_KEY = "bobTasks.autoApproveNoticeShown";
 
 export function activate(context: vscode.ExtensionContext): void {
+  memento = context.globalState;
   out = vscode.window.createOutputChannel("Bob Tasks");
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   status.command = "bobTasks.toggleWorker";
@@ -355,6 +359,9 @@ interface ConnectorModules {
   InProcessDriver: new (host: unknown, opts?: unknown) => unknown;
   runDriverLoop: (cfg: unknown, shouldStop?: () => boolean) => Promise<void>;
   parseOpts: (argv: string[]) => unknown;
+  /** Writes Bob's headless auto-approve into global settings.json; we inject a gated wrapper (the setting +
+   *  one-time notice live in the extension, keeping the driver vscode-free). Returns the path written. */
+  writeAutoApprove: (path?: string) => { path: string; created: boolean };
 }
 
 async function loadConnector(connector: string): Promise<ConnectorModules> {
@@ -362,11 +369,12 @@ async function loadConnector(connector: string): Promise<ConnectorModules> {
   // mode preserves the dynamic import. file:// URL so Windows paths resolve.
   const load = (f: string): Promise<Record<string, unknown>> =>
     import(pathToFileURL(path.join(connector, "dist", f)).href) as Promise<Record<string, unknown>>;
-  const [host, driver, loopMod, workerMod] = await Promise.all([
+  const [host, driver, loopMod, workerMod, configMod] = await Promise.all([
     load("bob2-host.js"),
     load("bob2-driver.js"),
     load("driver-loop.js"),
     load("worker.js"),
+    load("bob2-config.js"),
   ]);
   return {
     createBob2Host: host.createBob2Host as ConnectorModules["createBob2Host"],
@@ -374,6 +382,38 @@ async function loadConnector(connector: string): Promise<ConnectorModules> {
     InProcessDriver: driver.InProcessDriver as ConnectorModules["InProcessDriver"],
     runDriverLoop: loopMod.runDriverLoop as ConnectorModules["runDriverLoop"],
     parseOpts: workerMod.parseOpts as ConnectorModules["parseOpts"],
+    writeAutoApprove: configMod.writeAutoApprove as ConnectorModules["writeAutoApprove"],
+  };
+}
+
+/**
+ * The auto-approve write the driver runs on connect(), gated + surfaced per Bob's design review (option e):
+ * the `bobTasks.autoApproveGlobal` setting can turn it off (Bob then prompts), and the FIRST write shows a
+ * one-time notice — because it's a user-global, persistent change that disables Bob's command security
+ * across every window/project. Injected via the driver's `writeApproval` seam so the driver stays vscode-free.
+ */
+function makeWriteApproval(writeAutoApprove: ConnectorModules["writeAutoApprove"]): () => void {
+  return () => {
+    if (cfg().get<boolean>("autoApproveGlobal") === false) {
+      out.appendLine("[approve] autoApproveGlobal is off — skipping the global auto-approve write (Bob will prompt).");
+      return;
+    }
+    const { path: written } = writeAutoApprove();
+    out.appendLine(`[approve] wrote headless auto-approve to ${written}`);
+    if (memento && !memento.get<boolean>(AUTO_APPROVE_NOTICE_KEY)) {
+      void memento.update(AUTO_APPROVE_NOTICE_KEY, true);
+      void vscode.window
+        .showInformationMessage(
+          `Bob Tasks enabled headless auto-approve in ${written} — this disables Bob's command security ` +
+            `globally (every window/project) so queued tasks run unattended. Turn it off with the ` +
+            `'bobTasks.autoApproveGlobal' setting.`,
+          "Open Setting",
+        )
+        .then((pick) => {
+          if (pick === "Open Setting")
+            void vscode.commands.executeCommand("workbench.action.openSettings", "bobTasks.autoApproveGlobal");
+        });
+    }
   };
 }
 
@@ -442,7 +482,7 @@ function startInProcessLoop(connector: string, mods: ConnectorModules, host: unk
     if (cliPath && cliPath.trim()) args.push("--classifier-cli", cliPath.trim());
   }
   const opts = mods.parseOpts(args);
-  const driver = new mods.InProcessDriver(host);
+  const driver = new mods.InProcessDriver(host, { writeApproval: makeWriteApproval(mods.writeAutoApprove) });
 
   let stopped = false;
   loop = { stop: () => void (stopped = true) };

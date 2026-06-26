@@ -2,7 +2,7 @@
   "name": "bob-tasks",
   "displayName": "Bob Tasks",
   "description": "Auto-dispatch queued tasks to IBM Bob, with mode routing, a safety gate, defer-while-chatting, and native notifications.",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "publisher": "local",
   "license": "Apache-2.0",
   "engines": { "vscode": "^1.94.0" },
@@ -54,6 +54,11 @@
         "bobTasks.assignee": { "type": "string", "default": "bob", "description": "Assignee recorded when the worker claims a task." },
         "bobTasks.tag": { "type": "string", "default": "", "description": "Only process tasks with this tag. Empty = all tasks." },
         "bobTasks.autoStart": { "type": "boolean", "default": false, "description": "Start the worker automatically when Bob launches." },
+        "bobTasks.autoApproveGlobal": {
+          "type": "boolean",
+          "default": true,
+          "description": "On the first 2.0 dispatch, write Bob's headless auto-approve into its GLOBAL settings (~/.bob/settings/settings.json) so queued tasks run unattended. This disables Bob's command security for every Bob window/project for your user and persists until changed (a one-time notice is shown the first time). Turn off to keep Bob's normal approval prompts — auto-dispatch will then stall on the first prompt."
+        },
         "bobTasks.notify.enabled": { "type": "boolean", "default": true, "description": "Show a notification when a task finishes." },
         "bobTasks.dispatch.surface": {
           "type": "string",
