@@ -11,18 +11,18 @@ import {
 } from "./bob2-taskstore.js";
 import { writeAutoApprove } from "./bob2-config.js";
 
-// V5: the Bob 2.0 in-process driver. Bob 2.0 removed the node-ipc pipe, so the only way to start a task
+// The Bob 2.0 in-process driver. Bob 2.0 removed the node-ipc pipe, so the only way to start a task
 // is the extension's exported activate() API (`getExtension('IBM.bob-code').exports.startTask`), callable
 // only from a sibling extension in the same window. startTask resolves on DISPATCH, returns no id, and
 // emits no event stream — so completion is observed by snapshotting Bob's task store (~/.bob/db/bob.db),
 // calling startTask, correlating OUR task as the new root row that appears (id is a uuid → order by
-// created_at), and polling its status; auto-approve is pre-written to settings.json (V4), not pressed.
+// created_at), and polling its status; auto-approve is pre-written to settings.json, not pressed.
 //
 // Everything Bob-host-specific is behind the Bob2Host seam, so the driver is unit-testable with a fake
-// host + synthetic db. The production binding (the real `vscode.extensions.getExtension` / `vscode.
-// workspace`) is the V5 tail, and one behavior stays UNVERIFIED until a task is dispatched on a live 2.0:
-// the exact `directory` Bob stores (migrated rows show "") — so correlation deliberately does NOT filter
-// by directory; it relies on snapshot-diff + sequential dispatch (the busy guard). See docs/bob-2-inprocess.md.
+// host + synthetic db; the production binding (the real `vscode.extensions.getExtension` / `vscode.
+// workspace`) lives in bob2-host.ts. Correlation deliberately does NOT filter by Bob's `directory` column
+// (migrated rows show ""); it relies on snapshot-diff + sequential dispatch (the busy guard). See
+// docs/bob-2-inprocess.md.
 
 /**
  * The slice of Bob 2.0's exported activate() API the driver needs (fuller surface:
@@ -42,7 +42,7 @@ export interface Bob2StartTask {
 
 /**
  * Host seam: resolves Bob 2.0's exports and the open workspace folder, so the driver carries no direct
- * `vscode` dependency and tests inject a fake. The production impl (V5 tail) calls
+ * `vscode` dependency and tests inject a fake. The production impl calls
  * `vscode.extensions.getExtension('IBM.bob-code')?.exports` and reads `vscode.workspace.workspaceFolders`.
  */
 export interface Bob2Host {
@@ -59,7 +59,7 @@ export interface InProcessDriverOptions {
   /** Open the task store. Default: the live `~/.bob/db/bob.db` (read-only), or null when it doesn't exist
    *  yet (cold start). Tests inject a synthetic db (return null to simulate a not-yet-created store). */
   openStore?: () => Bob2TaskStore | null;
-  /** Apply the 2.0 auto-approve config once on connect. Default: V4 `writeAutoApprove` to settings.json. */
+  /** Apply the 2.0 auto-approve config once on connect. Default: `writeAutoApprove` to settings.json. */
   writeApproval?: () => void;
   /** Completion-watch poll cadence (ms). */
   pollMs?: number;
@@ -74,7 +74,7 @@ export interface InProcessDriverOptions {
  * → aborted, checked FIRST so a failure isn't masked. Otherwise a settled turn → completed (Bob leaves a
  * finished task at 'active', so "settled" = the turn went quiet, which IS completion here); an unsettled
  * row (wall-clock elapsed mid-turn) → timeout. The raw Bob status is carried in lastText for diagnostics.
- * `extras` carries the V6 reads off bob.db: `result` (Bob's summary, only meaningful on completion),
+ * `extras` carries the bob.db reads: `result` (Bob's summary, only meaningful on completion),
  * `tokensUsed` (output tokens from `costs`), and `maxIdleMs` (stall-watchdog telemetry) — both on any outcome.
  */
 export function mapOutcome(
@@ -98,7 +98,7 @@ export function mapOutcome(
 }
 
 // Removed 1.x built-ins our auto-router still emits; Bob 2.0 throws `Mode with id "<x>" not found` on them
-// (built-ins are agent/ask/plan/review, coding = agent). Nothing else is rewritten.
+// (built-ins are agent/ask/plan/review, coding = agent).
 const BOB2_REMOVED_BUILTIN_MODES: Record<string, string> = { code: "agent", advanced: "agent", orchestrator: "agent" };
 
 /**
@@ -276,7 +276,7 @@ export class InProcessDriver implements BobDriver {
         quietMs: this.quietMs,
         timeoutMs: opts.timeoutMs ?? 300_000,
       });
-      // V6: enrich the outcome from bob.db — output tokens (any outcome) + Bob's summary text (only on a
+      // Enrich the outcome from bob.db — output tokens (any outcome) + Bob's summary text (only on a
       // clean completion; a timeout/error row's last message would be partial/misleading). maxGapMs is
       // stall-watchdog telemetry (see DispatchResult.maxIdleMs).
       const tokensUsed = parseCosts(row?.costs ?? null)?.output ?? 0;
@@ -329,13 +329,4 @@ function fail(reason: string): DispatchResult {
 export function isBob2Window(host: Bob2Host): boolean {
   const ex = host.exports();
   return !!ex && typeof ex.startTask === "function";
-}
-
-/**
- * Pick the driver for the current Bob: the in-process driver on a 2.0 window, else the caller's 1.x IPC
- * driver. `makeIpc` is a thunk so the IPC client (and its pipe resolution) is only constructed on the
- * 1.x path — the 2.0 host has no pipe to connect to.
- */
-export function selectDriver(host: Bob2Host, makeIpc: () => BobDriver, opts?: InProcessDriverOptions): BobDriver {
-  return isBob2Window(host) ? new InProcessDriver(host, opts) : makeIpc();
 }

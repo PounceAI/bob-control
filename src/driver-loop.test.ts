@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createTask, getTask, getDb, setBoardArmed, listTasks } from "./db.js";
+import { createTask, getTask, getDb, getNotes, setBoardArmed, listTasks } from "./db.js";
 import { parseOpts } from "./worker.js";
 import { isCompleted } from "./types.js";
 import { driveOnce, runDriverLoop, type DriverLoopConfig } from "./driver-loop.js";
@@ -194,7 +194,10 @@ test("runDriverLoop resumes and dispatches once the chat goes idle", async () =>
   let activityChecks = 0;
   driver.externalActivity = async () => ++activityChecks <= 1; // chatting on the 1st check, idle after
   const events: string[] = [];
-  await runDriverLoop({ ...cfg(driver), emit: (t) => events.push(t) }, () => driver.calls.length > 0);
+  // Bounded stop: primarily stop once a dispatch lands, but cap iterations so a regression that never
+  // resumes fails the assertion cleanly instead of spinning forever (sleep is a no-op here).
+  let ticks = 0;
+  await runDriverLoop({ ...cfg(driver), emit: (t) => events.push(t) }, () => driver.calls.length > 0 || ++ticks > 50);
   assert.ok(events.includes("deferred") && events.includes("resumed"));
   assert.equal(driver.calls.length, 1); // dispatched after the chat went idle
 });
@@ -221,6 +224,29 @@ test("runDriverLoop aborts cleanly when the driver can't connect", async () => {
   await runDriverLoop({ ...cfg(driver, ["--once"]), emit: (t, d) => events.push(`${t}:${JSON.stringify(d)}`) });
   assert.ok(events.some((e) => e.startsWith("error:")));
   assert.equal(driver.calls.length, 0);
+});
+
+test("runDriverLoop emits idle{disarmed} and never dispatches while the board is disarmed", async () => {
+  createTask({ title: "queued", mode: "code" });
+  setBoardArmed(false);
+  const driver = fakeDriver();
+  const events: string[] = [];
+  let ticks = 0; // bounded: a disarmed board never dispatches, so stop after a few idle ticks
+  await runDriverLoop({ ...cfg(driver), emit: (t, d) => events.push(`${t}:${JSON.stringify(d)}`) }, () => ++ticks > 3);
+  assert.equal(driver.calls.length, 0); // nothing dispatched while disarmed
+  assert.ok(events.some((e) => e.startsWith("idle:") && e.includes("disarmed")));
+  assert.equal(listTasks({ status: "pending" }).length, 1); // task left queued
+});
+
+test("finalize records a usage note carrying Bob's tokens + max-idle telemetry on completion", async () => {
+  const t = createTask({ title: "with telemetry", mode: "code" });
+  const driver = fakeDriver({ status: "completed", result: "did it", tokensUsed: 354, maxIdleMs: 7_000 });
+  await driveOnce(cfg(driver));
+  assert.ok(isCompleted(getTask(t.id)!.status));
+  const usage = getNotes(t.id).find((n) => n.note.startsWith("Bob usage:"));
+  assert.ok(usage, "expected a 'Bob usage:' note");
+  assert.match(usage!.note, /354 output tokens/);
+  assert.match(usage!.note, /max idle 7s/);
 });
 
 after(() => {

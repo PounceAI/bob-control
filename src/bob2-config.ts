@@ -1,10 +1,11 @@
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 
 // Bob 2.0's auto-approve config. Replaces the 1.x set-bob-autoapprove.mjs (which wrote state.vscdb
 // globalState keys that no longer exist). 2.0's source of truth is ~/.bob/settings/settings.json
-// (global) + the per-task approval_config DB column. UNVERIFIED against a live 2.0 — see
+// (global) — verified live 2026-06-26 to drive headless approval, incl. the review finish tool. The
+// per-task approval_config DB column is the finer-grained alternative but stays UNVERIFIED — see
 // docs/bob-2-inprocess.md V7.
 
 /** Bob 2.0's per-user config root (`~/.bob`) and its global settings file. */
@@ -69,9 +70,9 @@ export function mergeAutoApprove(current: Record<string, unknown>): Record<strin
 /** Write the auto-approve config into settings.json (default: the global file), keeping other keys.
  *  WARNING — blast radius: this edits Bob's USER-GLOBAL settings (`~/.bob/settings/settings.json`), so it
  *  makes EVERY Bob window/project for this user headless for command execution (`approvedCommands:["*"]` +
- *  `isCommandSecurityEnabled:false`) and PERSISTS after the connector stops / is uninstalled. Unlike the 1.x
- *  window-scoped globalState, nothing reverts it. Future hardening (tracked): snapshot+restore on close(), or
- *  prompt before the first write. */
+ *  `isCommandSecurityEnabled:false`) and PERSISTS after the connector stops / is uninstalled — nothing
+ *  reverts it (unlike the 1.x window-scoped globalState). The extension gates this behind the
+ *  `bobTasks.autoApproveGlobal` setting and shows a one-time notice on the first write. */
 export function writeAutoApprove(path = bob2SettingsPath()): { path: string; created: boolean } {
   const existed = existsSync(path);
   let current: Record<string, unknown> = {};
@@ -98,10 +99,20 @@ export function writeAutoApprove(path = bob2SettingsPath()): { path: string; cre
   } else {
     mkdirSync(dirname(path), { recursive: true });
   }
-  // Atomic write (temp + rename): a crash or a concurrent Bob read can't observe a truncated file —
-  // rename is atomic on the same volume, so settings.json is never left half-written.
+  // Atomic write (temp + rename): a crash or a concurrent Bob read can't observe a truncated file — rename
+  // is atomic on the same volume, so settings.json is never left half-written. If the rename itself fails
+  // (cross-volume, permission), unlink the temp file rather than orphan it beside settings.json.
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, JSON.stringify(mergeAutoApprove(current), null, 2) + "\n");
-  renameSync(tmp, path);
+  try {
+    renameSync(tmp, path);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* best-effort cleanup */
+    }
+    throw e;
+  }
   return { path, created: !existed };
 }

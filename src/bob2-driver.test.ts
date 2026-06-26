@@ -5,13 +5,11 @@ import { Bob2TaskStore, type Bob2TaskRow } from "./bob2-taskstore.js";
 import {
   InProcessDriver,
   isBob2Window,
-  selectDriver,
   mapOutcome,
   toBob2Mode,
   type Bob2Host,
   type Bob2StartTask,
 } from "./bob2-driver.js";
-import type { BobDriver } from "./bob-driver.js";
 
 const requireModule = createRequire(import.meta.url);
 
@@ -108,27 +106,6 @@ test("isBob2Window is true only when exports expose a callable startTask", () =>
   assert.equal(isBob2Window(makeHost({})), true);
   assert.equal(isBob2Window(makeHost({ noExports: true })), false);
   assert.equal(isBob2Window(makeHost({ startTask: null })), false);
-});
-
-test("selectDriver returns the in-process driver on a 2.0 window, else the IPC fallback", () => {
-  const ipc = { tag: "ipc" } as unknown as BobDriver;
-  assert.ok(selectDriver(makeHost({}), () => ipc) instanceof InProcessDriver);
-  assert.equal(
-    selectDriver(makeHost({ noExports: true }), () => ipc),
-    ipc,
-  );
-});
-
-test("selectDriver only constructs the IPC client on the 1.x path", () => {
-  let built = 0;
-  const make = (): BobDriver => {
-    built++;
-    return {} as BobDriver;
-  };
-  selectDriver(makeHost({}), make);
-  assert.equal(built, 0);
-  selectDriver(makeHost({ noExports: true }), make);
-  assert.equal(built, 1);
 });
 
 // ── outcome mapping ────────────────────────────────────────────────────────────────────────────
@@ -332,6 +309,32 @@ test("dispatch tolerates a bob.db that doesn't exist until the first task runs (
   );
   setTimeout(() => bump(id, "active"), 15);
   assert.equal((await driver.dispatch({ text: "do it" })).status, "completed");
+});
+
+test("dispatch returns aborted (not a fake completion) when the task store can't be opened", async () => {
+  const driver = new InProcessDriver(makeHost({ startTask: () => {} }), {
+    openStore: () => {
+      throw new Error("database is locked");
+    },
+    ...fast,
+  });
+  const res = await driver.dispatch({ text: "do it" });
+  assert.equal(res.status, "aborted");
+  assert.match(res.lastText, /task store: database is locked/); // a present-but-unopenable db is surfaced, not swallowed
+});
+
+test("dispatch surfaces a post-start store-open fault (cold start, then the db won't open)", async () => {
+  let opens = 0;
+  const driver = new InProcessDriver(makeHost({ startTask: () => {} }), {
+    openStore: () => {
+      if (++opens === 1) return null; // cold start: db not created yet at snapshot time
+      throw new Error("locked"); // ...and the post-startTask open faults
+    },
+    ...fast,
+  });
+  const res = await driver.dispatch({ text: "do it" });
+  assert.equal(res.status, "aborted");
+  assert.match(res.lastText, /task store \(post-start\): locked/);
 });
 
 test("toBob2Mode remaps removed 1.x built-ins to agent; passes through 2.0 built-ins and custom modes", () => {

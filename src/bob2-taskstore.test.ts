@@ -310,6 +310,16 @@ test("awaitTurnSettled settles once the row leaves 'running' and goes quiet", as
   assert.equal(res.row?.status, "active"); // back to active + quiet = done
 });
 
+test("awaitTurnSettled settles immediately on a terminal status, without waiting for the quiet window", async () => {
+  const { db, store } = makeStore();
+  // 'completed' is terminal → settle at once even though updated_at is 'now' and quietMs (5s) > timeoutMs (2s);
+  // were isTerminal not honored in the settle predicate, this would time out (settled:false) instead.
+  insert(db, { id: "done", status: "completed", created_at: Date.now() - 1_000, updated_at: Date.now() });
+  const res = await awaitTurnSettled(store, "done", { pollMs: 5, quietMs: 5_000, timeoutMs: 2_000 });
+  assert.equal(res.settled, true);
+  assert.equal(res.row?.status, "completed");
+});
+
 test("awaitTurnSettled settles immediately on a real last_error", async () => {
   const { db, store } = makeStore();
   insert(db, { id: "e", status: "running", created_at: Date.now() - 1_000, updated_at: Date.now() });

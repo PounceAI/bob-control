@@ -21,26 +21,24 @@ import { sameWorkspace } from "./pipe-name.js";
 //     so "errored" means last_error is set AND not that sentinel.
 //   - The workspace is in `env.workspace` (JSON), not the `directory` column (which is "").
 //   - Result text = the latest `assistant` row's `data.content` in the `messages` table; token/cost
-//     accounting is the `costs` column JSON (input/output/cacheRead/cacheWrite/cost). Both read in V6
-//     (readResultText / parseCosts).
+//     accounting is the `costs` column JSON (input/output/cacheRead/cacheWrite/cost). Both read by
+//     readResultText / parseCosts.
 // See docs/bob-2-inprocess.md and the auto-memory bob-2-taskstore-schema.
 
 const requireModule = createRequire(import.meta.url);
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-export type Bob2TaskStatus = "active" | "running" | "compacting" | "paused" | "completed" | "error";
-
 export interface Bob2TaskRow {
   id: string;
   parent_id: string | null;
-  /** A Bob2TaskStatus value — but Bob owns the column, so keep the type wide. */
+  /** Live values active/running/compacting/paused/completed/error — but Bob owns the column, keep it wide. */
   status: string;
   directory: string | null;
-  /** Epoch-ms timestamps (INTEGER). created_at is the monotonic correlation key; updated_at feeds V6's watchdog. */
+  /** Epoch-ms timestamps (INTEGER). created_at is the monotonic correlation key; updated_at feeds the stall watchdog. */
   created_at: number | null;
   updated_at: number | null;
-  /** JSON token/cost accounting; the best-effort budget signal on 2.0 (V6). */
+  /** JSON token/cost accounting; the best-effort budget signal on 2.0. */
   costs: string | null;
   /** Bob records a failed turn here; non-null = the task errored even if `status` hasn't flipped. */
   last_error: string | null;

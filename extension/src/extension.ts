@@ -172,6 +172,49 @@ async function detectAndStart(connector: string, force: boolean): Promise<void> 
   spawnWorker(connector);
 }
 
+/**
+ * The worker flags identical on both transports (the 1.x child and the 2.0 in-process loop), built from
+ * settings. Each path appends its own transport-specific flags afterward (the child: --emit-json/--pipe/
+ * --surface + the 1.x-only classifier/followup toggles; the loop: none). One source of truth so the two
+ * arg-builders can't drift (they had drifted: --verify-judge spelled two ways, --max-continues reordered).
+ */
+function commonWorkerArgs(c: vscode.WorkspaceConfiguration): string[] {
+  const args = [
+    "--max-risk", c.get<string>("maxRisk") ?? "standard",
+    "--poll", String(c.get<number>("pollMs") ?? 3000),
+    "--timeout", String(c.get<number>("timeoutMs") ?? 300000),
+    "--assignee", c.get<string>("assignee") ?? "bob",
+    "--defer-idle", String(c.get<number>("deferIdleMs") ?? 60000),
+  ];
+  if (c.get<boolean>("deferWhileChatting") === false) args.push("--no-defer"); // only when EXPLICITLY off
+  const tag = c.get<string>("tag");
+  if (tag && tag.trim()) args.push("--tag", tag.trim());
+  const maxRetry = c.get<number>("maxRetryAttempts") ?? 0;
+  if (maxRetry > 0) args.push("--retry", String(maxRetry));
+  // Verify-and-continue: loop back to Bob to fix issues until the acceptance check passes.
+  if (c.get<boolean>("verifyAndContinue")) {
+    args.push("--verify-and-continue");
+    const verifyCmd = c.get<string>("verifyCommand");
+    if (verifyCmd && verifyCmd.trim()) args.push("--verify-command", verifyCmd.trim());
+    args.push("--max-continues", String(c.get<number>("maxContinues") ?? 3));
+    if (c.get<boolean>("verifyJudge")) args.push("--verify-judge");
+  }
+  if (c.get<boolean>("detectPlanStop")) args.push("--detect-plan-stop"); // auto-continue a plan-only completion
+  return args;
+}
+
+/** The Claude-backend flags shared by the command classifier, the followup answerer, and the LLM judge —
+ *  identical wherever a backend is reached; each path gates WHEN to include them (1.x: classifier/followups/
+ *  judge; 2.0: judge only). */
+function classifierBackendArgs(c: vscode.WorkspaceConfiguration): string[] {
+  const args = ["--classifier-backend", c.get<string>("classifierBackend") ?? "cli"];
+  const model = c.get<string>("classifierModel");
+  if (model && model.trim()) args.push("--classifier-model", model.trim());
+  const cliPath = c.get<string>("classifierCliPath");
+  if (cliPath && cliPath.trim()) args.push("--classifier-cli", cliPath.trim());
+  return args;
+}
+
 function spawnWorker(connector: string): void {
   if (worker || starting || loop) return; // re-entrancy guard (detection already passed)
   const c = cfg();
@@ -190,77 +233,28 @@ function spawnWorker(connector: string): void {
     workerJs,
     "--emit-json",
     "--no-notify", // extension shows native notifications instead
-    "--max-risk", c.get<string>("maxRisk") ?? "standard",
-    "--poll", String(c.get<number>("pollMs") ?? 3000),
-    "--timeout", String(c.get<number>("timeoutMs") ?? 300000),
-    "--assignee", c.get<string>("assignee") ?? "bob",
+    ...commonWorkerArgs(c),
     // Default to this host Bob's own socket so the worker targets the instance it runs in, not
     // whichever Bob owns the shared global pipe; an explicit bobTasks.pipe still overrides.
     "--pipe", c.get<string>("pipe") || process.env.ROO_CODE_IPC_SOCKET_PATH || "\\\\.\\pipe\\pipe\\bob-ipc",
     "--surface", c.get<string>("dispatch.surface") ?? "sidebar",
-    "--defer-idle", String(c.get<number>("deferIdleMs") ?? 60000),
   ];
-  if (c.get<boolean>("deferWhileChatting") === false) args.push("--no-defer"); // only when EXPLICITLY off
-  const tag = c.get<string>("tag");
-  if (tag && tag.trim()) args.push("--tag", tag.trim());
-  // Reversible toggles. The command classifier (approve/deny gray-zone commands,
-  // needs the Bob button patch), the followup answerer (answer Bob's questions),
-  // and the LLM judge (verify task completion) are independent but share one Claude
-  // backend, so push the backend config when any is on. Off by default = manual
-  // approval / questions wait for you / no judge.
+  // 1.x-only gates (they need the IPC channel Bob 2.0 removed): the command classifier (approve/deny
+  // gray-zone commands, needs the Bob button patch) and the followup answerer (answer Bob's questions),
+  // off by default. classifier/followups/judge share one Claude backend, so push it when any is on.
   const wantClassifier = c.get<boolean>("commandClassifier");
   const wantFollowups = c.get<boolean>("answerFollowups");
-  const verifyAndContinue = c.get<boolean>("verifyAndContinue");
-  const wantJudge = verifyAndContinue && c.get<boolean>("verifyJudge");
+  const wantJudge = c.get<boolean>("verifyAndContinue") && c.get<boolean>("verifyJudge");
   if (wantClassifier) args.push("--command-classifier");
   if (wantFollowups) args.push("--answer-followups");
   if (c.get<boolean>("escalateAll")) args.push("--escalate-all");
   if (c.get<boolean>("reviewPlans")) args.push("--review-plans");
-  if (wantClassifier || wantFollowups || wantJudge) {
-    args.push("--classifier-backend", c.get<string>("classifierBackend") ?? "cli");
-    const model = c.get<string>("classifierModel");
-    if (model && model.trim()) args.push("--classifier-model", model.trim());
-    const cliPath = c.get<string>("classifierCliPath");
-    if (cliPath && cliPath.trim()) args.push("--classifier-cli", cliPath.trim());
-  }
-  // Verify-and-continue: loop back to Bob to fix issues until acceptance check passes
-  if (verifyAndContinue) {
-    args.push("--verify-and-continue");
-    const verifyCmd = c.get<string>("verifyCommand");
-    if (verifyCmd && verifyCmd.trim()) args.push("--verify-command", verifyCmd.trim());
-    if (c.get<boolean>("verifyJudge")) args.push("--verify-judge");
-    args.push("--max-continues", String(c.get<number>("maxContinues") ?? 3));
-  }
-  // Detect plan-only completions (no code written) and auto-continue
-  if (c.get<boolean>("detectPlanStop")) args.push("--detect-plan-stop");
-  // Auto-retry transient failures (timeout/abort)
-  const maxRetryAttempts = c.get<number>("maxRetryAttempts") ?? 0;
-  if (maxRetryAttempts > 0) args.push("--retry", String(maxRetryAttempts));
-  // Extend the safe command allowlist for advanced mode
-  const allowCommands = c.get<string>("allowCommands");
+  if (wantClassifier || wantFollowups || wantJudge) args.push(...classifierBackendArgs(c));
+  const allowCommands = c.get<string>("allowCommands"); // extend advanced mode's command allowlist (1.x-only)
   if (allowCommands && allowCommands.trim()) args.push("--allow-commands", allowCommands.trim());
 
   const env = { ...process.env };
-  // Board selection, in precedence: explicit bobTasks.dbPath > worktree-shared > per-project. Per-project
-  // (default) gives each project its own queue (matching the plugin MCP's ${CLAUDE_PROJECT_DIR} board);
-  // without it the worker falls back to db.ts's module-relative default = the connector's board.
-  const dbPath = c.get<string>("dbPath");
-  // Honor an INHERITED BOB_TASKS_WORKTREE_SHARED too, not just the setting: the env var is the one opt-in
-  // every consumer (plugin MCP, statusline, CLI) reads, so the worker must agree or it'd drain a different
-  // board than the plugin fills. If we pinned BOB_TASKS_DB below, it would (rule 1) override that flag.
-  const worktreeShared = c.get<boolean>("worktreeShared") || !!process.env.BOB_TASKS_WORKTREE_SHARED;
-  if (dbPath && dbPath.trim()) {
-    env.BOB_TASKS_DB = dbPath.trim();
-  } else if (worktreeShared) {
-    // Every linked worktree drains the MAIN worktree's queue. Don't pin BOB_TASKS_DB (it would override
-    // the resolver). Pin CLAUDE_PROJECT_DIR to THIS worktree (cwd) so the resolver's base is deterministic
-    // — a stale CLAUDE_PROJECT_DIR inherited from the host process must not redirect it to another tree.
-    env.BOB_TASKS_WORKTREE_SHARED = "1";
-    env.CLAUDE_PROJECT_DIR = cwd;
-    delete env.BOB_TASKS_DB; // drop any inherited pin so the resolver runs
-  } else {
-    env.BOB_TASKS_DB = path.join(cwd, "data", "tasks.db");
-  }
+  applyBoardEnv(cwd, env); // board selection (dbPath > worktree-shared > per-project) — see applyBoardEnv
 
   const node = c.get<string>("nodePath") || "node";
   out.appendLine(`[start] (cwd ${cwd}) ${node} ${args.join(" ")}`);
@@ -418,69 +412,45 @@ function makeWriteApproval(writeAutoApprove: ConnectorModules["writeAutoApprove"
 }
 
 /**
- * Point the connector's board resolver at the right DB by setting the same env vars the 1.x child got —
- * but on THIS process, since the loop runs in-process. Precedence: explicit dbPath > worktree-shared
- * (drain the main worktree's board) > per-project data/tasks.db. Matches the spawn path's env logic.
+ * Point the board resolver at the right DB by setting env vars on `target` — a fresh env copy for the 1.x
+ * child, or process.env for the in-process 2.0 loop (so the resolver, which reads process.env, sees them).
+ * Precedence: explicit dbPath > worktree-shared (drain the main worktree's board) > per-project data/tasks.db.
+ * Per-project (default) matches the plugin MCP's ${CLAUDE_PROJECT_DIR} board; absent any pin the resolver
+ * falls back to db.ts's module-relative default = the connector's board. For worktree-shared, pin
+ * CLAUDE_PROJECT_DIR to THIS worktree so the resolver's base is deterministic and DROP any inherited
+ * BOB_TASKS_DB (which would override the resolver). The flag is honored when INHERITED from the env too, since
+ * it's the one opt-in every consumer (plugin MCP, statusline, CLI) reads — the worker must agree with them.
  */
-function applyBoardEnv(cwd: string): void {
+function applyBoardEnv(cwd: string, target: Record<string, string | undefined>): void {
   const c = cfg();
   const dbPath = c.get<string>("dbPath");
   const worktreeShared = c.get<boolean>("worktreeShared") || !!process.env.BOB_TASKS_WORKTREE_SHARED;
   if (dbPath && dbPath.trim()) {
-    process.env.BOB_TASKS_DB = dbPath.trim();
+    target.BOB_TASKS_DB = dbPath.trim();
   } else if (worktreeShared) {
-    process.env.BOB_TASKS_WORKTREE_SHARED = "1";
-    process.env.CLAUDE_PROJECT_DIR = cwd;
-    delete process.env.BOB_TASKS_DB; // let the resolver run; a stale pin must not redirect the board
+    target.BOB_TASKS_WORKTREE_SHARED = "1";
+    target.CLAUDE_PROJECT_DIR = cwd;
+    delete target.BOB_TASKS_DB; // drop any inherited pin so the resolver runs
   } else {
-    process.env.BOB_TASKS_DB = path.join(cwd, "data", "tasks.db");
+    target.BOB_TASKS_DB = path.join(cwd, "data", "tasks.db");
   }
 }
 
 /**
  * Start the Bob 2.0 board loop IN this extension host. No child process, no pipe: the loop calls
  * exports.startTask and watches ~/.bob/db/bob.db. The genuinely IPC-bound 1.x flags (classifier/followups/
- * pipe/surface) don't apply — 2.0 auto-approves via config (V4) and exposes no reply channel. Defer-while-
- * chatting DOES apply, re-derived from a bob.db poll.
+ * pipe/surface) don't apply — 2.0 auto-approves via config and exposes no reply channel. Defer-while-
+ * chatting and verify-and-continue (command-verify + plan-stop + the LLM judge) DO apply, both re-derived
+ * from a bob.db poll.
  */
 function startInProcessLoop(connector: string, mods: ConnectorModules, host: unknown): void {
   const c = cfg();
   const cwd = projectRoot() ?? connector; // git evidence / checkpoint run here (the open project)
-  applyBoardEnv(cwd);
-  const args = [
-    "--max-risk", c.get<string>("maxRisk") ?? "standard",
-    "--poll", String(c.get<number>("pollMs") ?? 3000),
-    "--timeout", String(c.get<number>("timeoutMs") ?? 300000),
-    "--assignee", c.get<string>("assignee") ?? "bob",
-  ];
-  const tag = c.get<string>("tag");
-  if (tag && tag.trim()) args.push("--tag", tag.trim());
-  // Defer-while-chatting: ported to 2.0 via a bob.db poll (driver.externalActivity), so the loop pauses
-  // dispatch while you're mid-chat in this window's Bob. Same flags as the 1.x worker; --defer-stale is
-  // 1.x-only (event-pairing self-heal) — bob.db status is ground truth, so the 2.0 path needs no stale guard.
-  args.push("--defer-idle", String(c.get<number>("deferIdleMs") ?? 60000));
-  if (c.get<boolean>("deferWhileChatting") === false) args.push("--no-defer"); // only when EXPLICITLY off
-  const maxRetry = c.get<number>("maxRetryAttempts") ?? 0;
-  if (maxRetry > 0) args.push("--retry", String(maxRetry));
-  // Verify-and-continue: command-verify, plan-stop, AND the LLM judge are ported to the in-process loop.
-  const verifyAndContinue = c.get<boolean>("verifyAndContinue");
-  const wantJudge = verifyAndContinue && c.get<boolean>("verifyJudge");
-  if (verifyAndContinue) {
-    args.push("--verify-and-continue");
-    const verifyCmd = c.get<string>("verifyCommand");
-    if (verifyCmd && verifyCmd.trim()) args.push("--verify-command", verifyCmd.trim());
-    args.push("--max-continues", String(c.get<number>("maxContinues") ?? 3));
-    if (wantJudge) args.push("--verify-judge");
-  }
-  if (c.get<boolean>("detectPlanStop")) args.push("--detect-plan-stop");
+  applyBoardEnv(cwd, process.env);
+  // Only the shared flags; the 2.0 path adds none of the 1.x-only ones (pipe/surface/classifier/followups).
+  const args = [...commonWorkerArgs(c)];
   // The judge needs a Claude backend (cli default, or api with ANTHROPIC_API_KEY in the host env).
-  if (wantJudge) {
-    args.push("--classifier-backend", c.get<string>("classifierBackend") ?? "cli");
-    const model = c.get<string>("classifierModel");
-    if (model && model.trim()) args.push("--classifier-model", model.trim());
-    const cliPath = c.get<string>("classifierCliPath");
-    if (cliPath && cliPath.trim()) args.push("--classifier-cli", cliPath.trim());
-  }
+  if (c.get<boolean>("verifyAndContinue") && c.get<boolean>("verifyJudge")) args.push(...classifierBackendArgs(c));
   const opts = mods.parseOpts(args);
   const driver = new mods.InProcessDriver(host, { writeApproval: makeWriteApproval(mods.writeAutoApprove) });
 

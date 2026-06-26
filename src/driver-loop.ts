@@ -10,13 +10,13 @@ import { createPollLoop, defaultCaptureSnapshot } from "./bob-polls.js";
 import type { LlmDeps } from "./llm.js";
 import type { Task } from "./types.js";
 
-// V5 tail: the transport-agnostic board-drain loop the EXTENSION HOST runs in-process for Bob 2.0 (the
-// 2.0 driver can't be a child process — see docs/bob-2-inprocess.md). It drives any BobDriver, so the
-// same loop serves a future refactor of the 1.x path. This is the MVP analog of worker.ts's runOne MINUS
-// the IPC-only gate layer (command/permission/mode-switch/followup): on 2.0 auto-approve is config-driven
-// (V4) and there is no event stream to gate on. Verify-and-continue IS ported (command-verify + plan-stop +
-// the LLM judge, all transport-agnostic via bob-polls + the shared buildJudgeVerifier), and so is
-// defer-while-chatting — re-derived from a bob.db poll (driver.externalActivity) since 2.0 has no event stream.
+// The transport-agnostic board-drain loop the EXTENSION HOST runs in-process for Bob 2.0 (the 2.0 driver
+// can't be a child process — see docs/bob-2-inprocess.md). It drives any BobDriver, so the same loop
+// serves a future refactor of the 1.x path. It is the analog of worker.ts's runOne MINUS the IPC-only
+// gate layer (command/permission/mode-switch/followup): on 2.0 auto-approve is config-driven and there is
+// no event stream to gate on. Verify-and-continue IS ported (command-verify + plan-stop + the LLM judge,
+// all transport-agnostic via bob-polls + the shared buildJudgeVerifier), and so is defer-while-chatting —
+// re-derived from a bob.db poll (driver.externalActivity) since 2.0 has no event stream.
 
 export interface DriverLoopConfig {
   driver: BobDriver;
