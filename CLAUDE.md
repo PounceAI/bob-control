@@ -38,6 +38,11 @@ npm run lint && npm run format:check && npm test
 (`npm run format` auto-fixes formatting.) CI runs lint → format:check → build → test+coverage on
 Windows for Node 22 and 24; a red check blocks the merge.
 
+## PR & commit messages
+
+Substance only: the problem, the changes, why. No process narration ("did a deslop pass", "ran two
+reviews", "added tests"), no validation play-by-play, no AI-attribution trailer.
+
 ## Worktrees (run several in parallel)
 
 Several worktrees of this repo can run in parallel on **one shared board**: one Bob window + one
