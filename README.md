@@ -11,14 +11,20 @@ each does the work it's best at.
 
 Concretely: an MCP **server** + **CLI** + auto-dispatch **worker** over a SQLite task board.
 The worker pulls each task in dependency and priority order and dispatches it to
-[IBM Bob](https://www.ibm.com/products/ai-coding-agent) (IBM's AI coding agent for IBM i)
-**live over IPC**, streaming back its events. Bob is the MCP client; this is the server it
-connects to — and Claude Code speaks the same MCP, so it can work the **same board** as
-foreman (provision / route / triage) or worker.
+[IBM Bob](https://www.ibm.com/products/ai-coding-agent) (IBM's AI coding agent for IBM i), then
+watches it run to completion. On **Bob 2.0** that dispatch is **in-process** (the companion
+extension calls Bob's exported `startTask` API); on **Bob 1.x** it's **live over the `node-ipc`
+pipe** — auto-detected, one build. Bob is the MCP client; this is the server it connects to — and
+Claude Code speaks the same MCP, so it can work the **same board** as foreman (provision / route /
+triage) or worker.
 
-> **Compatibility:** this release targets **IBM Bob 1.x**. IBM Bob 2.0 removes the IPC pipe Bob
-> Control drives, so 2.0 support (plugin 2.0, in-process) is a separate line of work **in this same
-> repo** — see [CHANGELOG → Compatibility](CHANGELOG.md#compatibility-1x-vs-2x).
+> **Bob 1.x and 2.0 — both supported, auto-detected.** The companion extension detects which Bob a
+> window is and picks the transport: **Bob 2.0** (current) runs the dispatch loop **in-process** —
+> IBM Bob 2.0 removed the `node-ipc` pipe, so there is no external control channel — while **Bob 1.x**
+> drives Bob **over that pipe** (legacy). One build serves both. Still on 1.x and want the last
+> pipe-only release? Grab **v1.1.0** from
+> [Releases](https://github.com/PounceAI/bob-control/releases). Full matrix:
+> [CHANGELOG → Compatibility](CHANGELOG.md#compatibility-1x-vs-2x).
 
 ### Where it fits
 
@@ -27,8 +33,8 @@ keeps it unattended, and verifies the output. That's a different job from **plan
 governance** CLIs (e.g. [MissionForge](https://github.com/loudiman/Mission-Forge)), which
 deterministically *decompose and scope* work but don't run an agent. The two compose — plan
 upstream, then queue the pieces here with `depends_on` ordering and let the worker drain them.
-What this layer owns that a planning CLI doesn't: live IPC control (dispatch / approve /
-answer / cancel), LLM-judged acceptance, a multi-agent shared board, and command/risk gating.
+What this layer owns that a planning CLI doesn't: live agent control (dispatch, auto-approve,
+verify), LLM-judged acceptance, a multi-agent shared board, and command/risk gating.
 
 ## Setup
 
@@ -76,6 +82,11 @@ same `mcpServers` block in the global file instead:
 ```
 %APPDATA%\IBM Bob\User\globalStorage\ibm.bob-code\settings\mcp_settings.json
 ```
+
+> **Bob 2.0** keeps its settings under `~/.bob/` rather than the `%APPDATA%\IBM Bob` path above; the
+> simplest version-independent route is the in-app **MCP Servers** panel (**＋ Add Server**), which
+> writes to whichever location your Bob build uses. The `mcpServers` block itself is identical — only
+> where the file lives differs. This wiring is independent of the dispatch transport.
 
 ## Bob Companion (Claude Code plugin)
 
@@ -500,16 +511,25 @@ Built-ins: `bug-fix`, `feature`, `research`, `code-review`, `doc`, `refactor`.
 
 ## VS Code / Bob extension
 
-`extension/` packages the worker as an IDE extension ("Bob Tasks") for IBM Bob (and stock VS
-Code). Instead of running `dist/worker.js` from a terminal, it claims and dispatches queued tasks
-from inside the editor, with a status-bar item, native completion/failure toasts, a
-`bobTasks.maxRisk` gate, and defer-while-chatting so it never aborts a live Bob conversation. A
-URI handler (`ibm-bob://local.bob-tasks/start`) lets a process outside the editor — e.g. Claude
-Code in WSL — start or stop the worker without a Command Palette click.
+`extension/` packages the auto-dispatch loop as an IDE extension ("Bob Tasks") for IBM Bob (and
+stock VS Code). It claims and dispatches queued tasks from inside the editor, with a status-bar
+item, native completion/failure toasts, a `bobTasks.maxRisk` gate, and defer-while-chatting so it
+never aborts a live Bob conversation.
 
-It's independent of the MCP server and CLI: use it if you want a one-click in-editor worker, or
-skip it and run `npm run worker` if you don't. Build/install steps and the full `bobTasks.*`
-settings reference live in [extension/README.md](extension/README.md).
+**It auto-detects the Bob it's running in and picks the transport:**
+
+- **Bob 2.0** (current) — runs the dispatch loop **in-process** and calls Bob's exported `startTask`
+  API directly; no child process, no pipe. Completion is read from Bob's task store
+  (`~/.bob/db/bob.db`). Headless auto-approve is written to Bob's **global** settings, gated by
+  `bobTasks.autoApproveGlobal` (default on; a one-time notice fires on the first write — see
+  [extension/README.md](extension/README.md)).
+- **Bob 1.x** (legacy) — spawns `dist/worker.js`, which dispatches over the `node-ipc` pipe; needs
+  Bob launched with `ROO_CODE_IPC_SOCKET_PATH` (`launch-bob-ipc.cmd`).
+
+A URI handler (`ibm-bob://local.bob-tasks/start`) lets a process outside the editor — e.g. Claude
+Code in WSL — start or stop the loop without a Command Palette click. It's independent of the MCP
+server and CLI; on Bob 1.x you can skip it and run `npm run worker` instead. Build/install steps and
+the full `bobTasks.*` settings reference live in [extension/README.md](extension/README.md).
 
 ## Board safety gates
 
@@ -544,7 +564,12 @@ a question unanswered past its deadline times out and the task parks `blocked` (
 sweep fires this even if the asking worker died) — never a fabricated answer, never a silent
 `done`. The `bob-work` skill follows this path instead of inventing a value.
 
-## Driving Bob over IPC
+## Driving Bob over IPC (Bob 1.x — legacy)
+
+> **Bob 1.x only.** IBM Bob 2.0 removed the `node-ipc` server, so there's no pipe to drive — on 2.0
+> the companion extension drives Bob **in-process** (see [the extension](#vs-code--bob-extension)),
+> and the outside-process commands here (`--cancel`, `--list-pipes`, a direct `StartNewTask`) have no
+> 2.0 analog: 2.0 exposes no external control channel.
 
 Bob starts a `node-ipc` server when launched with `ROO_CODE_IPC_SOCKET_PATH`
 set. [bob-control.mjs](bob-control.mjs) connects to it, sends `StartNewTask`,
@@ -564,13 +589,61 @@ unattended runs — see above).
 ## Worktrees: run N in parallel
 
 Keep `main`, `feat-a`, … checked out at once and let Bob work in each at the same time on **one
-shared board**, without two workers racing the same checkout.
+shared board**, without two windows racing the same checkout. A task is *pinned* to a worktree with a
+`worktree:<name>` tag (routing); each worktree gets its own Bob window draining only its slice.
+
+**The shared-board machinery is identical on both Bob versions:** `BOB_TASKS_WORKTREE_SHARED=1`
+resolves the **main** worktree's `data/tasks.db` from any linked worktree, and the `worktree:<name>`
+tag pin — the one exact-match filter shared by the worker's `pickEligible`, `nextTask`, and
+`get_next_task` — routes each task end-to-end. What differs between Bob versions is only how each
+window's dispatch is isolated.
+
+### Bob 2.0 (in-process — recommended)
+
+2.0 makes this **simpler**: with no IPC pipe, each Bob window's in-process loop dispatches into **its
+own** workspace natively — there's no shared pipe to contend for, so the per-instance pipe plumbing
+(the 1.x section below) disappears entirely. Per worktree:
+
+**1. Add the worktree** and build once in the main checkout (each window's loop loads its `dist/`):
+
+```powershell
+git worktree add ..\bob-control-feat-a feat-a
+npm run build
+```
+
+**2. Open it in its own Bob 2.0 window** with a distinct `--user-data-dir` — the one piece carried
+over from the 1.x launcher, since Electron's single-instance lock otherwise refuses a 2nd window:
+
+```powershell
+bobide --user-data-dir "%LOCALAPPDATA%\bob-wt\feat-a" ..\bob-control-feat-a
+```
+
+**3. Point that window's loop at its slice** via the worktree's `.vscode/settings.json` (workspace
+scope); with `autoStart` the in-process loop comes up draining only its tag on the shared board:
+
+```jsonc
+{ "bobTasks.tag": "worktree:feat-a", "bobTasks.worktreeShared": true, "bobTasks.autoStart": true }
+```
+
+**4. Pin tasks to a worktree** and each dispatches only into that window:
+
+```powershell
+node dist/cli.js create "Add export to feat-a" --tags worktree:feat-a
+```
+
+No pipe, no `launch-bob.cmd`, no `print-pipe-name.mjs`, no per-window `worker.js`. The
+[isolation rules](#rules-that-keep-it-isolated) below carry over. **Not** carried over: the worker
+*lease* (`board_status.worker_leases`) — the in-process loop is one-per-window by construction, so
+there's no cross-worker lease to coordinate, and `board_status`'s worker fields won't reflect the 2.0
+loops (they read the 1.x heartbeat). Opening the *same* worktree in two windows is the one
+unguarded misconfig; don't.
+
+### Bob 1.x (IPC pipe — legacy)
 
 **The model: one Bob window *and* one worker per worktree, sharing the main worktree's
-`data/tasks.db`.** A task is *pinned* to a worktree with a `worktree:<name>` tag (routing); a
-worktree is *leased* by one live worker at a time (exclusivity). Both are required: a Bob window
-owns one IPC pipe and edits one folder, so a task only reaches worktree X if a Bob+worker already
-bound to X pulls it.
+`data/tasks.db`.** A task is *pinned* to a worktree (routing); a worktree is *leased* by one live
+worker at a time (exclusivity). Both are required because a Bob 1.x window owns one IPC pipe and edits
+one folder, so a task only reaches worktree X if a Bob+worker already bound to X pulls it.
 
 **1. Add the worktrees** (each on its own branch) and build once in the main checkout — the
 launcher and worker run *its* `dist/`:
@@ -617,8 +690,9 @@ node dist/cli.js create "Add export to feat-a" --tags worktree:feat-a
 node dist/cli.js create "Fix feat-b regression" --tags worktree:feat-b
 ```
 
-**Rules that keep it isolated** — the pin is a convention the tag filter enforces at *discovery*,
-not at claim, so:
+#### Rules that keep it isolated
+
+The pin is a convention the tag filter enforces at *discovery*, not at claim (both Bob versions), so:
 
 - **Tag every worker and every task; never run an untagged worker beside them** — an untagged
   puller (`worker` with no `--tag`, `bob next`, `/bob-work`) sees every pinned task.
