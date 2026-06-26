@@ -1,12 +1,17 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   parseVerdict,
   judgeCompletion,
+  buildJudgeVerifier,
   captureGitDiff,
   captureGitBaseline,
   type JudgeContext,
   type JudgeDeps,
+  type JudgeVerifierDeps,
 } from "./judge.js";
 import type { LlmResult } from "./llm.js";
 
@@ -280,5 +285,64 @@ test("parseVerdict: a PASS verdict whose reason mentions 'fail' is NOT inverted"
   assert.equal(verdict.pass, true);
   assert.equal(verdict.reason, "no path can fail here");
 });
+
+// ── buildJudgeVerifier (composite command-then-judge, shared by the 1.x worker + 2.0 loop) ──────────
+
+const VDIR = mkdtempSync(join(tmpdir(), "judge-verifier-")); // non-git → captureGitDiff yields an empty diff
+function vdeps(over: Partial<JudgeVerifierDeps> = {}): { deps: JudgeVerifierDeps; notes: string[] } {
+  const notes: string[] = [];
+  const deps: JudgeVerifierDeps = {
+    mode: "code",
+    taskPrompt: "do the task",
+    judge: mockLlm({ ok: true, text: '{"pass":true,"reason":"looks good"}' }),
+    taskId: 1,
+    addNote: (_id, n) => notes.push(n),
+    log: () => {},
+    ...over,
+  };
+  return { deps, notes };
+}
+
+test("buildJudgeVerifier: undefined for a non-judgeable (read-only) mode → caller uses command-only", () => {
+  assert.equal(buildJudgeVerifier(vdeps({ mode: "ask" }).deps), undefined);
+  assert.ok(buildJudgeVerifier(vdeps({ mode: "code" }).deps)); // judgeable → a verifier
+});
+
+test("buildJudgeVerifier: judge is the sole gate when no command — PASS and FAIL", async () => {
+  const pass = buildJudgeVerifier(vdeps().deps)!;
+  assert.equal((await pass("did it", undefined, VDIR)).passed, true);
+  const fail = buildJudgeVerifier(
+    vdeps({ judge: mockLlm({ ok: true, text: '{"pass":false,"reason":"incomplete"}' }) }).deps,
+  )!;
+  const r = await fail("did it", undefined, VDIR);
+  assert.equal(r.passed, false);
+  assert.match(r.reason, /incomplete/);
+});
+
+test("buildJudgeVerifier: a failing command short-circuits — the judge is never consulted", async () => {
+  // judge would PASS, but the command fails first → overall fail with the command's reason.
+  const v = buildJudgeVerifier(vdeps().deps)!;
+  const r = await v("did it", "exit 1", VDIR);
+  assert.equal(r.passed, false);
+  assert.match(r.reason, /verify command exited 1/);
+});
+
+test("buildJudgeVerifier: command passes, then the judge decides (fails the gate)", async () => {
+  const v = buildJudgeVerifier(
+    vdeps({ judge: mockLlm({ ok: true, text: '{"pass":false,"reason":"logic wrong"}' }) }).deps,
+  )!;
+  const r = await v("did it", "exit 0", VDIR);
+  assert.equal(r.passed, false);
+  assert.match(r.reason, /command passed but judge failed: logic wrong/);
+});
+
+test("buildJudgeVerifier: a judge LLM failure fails OPEN (passes) and records a note", async () => {
+  const { deps, notes } = vdeps({ judge: mockLlm({ ok: false, reason: "network down" }) });
+  const r = await buildJudgeVerifier(deps)!("did it", undefined, VDIR);
+  assert.equal(r.passed, true); // infra failure must never block
+  assert.ok(notes.some((n) => /Judge infrastructure failure/.test(n)));
+});
+
+test.after(() => rmSync(VDIR, { recursive: true, force: true }));
 
 // Made with Bob

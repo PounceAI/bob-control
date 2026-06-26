@@ -4,9 +4,10 @@ import { type Opts, pickEligible } from "./worker.js";
 import * as repo from "./db.js";
 import { resolveMode, profileFor, isReadOnlyMode } from "./modes.js";
 import { preserveWipToBranch } from "./checkpoint.js";
-import { captureGitBaseline, captureChangedFiles, type GitBaseline } from "./judge.js";
+import { buildJudgeVerifier, captureGitBaseline, captureChangedFiles, type GitBaseline } from "./judge.js";
 import { shouldRetry, executeRetry } from "./retry-policy.js";
 import { createPollLoop, defaultCaptureSnapshot } from "./bob-polls.js";
+import type { LlmDeps } from "./llm.js";
 import type { Task } from "./types.js";
 
 // V5 tail: the transport-agnostic board-drain loop the EXTENSION HOST runs in-process for Bob 2.0 (the
@@ -14,8 +15,8 @@ import type { Task } from "./types.js";
 // same loop serves a future refactor of the 1.x path. This is the MVP analog of worker.ts's runOne MINUS
 // the IPC-only gate layer (command/permission/mode-switch/followup): on 2.0 auto-approve is config-driven
 // (V4) and there is no event stream to gate on. Defer-while-chatting is not ported. Verify-and-continue
-// IS (command-verify + plan-stop, both transport-agnostic via bob-polls); the LLM judge is not yet —
-// it needs the classifier backend threaded into the in-process loop (follow-up).
+// IS (command-verify + plan-stop + the LLM judge, all transport-agnostic via bob-polls + the shared
+// buildJudgeVerifier).
 
 export interface DriverLoopConfig {
   driver: BobDriver;
@@ -27,6 +28,9 @@ export interface DriverLoopConfig {
   emit?: (type: string, data: Record<string, unknown>) => void;
   /** Delay primitive for retry backoff + idle poll; injectable so tests run without real waits. */
   sleep?: (ms: number) => Promise<void>;
+  /** Judge LLM transport overrides (fetchImpl/spawnImpl) merged into the judge deps — injected in tests
+   *  so --verify-judge runs without a real LLM call. */
+  judgeLlm?: Partial<LlmDeps>;
 }
 
 function buildPrompt(task: Task): string {
@@ -84,17 +88,17 @@ export async function driveOnce(cfg: DriverLoopConfig): Promise<boolean> {
     // BobDriver.dispatch is contracted never to reject; stay defensive for a third-party driver.
     res = { taskId: null, result: "", lastText: (e as Error).message, status: "aborted", tokensUsed: 0, turns: 0 };
   }
-  res = await verifyAndContinue(cfg, task, mode, res, planStopBaseline);
+  res = await verifyAndContinue(cfg, task, mode, res, planStopBaseline, baseline);
   await finalize(cfg, task, mode, res, baseline);
   return true;
 }
 
 /**
  * Verify-and-continue for the 2.0 loop: after the initial dispatch, run the acceptance check (the
- * --verify-command, plus --detect-plan-stop) and, on failure, re-dispatch the task + the failure via the
- * driver until it passes or --max-continues is hit. Reuses the transport-agnostic bob-polls loop with the
- * 2.0 driver as its dispatcher. No-op when --verify-and-continue is off. The LLM judge is NOT wired here
- * yet (it needs the classifier backend in the in-process loop) — command + plan-stop only.
+ * --verify-command, the optional --verify-judge LLM gate, plus --detect-plan-stop) and, on failure,
+ * re-dispatch the task + the failure via the driver until it passes or --max-continues is hit. Reuses the
+ * transport-agnostic bob-polls loop + the shared judge verifier with the 2.0 driver as its dispatcher.
+ * No-op when --verify-and-continue is off.
  */
 async function verifyAndContinue(
   cfg: DriverLoopConfig,
@@ -102,9 +106,33 @@ async function verifyAndContinue(
   mode: string,
   initial: DispatchResult,
   planStopBaseline: string | undefined,
+  evidenceBaseline: GitBaseline | undefined,
 ): Promise<DispatchResult> {
   const { driver, opts, cwd } = cfg;
+  const log = cfg.log ?? (() => {});
   if (!opts.verifyAndContinue) return initial;
+  // The composite command-then-judge verifier when --verify-judge is on (and the mode is judgeable); else
+  // undefined → the poll loop's command-only defaultVerify. apiKey comes from the host env (the in-process
+  // loop runs in Bob); judgeLlm overrides the transport in tests.
+  const verify = opts.verifyJudge
+    ? buildJudgeVerifier({
+        mode,
+        taskPrompt: buildPrompt(task),
+        evidenceBaseline,
+        judge: {
+          backend: opts.classifierBackend,
+          model: opts.classifierModel,
+          apiKey: process.env.ANTHROPIC_API_KEY,
+          cliPath: opts.classifierCli,
+          timeoutMs: 30_000,
+          ...cfg.judgeLlm,
+        },
+        taskId: task.id,
+        addNote: repo.addNote,
+        log,
+      })
+    : undefined;
+  if (opts.verifyJudge && !verify) log(`  [judge] skipped for {${mode}} (no code diff expected in this mode)`);
   const loop = createPollLoop({
     enabled: true,
     verifyCommand: opts.verifyCommand,
@@ -113,9 +141,10 @@ async function verifyAndContinue(
     taskPrompt: buildPrompt(task),
     task: { id: task.id, title: task.title },
     addNote: repo.addNote,
-    log: cfg.log ?? (() => {}),
+    log,
     dispatch: (text: string) => driver.dispatch({ text, mode, timeoutMs: opts.timeoutMs }),
     detectPlanStop: opts.detectPlanStop,
+    verify,
   });
   return loop(initial, planStopBaseline);
 }

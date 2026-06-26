@@ -416,18 +416,25 @@ function startInProcessLoop(connector: string, mods: ConnectorModules, host: unk
   if (tag && tag.trim()) args.push("--tag", tag.trim());
   const maxRetry = c.get<number>("maxRetryAttempts") ?? 0;
   if (maxRetry > 0) args.push("--retry", String(maxRetry));
-  // Verify-and-continue: command-verify + plan-stop are ported to the in-process loop. The LLM judge is
-  // NOT yet (it needs the classifier backend in-process), so --verify-judge is intentionally not passed;
-  // warn if it's configured so the user knows it's a no-op on 2.0.
-  if (c.get<boolean>("verifyAndContinue")) {
+  // Verify-and-continue: command-verify, plan-stop, AND the LLM judge are ported to the in-process loop.
+  const verifyAndContinue = c.get<boolean>("verifyAndContinue");
+  const wantJudge = verifyAndContinue && c.get<boolean>("verifyJudge");
+  if (verifyAndContinue) {
     args.push("--verify-and-continue");
     const verifyCmd = c.get<string>("verifyCommand");
     if (verifyCmd && verifyCmd.trim()) args.push("--verify-command", verifyCmd.trim());
     args.push("--max-continues", String(c.get<number>("maxContinues") ?? 3));
-    if (c.get<boolean>("verifyJudge"))
-      out.appendLine("[start] note: verifyJudge isn't supported on the 2.0 in-process loop yet — using command-verify + plan-stop only.");
+    if (wantJudge) args.push("--verify-judge");
   }
   if (c.get<boolean>("detectPlanStop")) args.push("--detect-plan-stop");
+  // The judge needs a Claude backend (cli default, or api with ANTHROPIC_API_KEY in the host env).
+  if (wantJudge) {
+    args.push("--classifier-backend", c.get<string>("classifierBackend") ?? "cli");
+    const model = c.get<string>("classifierModel");
+    if (model && model.trim()) args.push("--classifier-model", model.trim());
+    const cliPath = c.get<string>("classifierCliPath");
+    if (cliPath && cliPath.trim()) args.push("--classifier-cli", cliPath.trim());
+  }
   const opts = mods.parseOpts(args);
   const driver = new mods.InProcessDriver(host);
 

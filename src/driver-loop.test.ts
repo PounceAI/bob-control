@@ -113,6 +113,38 @@ test("driveOnce --verify-and-continue: a failing verify command re-dispatches, t
   assert.equal(getTask(t.id)!.status, "blocked"); // never passed → blocked, NOT completed despite result text
 });
 
+// A fake Claude transport for the judge: returns a fixed verdict JSON without a real LLM call.
+const judgeFetch = (verdict: { pass: boolean; reason: string }): typeof fetch =>
+  (async () =>
+    ({
+      ok: true,
+      json: async () => ({ content: [{ text: JSON.stringify(verdict) }] }),
+    }) as Response) as unknown as typeof fetch;
+
+test("driveOnce --verify-judge: a PASS verdict completes on the first dispatch (no continue)", async () => {
+  const t = createTask({ title: "judged ok", mode: "code" });
+  const driver = fakeDriver({ status: "completed", result: "did it" });
+  const config: DriverLoopConfig = {
+    ...cfg(driver, ["--verify-and-continue", "--verify-judge", "--classifier-backend", "api"]),
+    judgeLlm: { apiKey: "k", fetchImpl: judgeFetch({ pass: true, reason: "ok" }) },
+  };
+  await driveOnce(config);
+  assert.equal(driver.calls.length, 1);
+  assert.ok(isCompleted(getTask(t.id)!.status));
+});
+
+test("driveOnce --verify-judge: a FAIL verdict re-dispatches, then blocks at max-continues", async () => {
+  const t = createTask({ title: "judged fail", mode: "code" });
+  const driver = fakeDriver({ status: "completed", result: "did it" });
+  const config: DriverLoopConfig = {
+    ...cfg(driver, ["--verify-and-continue", "--verify-judge", "--classifier-backend", "api", "--max-continues", "1"]),
+    judgeLlm: { apiKey: "k", fetchImpl: judgeFetch({ pass: false, reason: "logic wrong" }) },
+  };
+  await driveOnce(config);
+  assert.equal(driver.calls.length, 2); // initial + 1 continue, then give up
+  assert.equal(getTask(t.id)!.status, "blocked");
+});
+
 test("driveOnce dry-run neither claims nor dispatches", async () => {
   const t = createTask({ title: "peek", mode: "code" });
   const driver = fakeDriver();

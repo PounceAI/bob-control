@@ -5,6 +5,8 @@ import { callModel, type LlmDeps } from "./llm.js";
 import { resolve as resolvePath } from "node:path";
 import { gitOut, splitLines, isInsideWorkTree, listUntracked } from "./git.js";
 import { extractJsonObjects } from "./json-extract.js";
+import { defaultVerify, type VerifyResult } from "./bob-polls.js";
+import { judgeAppliesToMode } from "./modes.js";
 
 export interface JudgeVerdict {
   pass: boolean;
@@ -208,6 +210,62 @@ export async function judgeCompletion(ctx: JudgeContext, deps: JudgeDeps): Promi
   return res.ok
     ? parseVerdict(res.text)
     : { pass: true, error: true, reason: `judge unavailable (fail-open): ${res.reason}` };
+}
+
+export interface JudgeVerifierDeps {
+  /** Routed mode — the judge is diff-based, so it applies only to code-writing modes (else undefined). */
+  mode: string;
+  /** The original task criteria the judge checks the work against. */
+  taskPrompt: string;
+  /** Pre-task baseline scoping the diff to THIS task; falls back to HEAD / no-prior-untracked when absent. */
+  evidenceBaseline?: GitBaseline;
+  /** LLM backend config (backend/model/apiKey/cliPath/timeoutMs; fetchImpl/spawnImpl injectable in tests). */
+  judge: JudgeDeps;
+  taskId: number;
+  addNote: (taskId: number, note: string, author?: string) => void;
+  log: (msg: string) => void;
+}
+
+/**
+ * Build the composite acceptance verifier (command-then-judge) for the verify-and-continue poll loop, or
+ * undefined when the LLM judge doesn't apply to this mode — read-only/review modes have no diff, so judging
+ * them would wrongly FAIL; the caller then falls back to command-only `defaultVerify`. Shared by the 1.x
+ * worker and the 2.0 in-process loop so both behave identically:
+ *   - a verify command (if set) runs FIRST and short-circuits on failure; else the judge is the sole gate;
+ *   - the judge sees ONLY this task's diff (scoped to evidenceBaseline);
+ *   - fail-open: a judge that can't reach the LLM never blocks (passes + records a note).
+ */
+export function buildJudgeVerifier(
+  deps: JudgeVerifierDeps,
+): ((result: string, command: string | undefined, cwd: string) => Promise<VerifyResult>) | undefined {
+  if (!judgeAppliesToMode(deps.mode)) return undefined;
+  const ref = deps.evidenceBaseline?.ref ?? "HEAD";
+  const priorUntracked = deps.evidenceBaseline?.untracked ?? [];
+  return async (result, command, cwd): Promise<VerifyResult> => {
+    if (command) {
+      const cmd = await defaultVerify(result, command, cwd);
+      if (!cmd.passed) return cmd; // command failed → short-circuit, skip the judge
+    }
+    const gitDiff = await captureGitDiff(cwd, 4000, ref, priorUntracked);
+    const verdict = await judgeCompletion(
+      { taskPrompt: deps.taskPrompt, completionResult: result, gitDiff },
+      deps.judge,
+    );
+    if (verdict.error) {
+      // Fail-open: judge-infrastructure failure must never block an otherwise-good task.
+      deps.log(`  [judge] ${verdict.reason} — failing open (treating as passed)`);
+      deps.addNote(deps.taskId, `Judge infrastructure failure: ${verdict.reason}`, "judge");
+      return { passed: true, reason: verdict.reason };
+    }
+    // With a command it already passed (short-circuited on failure), so the verdict decides; without one
+    // the judge is the sole gate.
+    if (command) {
+      return verdict.pass
+        ? { passed: true, reason: "command and judge both passed" }
+        : { passed: false, reason: `command passed but judge failed: ${verdict.reason}` };
+    }
+    return { passed: verdict.pass, reason: verdict.reason };
+  };
 }
 
 // Made with Bob
