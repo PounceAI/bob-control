@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
-## [Unreleased] — IBM Bob 2.0 support (in-process driver)
+## [2.0.0] — 2026-06-26 — IBM Bob 2.0 support (in-process driver)
 
 The companion extension now **auto-detects Bob 1.x vs 2.0** and drives each natively from one build.
 IBM Bob 2.0 removed the `node-ipc` pipe that all of 1.x dispatch rode; on 2.0 the extension runs the
@@ -81,7 +81,7 @@ per-task worktree pin and a per-worktree worker lease. Runbook: [README → Work
 - This was the **last release for IBM Bob 1.x only.** Worktree parallelism — and the whole 1.x
   dispatch path — ride Bob's `node-ipc` named pipe (`ROO_CODE_IPC_SOCKET_PATH`), which **IBM Bob 2.0
   removes.**
-- **Bob 2.0** is now supported by the same extension via an **in-process driver** (see the Unreleased
+- **Bob 2.0** is now supported by the same extension via an **in-process driver** (see the 2.0.0
   entry above): it calls Bob's exported `startTask` API directly and routes per window natively, so the
   1.x per-instance pipe routing and the bundle patch are **superseded, not carried forward.** The
   shared-board layer (resolver, worktree pin, lease) carries forward unchanged.
