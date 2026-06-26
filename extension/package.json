@@ -2,7 +2,7 @@
   "name": "bob-tasks",
   "displayName": "Bob Tasks",
   "description": "Auto-dispatch queued tasks to IBM Bob, with mode routing, a safety gate, defer-while-chatting, and native notifications.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "publisher": "local",
   "license": "Apache-2.0",
   "engines": { "vscode": "^1.94.0" },
