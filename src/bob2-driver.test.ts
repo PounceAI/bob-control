@@ -26,7 +26,7 @@ function makeStore() {
   const { DatabaseSync } = requireModule("node:sqlite") as typeof import("node:sqlite");
   const db = new DatabaseSync(":memory:");
   db.exec(
-    "CREATE TABLE tasks (id TEXT PRIMARY KEY, parent_id TEXT, status TEXT, directory TEXT, created_at INTEGER, updated_at INTEGER, costs TEXT, last_error TEXT, first_message TEXT)",
+    "CREATE TABLE tasks (id TEXT PRIMARY KEY, parent_id TEXT, status TEXT, directory TEXT, created_at INTEGER, updated_at INTEGER, costs TEXT, last_error TEXT, first_message TEXT, env TEXT)",
   );
   db.exec("CREATE TABLE messages (id TEXT PRIMARY KEY, task_id TEXT, role TEXT, data TEXT, created_at INTEGER)");
   const store = new Bob2TaskStore(db);
@@ -34,13 +34,25 @@ function makeStore() {
   const base = Date.now() - 100_000; // created_at values in the recent past, so updated_at can advance past them
   let clock = 0;
   let n = 0;
-  // A new root, created but not yet started (updated_at == created_at).
+  const envFor = (ws: string) => JSON.stringify({ workspace: ws });
+  // A new root, created but not yet started (updated_at == created_at), in our workspace (DIR).
   const seedRoot = (status: string, firstMessage = ""): string => {
     const id = `task-${++n}`;
     const ca = base + ++clock * 1000;
     db.prepare(
-      "INSERT INTO tasks (id, parent_id, status, directory, created_at, updated_at, costs, last_error, first_message) VALUES (?, NULL, ?, ?, ?, ?, NULL, NULL, ?)",
-    ).run(id, status, DIR, ca, ca, firstMessage);
+      "INSERT INTO tasks (id, parent_id, status, directory, created_at, updated_at, costs, last_error, first_message, env) VALUES (?, NULL, ?, ?, ?, ?, NULL, NULL, ?, ?)",
+    ).run(id, status, DIR, ca, ca, firstMessage, envFor(DIR));
+    return id;
+  };
+  // A foreign chat root (someone else's task on the shared db) — controllable workspace + updated_at so a
+  // test can place it inside/outside our workspace and inside/outside the idle-grace window. Defaults to a
+  // just-now updated_at so it reads as a LIVE chat under the driver's time-bounds.
+  const seedForeign = (status: string, opts: { ws?: string; updatedAt?: number } = {}): string => {
+    const id = `foreign-${++n}`;
+    const ca = base + ++clock * 1000;
+    db.prepare(
+      "INSERT INTO tasks (id, parent_id, status, directory, created_at, updated_at, costs, last_error, first_message, env) VALUES (?, NULL, ?, ?, ?, ?, NULL, NULL, '', ?)",
+    ).run(id, status, DIR, ca, opts.updatedAt ?? Date.now() - 1_000, envFor(opts.ws ?? DIR));
     return id;
   };
   // Bob touching the row mid/end-of-turn: advances updated_at to "now" (so it reads as run, then quiet).
@@ -64,7 +76,7 @@ function makeStore() {
         Date.now(),
       );
   };
-  return { db, store, seedRoot, bump, setLastError, seedSubtask, finishWith };
+  return { db, store, seedRoot, seedForeign, bump, setLastError, seedSubtask, finishWith };
 }
 
 function makeHost(opts: {
@@ -354,6 +366,42 @@ test("dispatch forwards the WorkspaceFolder OBJECT (not the string) and the tran
   assert.equal(seenWs, host.workspaceFolderObject());
   assert.notEqual(typeof seenWs, "string");
   assert.equal(seenMode, "agent"); // board "code" → Bob 2.0 "agent"
+});
+
+// ── defer-while-chatting: externalActivity (driver wiring over foreignActivity) ─────────────────────
+
+test("externalActivity is true while a foreign chat is running in our workspace", async () => {
+  const { store, seedForeign } = makeStore();
+  seedForeign("running");
+  const driver = new InProcessDriver(makeHost({}), { openStore: () => store, ...fast });
+  assert.equal(await driver.externalActivity(60_000), true);
+});
+
+test("externalActivity excludes OUR OWN dispatched task (only a foreign chat defers)", async () => {
+  const { store, seedRoot, seedForeign } = makeStore();
+  let id = "";
+  const driver = new InProcessDriver(makeHost({ startTask: () => void (id = seedRoot("running")) }), {
+    openStore: () => store,
+    ...fast,
+  });
+  // A timed-out dispatch leaves our root 'running' AND records it in ownIds.
+  assert.equal((await driver.dispatch({ text: "ours", timeoutMs: 40 })).taskId, id);
+  assert.equal(await driver.externalActivity(60_000), false); // our own running root is not a user chat
+  seedForeign("running"); // now a genuine foreign chat appears
+  assert.equal(await driver.externalActivity(60_000), true);
+});
+
+test("externalActivity respects the idle-grace window for a just-finished foreign chat", async () => {
+  const { store, seedForeign } = makeStore();
+  seedForeign("active", { updatedAt: Date.now() - 1_000 }); // finished 1s ago, quiet
+  const driver = new InProcessDriver(makeHost({}), { openStore: () => store, ...fast });
+  assert.equal(await driver.externalActivity(5_000), true); // within the 5s grace window
+  assert.equal(await driver.externalActivity(500), false); // past a 0.5s window → resume
+});
+
+test("externalActivity is false on cold start (bob.db not created yet) — never wedges the loop", async () => {
+  const driver = new InProcessDriver(makeHost({}), { openStore: () => null, ...fast });
+  assert.equal(await driver.externalActivity(60_000), false);
 });
 
 // ── never-throw contract + busy guard ─────────────────────────────────────────────────────────────

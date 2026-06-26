@@ -111,10 +111,20 @@ export function toBob2Mode(mode: string | undefined | null): string {
   return BOB2_REMOVED_BUILTIN_MODES[mode] ?? mode;
 }
 
+// A crashed/killed Bob window can leave its root stuck at status='running'; only count a running root as a
+// live chat if it bumped within this window, so defer self-heals instead of wedging forever (1.x evictStale).
+const STALE_RUNNING_MS = 5 * 60_000;
+// Cap on remembered own-dispatch ids: foreignActivity only scans recently-active roots, so an id evicted
+// after this many newer dispatches can't reappear there — bounds the Set on a long-lived loop.
+const MAX_OWN_IDS = 256;
+
 export class InProcessDriver implements BobDriver {
   private handle: Bob2StartTask | null = null;
   private approvalWritten = false;
   private busy = false;
+  // Root ids WE dispatched (each startTask makes a fresh root on 2.0, incl. verify-and-continue re-dispatches),
+  // so externalActivity can tell our own running task from a user's live chat on the shared global db.
+  private readonly ownIds = new Set<string>();
   private readonly pollMs: number;
   private readonly quietMs: number;
   private readonly correlateTimeoutMs: number;
@@ -170,6 +180,48 @@ export class InProcessDriver implements BobDriver {
   /** No persistent watcher between dispatches (the store is opened per-dispatch), so close is a no-op. */
   close(): void {}
 
+  /** Remember a root we dispatched so externalActivity won't read it as a user chat, bounded so a long-lived
+   *  loop's Set can't grow without limit (Set keeps insertion order → evict the oldest). NOTE: a dispatch
+   *  that fails to correlate has no id to record, so its orphaned 'running' root may briefly read as foreign
+   *  until it completes or the staleness clamp ages it out — a bounded, self-correcting spurious defer. */
+  private rememberOwn(id: string): void {
+    this.ownIds.add(id);
+    if (this.ownIds.size > MAX_OWN_IDS) {
+      const oldest = this.ownIds.values().next().value;
+      if (oldest !== undefined) this.ownIds.delete(oldest);
+    }
+  }
+
+  /**
+   * Defer-while-chatting (2.0): is the user actively in a Bob chat in our workspace, so the loop should hold
+   * dispatch? Polls bob.db (2.0 has no event stream): defer if a FOREIGN root is running (within the
+   * staleness clamp) or was touched within `idleMs` (the grace window that keeps the worker from barging in
+   * the instant you stop typing). Cannot reject and cannot wedge: a cold start / unopenable store / any
+   * bob.db fault returns false (worst case it dispatches over a chat — the pre-port behavior). Comparing
+   * `updated_at >= now-idleMs` in SQL (not `now - updated_at`) also avoids a future-dated row deferring forever.
+   */
+  async externalActivity(idleMs: number): Promise<boolean> {
+    let store: Bob2TaskStore | null;
+    try {
+      store = this.openStore();
+    } catch {
+      return false;
+    }
+    if (!store) return false;
+    try {
+      const now = Date.now();
+      const { running, activeRecently } = store.foreignActivity(this.ownIds, this.host.workspaceFolder(), {
+        activeSinceMs: now - idleMs,
+        runningSinceMs: now - STALE_RUNNING_MS,
+      });
+      return running || activeRecently;
+    } catch {
+      return false; // a transient bob.db fault must neither wedge the loop into deferring nor reject the poll
+    } finally {
+      store.close();
+    }
+  }
+
   private async runDispatch(opts: DispatchCore): Promise<DispatchResult> {
     // Validate the workspace BEFORE connect(), which writes settings.json — a doomed dispatch must not
     // mutate the user's global config as a side effect.
@@ -218,6 +270,7 @@ export class InProcessDriver implements BobDriver {
         // (db never materialized, or directory/timing assumptions wrong) — surface it, don't fake idle.
         return fail("dispatched task did not appear in bob.db (could not correlate)");
       }
+      this.rememberOwn(id); // ours, not a user chat — so the defer signal won't pause on our own dispatch
       const { settled, row, maxGapMs } = await awaitTurnSettled(store, id, {
         pollMs: this.pollMs,
         quietMs: this.quietMs,

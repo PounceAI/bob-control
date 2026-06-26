@@ -177,6 +177,41 @@ test("runDriverLoop drains the board and stops on --once, closing the driver", a
   assert.equal(listTasks({ status: "pending" }).length, 0);
 });
 
+test("runDriverLoop defers dispatch while externalActivity reports a live chat", async () => {
+  createTask({ title: "queued", mode: "code" });
+  const driver = fakeDriver({ status: "completed", result: "ok" });
+  driver.externalActivity = async () => true;
+  const events: string[] = [];
+  await runDriverLoop({ ...cfg(driver, ["--once"]), emit: (t) => events.push(t) });
+  assert.ok(events.includes("deferred"));
+  assert.equal(driver.calls.length, 0); // never dispatched over the live chat
+  assert.equal(listTasks({ status: "pending" }).length, 1); // task left queued for later
+});
+
+test("runDriverLoop resumes and dispatches once the chat goes idle", async () => {
+  createTask({ title: "queued", mode: "code" });
+  const driver = fakeDriver({ status: "completed", result: "ok" });
+  let activityChecks = 0;
+  driver.externalActivity = async () => ++activityChecks <= 1; // chatting on the 1st check, idle after
+  const events: string[] = [];
+  await runDriverLoop({ ...cfg(driver), emit: (t) => events.push(t) }, () => driver.calls.length > 0);
+  assert.ok(events.includes("deferred") && events.includes("resumed"));
+  assert.equal(driver.calls.length, 1); // dispatched after the chat went idle
+});
+
+test("runDriverLoop --no-defer never consults the chat signal", async () => {
+  createTask({ title: "queued", mode: "code" });
+  const driver = fakeDriver({ status: "completed", result: "ok" });
+  let consulted = false;
+  driver.externalActivity = async () => {
+    consulted = true;
+    return true;
+  };
+  await runDriverLoop({ ...cfg(driver, ["--once", "--no-defer"]), emit: () => {} });
+  assert.equal(driver.calls.length, 1); // dispatched despite a "live chat"
+  assert.equal(consulted, false); // the gate was skipped entirely
+});
+
 test("runDriverLoop aborts cleanly when the driver can't connect", async () => {
   const driver = fakeDriver();
   driver.connect = async () => {

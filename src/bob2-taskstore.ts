@@ -3,6 +3,7 @@ import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { bob2HomeDir } from "./bob2-config.js";
+import { sameWorkspace } from "./pipe-name.js";
 
 // Reader for Bob 2.0's task store (~/.bob/db/bob.db) — the only place a sibling extension can observe a
 // dispatched task's progress: 2.0 exposes no event stream, and startTask returns no id. So we snapshot
@@ -121,6 +122,17 @@ export function firstMessageMatches(firstMessage: string | null | undefined, con
   return a === b || a.startsWith(b) || b.startsWith(a) || a.includes(b.slice(0, 120));
 }
 
+/** The `workspace` fsPath out of a task's `env` JSON (live shape: {id,workspace,scheme,…}), or null. */
+function envWorkspace(env: string | null): string | null {
+  if (!env) return null;
+  try {
+    const w = (JSON.parse(env) as { workspace?: unknown }).workspace;
+    return typeof w === "string" ? w : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Flatten a message `content` (string, or an array of text blocks) to plain text; null when empty. */
 function extractText(content: unknown): string | null {
   if (typeof content === "string") return content.trim() || null;
@@ -202,6 +214,45 @@ export class Bob2TaskStore {
   read(id: string): Bob2TaskRow | null {
     const row = this.q(`SELECT ${COLS} FROM tasks WHERE id = ?`).get(id) as Bob2TaskRow | undefined;
     return row ?? null;
+  }
+
+  /**
+   * Defer-while-chatting signal (2.0): is anyone OTHER than us chatting with Bob in `workspace` now (or just
+   * now)? The 2.0 analog of 1.x's IPC activity stream, read from bob.db. Two probes over FOREIGN roots
+   * (parent_id IS NULL, id ∉ `ownIds`, same workspace) — bounded by TIME, not by a fixed row count, so a
+   * busy shared db can't push the row we care about out of a LIMIT window:
+   *   - `running`: a root actively running AND bumped since `runningSinceMs` — the staleness clamp self-heals
+   *     a crashed window's stuck 'running' row instead of wedging defer forever (the 1.x evictStale role);
+   *   - `activeRecently`: any root touched since `activeSinceMs` — the idle-grace window that keeps the
+   *     worker from barging in the instant the user stops typing.
+   * Workspace-scoped because bob.db is GLOBAL across all Bob windows — an unrelated project's chat must not
+   * pause this one; with no workspace we can't attribute a chat to our window, so report nothing rather than
+   * defer on a stranger. The status filter and time-bounds run in SQL, so the common no-chat poll matches ~0
+   * rows; `sameWorkspace` is pipe-name's one canonical "same folder" rule (so a row with no/unparseable env
+   * — which we can't attribute — is treated as not-ours).
+   */
+  foreignActivity(
+    ownIds: Set<string>,
+    workspace: string | null,
+    cutoffs: { activeSinceMs: number; runningSinceMs: number },
+  ): { running: boolean; activeRecently: boolean } {
+    if (!workspace) return { running: false, activeRecently: false };
+    // A row counts as someone-else-chatting when it's FOREIGN (not one we dispatched) AND in our workspace.
+    const foreign = (r: { id: string; env: string | null }): boolean =>
+      !ownIds.has(r.id) && sameWorkspace(envWorkspace(r.env), workspace);
+    // status IN (...) mirrors isActivelyRunning — keep the two in sync.
+    const running = (
+      this.q(
+        "SELECT id, env FROM tasks WHERE parent_id IS NULL AND status IN ('running', 'compacting') AND updated_at >= ?",
+      ).all(cutoffs.runningSinceMs) as { id: string; env: string | null }[]
+    ).some(foreign);
+    const activeRecently = (
+      this.q("SELECT id, env FROM tasks WHERE parent_id IS NULL AND updated_at >= ?").all(cutoffs.activeSinceMs) as {
+        id: string;
+        env: string | null;
+      }[]
+    ).some(foreign);
+    return { running, activeRecently };
   }
 
   /** Bob's completion summary for the task: the latest `assistant` message's `content` (the result text

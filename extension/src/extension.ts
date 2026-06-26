@@ -196,7 +196,7 @@ function spawnWorker(connector: string): void {
     "--surface", c.get<string>("dispatch.surface") ?? "sidebar",
     "--defer-idle", String(c.get<number>("deferIdleMs") ?? 60000),
   ];
-  if (!c.get<boolean>("deferWhileChatting")) args.push("--no-defer");
+  if (c.get<boolean>("deferWhileChatting") === false) args.push("--no-defer"); // only when EXPLICITLY off
   const tag = c.get<string>("tag");
   if (tag && tag.trim()) args.push("--tag", tag.trim());
   // Reversible toggles. The command classifier (approve/deny gray-zone commands,
@@ -399,8 +399,9 @@ function applyBoardEnv(cwd: string): void {
 
 /**
  * Start the Bob 2.0 board loop IN this extension host. No child process, no pipe: the loop calls
- * exports.startTask and watches ~/.bob/db/bob.db. The 1.x-only flags (classifier/followups/verify/defer/
- * pipe/surface) don't apply — 2.0 auto-approves via config (V4) and exposes no event stream to gate on.
+ * exports.startTask and watches ~/.bob/db/bob.db. The genuinely IPC-bound 1.x flags (classifier/followups/
+ * pipe/surface) don't apply — 2.0 auto-approves via config (V4) and exposes no reply channel. Defer-while-
+ * chatting DOES apply, re-derived from a bob.db poll.
  */
 function startInProcessLoop(connector: string, mods: ConnectorModules, host: unknown): void {
   const c = cfg();
@@ -414,6 +415,11 @@ function startInProcessLoop(connector: string, mods: ConnectorModules, host: unk
   ];
   const tag = c.get<string>("tag");
   if (tag && tag.trim()) args.push("--tag", tag.trim());
+  // Defer-while-chatting: ported to 2.0 via a bob.db poll (driver.externalActivity), so the loop pauses
+  // dispatch while you're mid-chat in this window's Bob. Same flags as the 1.x worker; --defer-stale is
+  // 1.x-only (event-pairing self-heal) — bob.db status is ground truth, so the 2.0 path needs no stale guard.
+  args.push("--defer-idle", String(c.get<number>("deferIdleMs") ?? 60000));
+  if (c.get<boolean>("deferWhileChatting") === false) args.push("--no-defer"); // only when EXPLICITLY off
   const maxRetry = c.get<number>("maxRetryAttempts") ?? 0;
   if (maxRetry > 0) args.push("--retry", String(maxRetry));
   // Verify-and-continue: command-verify, plan-stop, AND the LLM judge are ported to the in-process loop.

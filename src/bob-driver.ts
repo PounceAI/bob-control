@@ -24,4 +24,11 @@ export interface BobDriver {
   dispatch(opts: DispatchCore): Promise<DispatchResult>;
   /** Release held resources (1.x: the socket; 2.x: any DB watcher). */
   close(): void;
+  /**
+   * Defer-while-chatting signal: true if the user appears to be actively using Bob's chat right now, so the
+   * loop should pause dispatch rather than open a task over a live conversation. Optional — only the 2.x
+   * in-process driver implements it (a bob.db poll); the 1.x worker derives defer from its own IPC event
+   * stream, so `BobClient` leaves it undefined and the loop skips the gate.
+   */
+  externalActivity?(idleMs: number): Promise<boolean>;
 }

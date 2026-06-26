@@ -29,7 +29,7 @@ function makeStore(): { db: DatabaseSync; store: Bob2TaskStore } {
   const { DatabaseSync } = requireModule("node:sqlite") as typeof import("node:sqlite");
   const db = new DatabaseSync(":memory:");
   db.exec(
-    "CREATE TABLE tasks (id TEXT PRIMARY KEY, parent_id TEXT, status TEXT, directory TEXT, created_at INTEGER, updated_at INTEGER, costs TEXT, last_error TEXT, first_message TEXT)",
+    "CREATE TABLE tasks (id TEXT PRIMARY KEY, parent_id TEXT, status TEXT, directory TEXT, created_at INTEGER, updated_at INTEGER, costs TEXT, last_error TEXT, first_message TEXT, env TEXT)",
   );
   db.exec("CREATE TABLE messages (id TEXT PRIMARY KEY, task_id TEXT, role TEXT, data TEXT, created_at INTEGER)");
   return { db, store: new Bob2TaskStore(db) };
@@ -56,10 +56,11 @@ function insert(
     updated_at?: number;
     last_error?: string | null;
     first_message?: string;
+    env?: string | null;
   },
 ): void {
   db.prepare(
-    "INSERT INTO tasks (id, parent_id, status, directory, created_at, updated_at, costs, last_error, first_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO tasks (id, parent_id, status, directory, created_at, updated_at, costs, last_error, first_message, env) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   ).run(
     row.id,
     row.parent ?? null,
@@ -70,6 +71,7 @@ function insert(
     null,
     row.last_error ?? null,
     row.first_message ?? null,
+    row.env ?? null,
   );
 }
 
@@ -170,6 +172,115 @@ test("firstMessageMatches tolerates reformatting (prefix/containment), rejects m
   assert.ok(firstMessageMatches("[mask] Task #5: build the widget now", "Task #5: build the widget")); // contained
   assert.ok(!firstMessageMatches("Task #9: something else", "Task #5: build the widget"));
   assert.ok(!firstMessageMatches(null, "x") && !firstMessageMatches("x", ""));
+});
+
+// ── defer-while-chatting: foreignActivity (2.0 bob.db poll, workspace-scoped, time-bounded) ─────────
+
+const WS = "c:\\proj\\bob-control";
+const envJson = (ws: string) => JSON.stringify({ id: "x", workspace: ws, scheme: "file" });
+// Fixed virtual clock so the time-bounds are deterministic (no real Date.now()): idle window = last 60s,
+// running staleness clamp = last 300s.
+const NOW = 1_000_000;
+const cut = (over: Partial<{ activeSinceMs: number; runningSinceMs: number }> = {}) => ({
+  activeSinceMs: NOW - 60_000,
+  runningSinceMs: NOW - 300_000,
+  ...over,
+});
+
+test("foreignActivity: a foreign running root in our workspace ⇒ running + activeRecently", () => {
+  const { db, store } = makeStore();
+  insert(db, { id: "chat", status: "running", created_at: NOW - 5_000, updated_at: NOW - 1_000, env: envJson(WS) });
+  assert.deepEqual(store.foreignActivity(new Set(), WS, cut()), { running: true, activeRecently: true });
+});
+
+test("foreignActivity: our OWN root is excluded from BOTH signals even though it is recent+running", () => {
+  const { db, store } = makeStore();
+  insert(db, { id: "ours", status: "running", created_at: NOW - 5_000, updated_at: NOW - 1_000, env: envJson(WS) });
+  // Proven against a PRESENT recent running row: if ownIds were applied to only one signal, the other trips.
+  assert.deepEqual(store.foreignActivity(new Set(["ours"]), WS, cut()), { running: false, activeRecently: false });
+});
+
+test("foreignActivity: a running root in ANOTHER workspace does not count (bob.db is global)", () => {
+  const { db, store } = makeStore();
+  insert(db, {
+    id: "x",
+    status: "running",
+    created_at: NOW - 5_000,
+    updated_at: NOW - 1_000,
+    env: envJson("c:\\proj\\elsewhere"),
+  });
+  assert.deepEqual(store.foreignActivity(new Set(), WS, cut()), { running: false, activeRecently: false });
+});
+
+test("foreignActivity: workspace match reuses sameWorkspace (case / separator / '.' insensitive)", () => {
+  const { db, store } = makeStore();
+  insert(db, {
+    id: "chat",
+    status: "running",
+    created_at: NOW - 5_000,
+    updated_at: NOW - 1_000,
+    env: envJson("C:/Proj/./Bob-Control/"),
+  });
+  assert.equal(store.foreignActivity(new Set(), WS, cut()).running, true);
+});
+
+test("foreignActivity: a just-finished foreign root within the idle window ⇒ activeRecently (grace)", () => {
+  const { db, store } = makeStore();
+  insert(db, { id: "done", status: "active", created_at: NOW - 50_000, updated_at: NOW - 30_000, env: envJson(WS) });
+  assert.deepEqual(store.foreignActivity(new Set(), WS, cut()), { running: false, activeRecently: true });
+});
+
+test("foreignActivity: a foreign root older than the idle window ⇒ nothing", () => {
+  const { db, store } = makeStore();
+  insert(db, { id: "old", status: "active", created_at: NOW - 200_000, updated_at: NOW - 120_000, env: envJson(WS) });
+  assert.deepEqual(store.foreignActivity(new Set(), WS, cut()), { running: false, activeRecently: false });
+});
+
+test("foreignActivity: idle window is inclusive at the cutoff (>=), exclusive just past it", () => {
+  const { db, store } = makeStore();
+  insert(db, { id: "edge", status: "active", created_at: NOW - 60_000, updated_at: NOW - 60_000, env: envJson(WS) });
+  assert.equal(store.foreignActivity(new Set(), WS, cut()).activeRecently, true); // updated_at == activeSinceMs
+  assert.equal(store.foreignActivity(new Set(), WS, cut({ activeSinceMs: NOW - 59_999 })).activeRecently, false);
+});
+
+test("foreignActivity: a stuck 'running' root older than the staleness clamp self-heals (not running)", () => {
+  const { db, store } = makeStore();
+  // A crashed window left it 'running' but updated_at is 6 min old (> runningSinceMs) → must not wedge defer.
+  insert(db, {
+    id: "stuck",
+    status: "running",
+    created_at: NOW - 400_000,
+    updated_at: NOW - 360_000,
+    env: envJson(WS),
+  });
+  assert.deepEqual(store.foreignActivity(new Set(), WS, cut()), { running: false, activeRecently: false });
+});
+
+test("foreignActivity: no workspace ⇒ reports nothing (can't attribute a chat to our window)", () => {
+  const { db, store } = makeStore();
+  insert(db, { id: "chat", status: "running", created_at: NOW - 5_000, updated_at: NOW - 1_000, env: envJson(WS) });
+  assert.deepEqual(store.foreignActivity(new Set(), null, cut()), { running: false, activeRecently: false });
+});
+
+test("foreignActivity: a foreign root with no parseable env is treated as not-ours (can't attribute)", () => {
+  const { db, store } = makeStore();
+  insert(db, { id: "noenv", status: "running", created_at: NOW - 5_000, updated_at: NOW - 1_000, env: null });
+  assert.deepEqual(store.foreignActivity(new Set(), WS, cut()), { running: false, activeRecently: false });
+});
+
+test("foreignActivity: subtasks are not roots and never count as a chat", () => {
+  const { db, store } = makeStore();
+  insert(db, { id: "root", status: "active", created_at: NOW - 5_000, updated_at: NOW - 1_000, env: envJson(WS) });
+  insert(db, {
+    id: "sub",
+    parent: "root",
+    status: "running",
+    created_at: NOW - 900,
+    updated_at: NOW - 100,
+    env: envJson(WS),
+  });
+  // root is ours; the running row is a subtask (parent_id not null) → neither signal trips.
+  assert.deepEqual(store.foreignActivity(new Set(["root"]), WS, cut()), { running: false, activeRecently: false });
 });
 
 // ── completion watch (live active→running→active lifecycle) ───────────────────────────────────────

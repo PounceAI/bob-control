@@ -14,9 +14,9 @@ import type { Task } from "./types.js";
 // 2.0 driver can't be a child process — see docs/bob-2-inprocess.md). It drives any BobDriver, so the
 // same loop serves a future refactor of the 1.x path. This is the MVP analog of worker.ts's runOne MINUS
 // the IPC-only gate layer (command/permission/mode-switch/followup): on 2.0 auto-approve is config-driven
-// (V4) and there is no event stream to gate on. Defer-while-chatting is not ported. Verify-and-continue
-// IS (command-verify + plan-stop + the LLM judge, all transport-agnostic via bob-polls + the shared
-// buildJudgeVerifier).
+// (V4) and there is no event stream to gate on. Verify-and-continue IS ported (command-verify + plan-stop +
+// the LLM judge, all transport-agnostic via bob-polls + the shared buildJudgeVerifier), and so is
+// defer-while-chatting — re-derived from a bob.db poll (driver.externalActivity) since 2.0 has no event stream.
 
 export interface DriverLoopConfig {
   driver: BobDriver;
@@ -213,8 +213,9 @@ async function finalize(
 
 /**
  * Drain the board, then idle-poll for more — the long-running loop the extension starts/stops. Honors the
- * board-armed gate and the --once flag; `shouldStop` lets the host cancel between tasks. Lease/heartbeat
- * and defer-while-chatting are the 1.x worker's job and not ported here (one extension = one loop/window).
+ * board-armed gate, the defer-while-chatting gate (driver.externalActivity), and the --once flag;
+ * `shouldStop` lets the host cancel between tasks. Lease/heartbeat stays the 1.x worker's job (one
+ * extension = one loop/window, so no cross-worker lease to coordinate).
  */
 export async function runDriverLoop(cfg: DriverLoopConfig, shouldStop: () => boolean = () => false): Promise<void> {
   const { opts } = cfg;
@@ -228,12 +229,40 @@ export async function runDriverLoop(cfg: DriverLoopConfig, shouldStop: () => boo
     return;
   }
   cfg.emit?.("connected", { maxRisk: opts.maxRisk });
+  let deferred = false; // tracks defer state across iterations for one-shot deferred/resumed emits
   while (!shouldStop()) {
     if (!repo.isBoardArmed()) {
       if (opts.once) break;
       cfg.emit?.("idle", { disarmed: true });
       await sleep(opts.pollMs);
       continue;
+    }
+    // Defer-while-chatting (2.0): pause dispatch while the user is mid-conversation in this window's Bob, so
+    // the loop never opens a task over a live chat. The signal is the driver's (a bob.db poll); skipped when
+    // --no-defer is set or the driver doesn't implement it (1.x derives defer in the worker, not here). The
+    // probe is contracted not to throw, but guard it anyway so it can't kill the loop (as with driveOnce).
+    let chatting = false;
+    if (opts.defer && cfg.driver.externalActivity) {
+      try {
+        chatting = await cfg.driver.externalActivity(opts.deferIdleMs);
+      } catch (e) {
+        log(`defer probe failed (treating as idle): ${(e as Error).message}`);
+      }
+    }
+    if (chatting) {
+      if (!deferred) {
+        deferred = true;
+        log("⏸ deferring auto-dispatch — Bob chat active");
+        cfg.emit?.("deferred", {});
+      }
+      if (opts.once) break;
+      await sleep(opts.pollMs);
+      continue;
+    }
+    if (deferred) {
+      deferred = false;
+      log("▶ resuming auto-dispatch — Bob chat idle");
+      cfg.emit?.("resumed", {});
     }
     let processed = false;
     try {
