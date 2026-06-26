@@ -3,6 +3,37 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
+## [2.0.1] — 2026-06-26 — Bob 2.0 liveness + routing single-source
+
+Makes the board honest about the Bob 2.0 in-process loop, recovers tasks it strands on a crash, and
+collapses the dispatcher's keyword table to one source. No change to dispatch behavior itself.
+
+### Fixed
+
+- **`worker_draining` now reflects the 2.0 in-process loop.** The loop never emitted a heartbeat, so
+  `board_status.worker_draining` read `false` — and the skills told you to "start a worker" — even while it
+  was actively draining. It now beats like the 1.x worker: `draining` is true whenever the loop runs.
+- **Stale `in_progress` recovery on 2.0.** A hard-killed window left its in-flight task stranded
+  `in_progress` forever; the loop now reclaims at startup (like the 1.x worker), guarded by a live-peer
+  check so it can't re-queue a co-running drainer's task on a shared board.
+- **Heartbeat can't leak.** The loop's teardown moved into a step-isolated `try/finally`, so a throw can't
+  orphan the interval and pin `worker_draining` true forever.
+
+### Added
+
+- **`predict_mode` MCP tool** — previews a task's routed mode / source / risk straight from the dispatcher's
+  router (`modes.ts`). The foreman docs (`/bob-route`, `/bob-next`, `/bob-new`, bob-foreman) now call it
+  instead of hand-copying the keyword table (which had silently drifted); a parity test guards re-encoding.
+- **`worker_draining.tags`** — each live worker's `--tag` pin (null = unfiltered), so `board_status` shows
+  why a live worker isn't pulling a given task (tag mismatch).
+
+### Internal
+
+- The heartbeat protocol is now one shared `startHeartbeat()` helper used by both the 1.x worker and the
+  2.0 loop.
+- Plugin docs reconciled with 2.0: transport-aware "start a drainer" guidance, and `needs_input` notes that
+  a 2.0 in-process Bob has no board reply channel.
+
 ## [2.0.0] — 2026-06-26 — IBM Bob 2.0 support (in-process driver)
 
 The companion extension now **auto-detects Bob 1.x vs 2.0** and drives each natively from one build.

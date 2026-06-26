@@ -1,31 +1,23 @@
 ---
 description: Preview which Bob mode a task id or a hypothetical description would route to
 argument-hint: <task id | description text>
-allowed-tools: mcp__bob-tasks__get_task
+allowed-tools: mcp__bob-tasks__predict_mode
 ---
 
 Predict the dispatch mode for: **$ARGUMENTS**
 
-- If the argument is a **number**, call `get_task` with that id and route the real
-  task (title + description + tags + any explicit mode).
-- Otherwise treat the text as a **hypothetical** task title/description and route that.
+Call `predict_mode` — it routes via the connector's own router (`modes.ts`), so this never re-encodes
+the keyword table and can't drift from it:
 
-Apply the dispatcher's resolution order — **first match wins**:
+- If the argument is a **number**, pass it as `id` (routes the real task: its explicit `mode` › a tag
+  naming a mode › the keyword auto-router › `code`).
+- Otherwise pass the text as `text` (routes it as a hypothetical task title/description).
 
-1. **explicit** — task has a `mode` set → use it.
-2. **tag** — a tag naming a built-in mode (`ask` / `code` / `advanced` / `orchestrator` / `plan` / `review` / `devsecops` / `refactor`) → that mode.
-3. **auto-router** — scan title + description + tags, first match wins. The read-only modes
-   (`review` / `plan` / `ask`) are skipped when the task has an implementation verb, so impl work
-   isn't stranded in a no-write mode:
-   - `review` — `review the diff/code/changes/PR/implementation` (read-only findings)
-   - `plan` — `plan/design/outline/propose` the `approach/strategy/rollout/architecture` (read-only)
-   - `devsecops` — `security scan/review/audit, vulnerability, CVE, secrets scan, threat model, OWASP, pentest`
-   - `advanced` — `browser, webpage, website, url, scrape, crawl, navigate, screenshot, mcp tool, fetch the, http(s)`
-   - `orchestrator` — `orchestrate, coordinate, multi-step, break down, sub-tasks, workflow, epic, several steps`
-   - `ask` — `explain, describe, document, docs, summarize, analyze, research, investigate, what is, what are, how does, how do, why does, why is, question, clarify, review the concept/approach/design, understand`
-4. **default** — none of the above → `code`.
+It returns `{mode, source, risk}`. Report:
 
-Report: the chosen **mode**, the **source** (explicit / tag / auto-router / default),
-the matched keyword (if any), and the mode's **risk** (`ask`/`plan`/`review`=safe,
-`code`/`orchestrator`/`refactor`/`devsecops`=standard, `advanced`=elevated). If it routed somewhere
-the user probably didn't intend, suggest a clearer wording or an explicit `--mode` / `mode` to pin it.
+- the chosen **mode** and the **source** (`explicit` / `tag` / `auto-router` / `default`);
+- the **risk** (`safe` / `standard` / `elevated`). The worker auto-dispatches only at/below its
+  `--max-risk` (default `standard`), so an `advanced` (elevated) task waits for manual dispatch.
+
+If it routed somewhere the user probably didn't intend, suggest clearer wording or an explicit `mode`
+to pin it.

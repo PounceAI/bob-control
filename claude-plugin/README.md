@@ -34,9 +34,11 @@ connector is plain TypeScript on the built-in `node:sqlite`.
     as `blocked`.
 - **Specialty-mode skills** (model-invoked — Claude triggers them when you ask for IBM Bob by
   name; they auto-load from `skills/`). Each checks for duplicates, files the task in the right
-  Bob mode, reports the id + routed mode, and surfaces the result via `get_task`:
+  Bob mode, reports the id + routed mode, and blocks on `await_task` to surface the result:
   - **bob-review** (`review`) — "have Bob review this diff"; returns a correctness-first findings
-    list (severity / location / `fixed_diff`) on the board. Mirrors `/bob-review-diff`.
+    list (severity / location / `fixed_diff`) on the board. Reviewing your current diff is the most
+    common dispatch, so it has **two** entry points for the same `review` task: this natural-language
+    skill, and the explicit `/bob-review-diff` command (type-it-yourself muscle memory).
   - **bob-plan** (`plan`) — "ask Bob to plan/design X"; read-only, returns a plan, no code changes.
   - **bob-refactor** (`refactor`) — "have Bob refactor/restructure Y"; behavior-preserving edits.
   - **bob-security** (`devsecops`) — "ask Bob for a security review/scan"; vuln-focused findings.
@@ -51,8 +53,9 @@ connector is plain TypeScript on the built-in `node:sqlite`.
   for you; the line resolves the open project's own board). `/bob-statusline --remove` undoes it.
   The line stays quiet (model · dir only) whenever nothing is running or queued.
 
-The commands mirror the dispatcher's mode-routing rules (`src/modes.ts`), so the mode
-Claude predicts is the mode Bob gets.
+The routing commands (`/bob-route`, `/bob-next`, `/bob-new`) read the mode from the dispatcher's
+own router (`src/modes.ts`) via the `predict_mode` tool — no hand-copied keyword table to drift —
+so the mode Claude predicts is exactly the mode Bob gets.
 
 ## Install
 

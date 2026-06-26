@@ -3,7 +3,17 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createTask, getTask, getDb, getNotes, setBoardArmed, listTasks } from "./db.js";
+import {
+  createTask,
+  getTask,
+  getDb,
+  getNotes,
+  setBoardArmed,
+  listTasks,
+  getWorkerLiveness,
+  claimTask,
+  recordWorkerHeartbeat,
+} from "./db.js";
 import { parseOpts } from "./worker.js";
 import { isCompleted } from "./types.js";
 import { driveOnce, runDriverLoop, type DriverLoopConfig } from "./driver-loop.js";
@@ -34,6 +44,7 @@ before(() => {
 });
 beforeEach(() => {
   getDb().exec("DELETE FROM tasks");
+  getDb().exec("DELETE FROM worker_heartbeats"); // isolate the liveness-heartbeat test from any prior beat
   setBoardArmed(true);
 });
 
@@ -175,6 +186,52 @@ test("runDriverLoop drains the board and stops on --once, closing the driver", a
   assert.ok(driver.closed);
   assert.ok(events.includes("connected") && events.includes("stopped"));
   assert.equal(listTasks({ status: "pending" }).length, 0);
+});
+
+test("runDriverLoop beats a liveness heartbeat while draining, and clears it on stop", async () => {
+  // The in-process loop IS the 2.0 drainer, so board_status.worker_draining must read true while it runs —
+  // shouldStop fires at the top of the loop, AFTER the startup beat, so the board is already live there.
+  const driver = fakeDriver();
+  let drainingDuringLoop = false;
+  await runDriverLoop({ ...cfg(driver) }, () => {
+    drainingDuringLoop = getWorkerLiveness().draining;
+    return true; // stop on the first check
+  });
+  assert.equal(drainingDuringLoop, true, "heartbeat should mark the board draining while the loop runs");
+  assert.equal(getWorkerLiveness().draining, false, "heartbeat should be cleared once the loop stops");
+});
+
+test("runDriverLoop clears the heartbeat (and closes the driver) even if the loop throws", async () => {
+  // Teardown is in finally, so a throw escaping the loop body must not leak the beat — an orphaned interval
+  // would pin worker_draining true forever in the never-exiting extension host.
+  const driver = fakeDriver();
+  await assert.rejects(
+    runDriverLoop({ ...cfg(driver) }, () => {
+      throw new Error("loop blew up");
+    }),
+    /loop blew up/,
+  );
+  assert.equal(getWorkerLiveness().draining, false, "heartbeat must be cleared in finally on a throw");
+  assert.ok(driver.closed, "driver must be closed in finally on a throw");
+});
+
+test("runDriverLoop re-queues stale in_progress tasks a prior crashed loop left behind", async () => {
+  const t = createTask({ title: "stranded mid-dispatch", mode: "code" });
+  claimTask(t.id, "bob"); // a prior loop claimed it, then died → stuck in_progress (cfg's default assignee)
+  assert.equal(getTask(t.id)!.status, "in_progress");
+  const driver = fakeDriver();
+  // Stop before the loop dispatches; reclaim runs at startup, before the first shouldStop check.
+  await runDriverLoop({ ...cfg(driver) }, () => true);
+  assert.equal(getTask(t.id)!.status, "pending"); // recovered, not stranded in_progress forever
+});
+
+test("runDriverLoop skips reclaim while a live peer is draining the same assignee", async () => {
+  const t = createTask({ title: "owned by a live peer", mode: "code" });
+  claimTask(t.id, "bob"); // in_progress @bob, as if a co-running loop owns it
+  recordWorkerHeartbeat("peer", { assignee: "bob", pid: process.pid }); // a live peer (this process's pid)
+  const driver = fakeDriver();
+  await runDriverLoop({ ...cfg(driver) }, () => true);
+  assert.equal(getTask(t.id)!.status, "in_progress"); // NOT reclaimed — the live peer still owns it
 });
 
 test("runDriverLoop defers dispatch while externalActivity reports a live chat", async () => {

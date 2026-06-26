@@ -194,6 +194,7 @@ function migrate(d: DatabaseSync): void {
       assignee   TEXT,
       pid        INTEGER,
       worktree   TEXT,
+      tag        TEXT,
       started_at TEXT NOT NULL,
       last_beat  TEXT NOT NULL
     );
@@ -206,6 +207,7 @@ function migrate(d: DatabaseSync): void {
   addColumnIfMissing(d, "tasks", "checkpoint", "TEXT");
   addColumnIfMissing(d, "tasks", "estimated_tokens", "INTEGER");
   addColumnIfMissing(d, "worker_heartbeats", "worktree", "TEXT"); // T7 worktree lease
+  addColumnIfMissing(d, "worker_heartbeats", "tag", "TEXT"); // the worker's --tag pin, surfaced in worker_draining
 }
 
 /**
@@ -628,22 +630,31 @@ export interface WorkerLiveness {
   workers: number;
   /** Seconds since the most recent beat, or null if none was ever recorded. */
   last_beat_seconds_ago: number | null;
+  /** Distinct --tag pins of the live workers (null = unfiltered, drains every tag) — so a foreman can see
+   *  why a live worker isn't pulling a task: if no entry is null or matches the task's tags, it's filtered out. */
+  tags: (string | null)[];
 }
 
-/** A draining worker announces it's alive. Upsert keyed by a stable per-process id; refresh
- *  last_beat each call. `worktree` is the checkout the worker is bound to (its normalized cwd) —
- *  the key the lease (worktreeLeaseHolder) guards so two workers can't bind one checkout. */
-export function recordWorkerHeartbeat(
-  workerId: string,
-  meta: { assignee?: string | null; pid?: number | null; worktree?: string | null } = {},
-): void {
+/** Identifying metadata for a beat. `worktree` is the checkout the worker is bound to (its normalized cwd)
+ *  — the lease key worktreeLeaseHolder guards so two workers can't bind one checkout; omit it for a
+ *  liveness-only beat (the 2.0 in-process loop) that shows under worker_draining but holds no lease. */
+export interface HeartbeatMeta {
+  assignee?: string | null;
+  pid?: number | null;
+  worktree?: string | null;
+  /** The worker's --tag pin; null/absent = drains all tags. Surfaced as worker_draining.tags. */
+  tag?: string | null;
+}
+
+/** A draining worker announces it's alive. Upsert keyed by a stable per-process id; refresh last_beat each call. */
+export function recordWorkerHeartbeat(workerId: string, meta: HeartbeatMeta = {}): void {
   const now = nowIso();
   getDb()
     .prepare(
-      `INSERT INTO worker_heartbeats (worker_id, assignee, pid, worktree, started_at, last_beat) VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(worker_id) DO UPDATE SET assignee = excluded.assignee, pid = excluded.pid, worktree = excluded.worktree, last_beat = excluded.last_beat`,
+      `INSERT INTO worker_heartbeats (worker_id, assignee, pid, worktree, tag, started_at, last_beat) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(worker_id) DO UPDATE SET assignee = excluded.assignee, pid = excluded.pid, worktree = excluded.worktree, tag = excluded.tag, last_beat = excluded.last_beat`,
     )
-    .run(workerId, meta.assignee ?? null, meta.pid ?? null, meta.worktree ?? null, now, now);
+    .run(workerId, meta.assignee ?? null, meta.pid ?? null, meta.worktree ?? null, meta.tag ?? null, now, now);
 }
 
 export interface WorktreeLeaseHolder {
@@ -706,6 +717,30 @@ export function holderIsLive(pid: number | null, isPidAlive: (pid: number) => bo
   return pid == null ? true : isPidAlive(pid);
 }
 
+/**
+ * Is another worker (different id) for `assignee` currently alive — a co-running drainer? A beat counts as a
+ * live peer only if it's fresh AND its pid is alive (a null/unknown pid counts as alive — conservative, like
+ * holderIsLive). The 2.0 in-process loop holds no worktree lease, so it uses this to avoid reclaiming a live
+ * peer's in-flight in_progress tasks at startup, while still reclaiming after its OWN crash/reload (whose
+ * prior beat carries a now-dead pid). `isPidAlive`/`nowMs` injected for purity + tests.
+ */
+export function hasLivePeer(
+  assignee: string,
+  excludeWorkerId: string,
+  isPidAlive: (pid: number) => boolean,
+  windowMs = WORKER_HEARTBEAT_WINDOW_MS,
+  nowMs = Date.now(),
+): boolean {
+  const rows = getDb()
+    .prepare("SELECT pid, last_beat FROM worker_heartbeats WHERE assignee = ? AND worker_id != ?")
+    .all(assignee, excludeWorkerId) as { pid: number | null; last_beat: string }[];
+  const cutoff = nowMs - windowMs;
+  return rows.some((r) => {
+    const beat = Date.parse(r.last_beat);
+    return Number.isFinite(beat) && beat >= cutoff && holderIsLive(r.pid, isPidAlive);
+  });
+}
+
 export interface WorkerLease {
   worktree: string | null;
   worker_id: string;
@@ -739,25 +774,53 @@ export function clearWorkerHeartbeat(workerId: string): void {
   getDb().prepare("DELETE FROM worker_heartbeats WHERE worker_id = ?").run(workerId);
 }
 
+/**
+ * Start a liveness heartbeat: beat now (so board_status.worker_draining sees a drainer at once), refresh
+ * every INTERVAL on an unref'd timer, and return an idempotent stop() that clears the timer + row. The one
+ * home of the beat protocol, shared by the 1.x worker (with a worktree lease) and the 2.0 loop (liveness-
+ * only); pass the lease via meta.worktree. The initial beat is an idempotent upsert (started_at preserved),
+ * so a caller that already beat — e.g. claimWorktreeLease — just refreshes last_beat.
+ */
+export function startHeartbeat(workerId: string, meta: HeartbeatMeta = {}): () => void {
+  recordWorkerHeartbeat(workerId, meta);
+  const timer = setInterval(() => recordWorkerHeartbeat(workerId, meta), WORKER_HEARTBEAT_INTERVAL_MS);
+  timer.unref();
+  let stopped = false;
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(timer);
+    clearWorkerHeartbeat(workerId);
+  };
+}
+
 /** Is a worker draining the board right now? Live = beat within `windowMs`. Opportunistically
  *  prunes long-dead rows so the table can't grow unbounded. `nowMs` injectable for tests. */
 export function getWorkerLiveness(windowMs = WORKER_HEARTBEAT_WINDOW_MS, nowMs = Date.now()): WorkerLiveness {
   getDb()
     .prepare("DELETE FROM worker_heartbeats WHERE last_beat < ?")
     .run(new Date(nowMs - windowMs * 30).toISOString()); // prune workers dead far past the window
-  const rows = getDb().prepare("SELECT last_beat FROM worker_heartbeats").all() as { last_beat: string }[];
+  const rows = getDb().prepare("SELECT last_beat, tag FROM worker_heartbeats").all() as {
+    last_beat: string;
+    tag: string | null;
+  }[];
   const liveCutoff = nowMs - windowMs;
   let workers = 0;
   let mostRecent: number | null = null;
+  const tags = new Set<string | null>();
   for (const r of rows) {
     const t = Date.parse(r.last_beat);
-    if (t >= liveCutoff) workers++;
+    if (t >= liveCutoff) {
+      workers++;
+      tags.add(r.tag); // null = an unfiltered worker (drains all tags)
+    }
     if (mostRecent === null || t > mostRecent) mostRecent = t;
   }
   return {
     draining: workers > 0,
     workers,
     last_beat_seconds_ago: mostRecent === null ? null : Math.max(0, Math.round((nowMs - mostRecent) / 1000)),
+    tags: [...tags],
   };
 }
 
