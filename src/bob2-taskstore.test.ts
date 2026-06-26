@@ -175,6 +175,21 @@ test("awaitTurnSettled settles immediately on a real last_error", async () => {
   assert.equal(res.row?.last_error, "kaboom");
 });
 
+test("awaitTurnSettled records the max inter-bump gap while running (watchdog telemetry)", async () => {
+  const { db, store } = makeStore();
+  const b = Date.now();
+  insert(db, { id: "g", status: "running", created_at: b - 50_000, updated_at: b - 40_000 });
+  const upd = (status: string, updated: number): void =>
+    void db.prepare("UPDATE tasks SET status=?, updated_at=? WHERE id='g'").run(status, updated);
+  // gaps are differences of updated_at VALUES (epoch ms), so they're deterministic regardless of poll timing
+  setTimeout(() => upd("running", b - 37_000), 20); // +3000 while running
+  setTimeout(() => upd("running", b - 30_000), 40); // +7000 while running ← the max
+  setTimeout(() => upd("active", b - 29_900), 60); // end of turn (small gap) → quiet → settle
+  const res = await awaitTurnSettled(store, "g", { pollMs: 3, quietMs: 20, timeoutMs: 3_000 });
+  assert.equal(res.settled, true);
+  assert.equal(res.maxGapMs, 7_000);
+});
+
 // ── V6: result text + cost parsing ────────────────────────────────────────────────────────────────
 
 test("parseCosts pulls token/cost fields; null/garbage → null; missing fields → 0", () => {

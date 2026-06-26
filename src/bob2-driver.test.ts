@@ -145,6 +145,7 @@ test("mapOutcome: real error → aborted, settled → completed, unsettled → t
   assert.equal(mapOutcome(r(), false, { result: "partial", tokensUsed: 42 }).result, ""); // not on timeout
   assert.equal(mapOutcome(r({ last_error: "boom" }), true, { result: "x", tokensUsed: 7 }).result, ""); // not on abort
   assert.equal(mapOutcome(r(), false, { tokensUsed: 42 }).tokensUsed, 42);
+  assert.equal(mapOutcome(r(), true, { maxIdleMs: 6500 }).maxIdleMs, 6500); // watchdog telemetry, any outcome
 });
 
 // ── connect / queryWorkspace ─────────────────────────────────────────────────────────────────────

@@ -32,6 +32,15 @@ function buildPrompt(task: Task): string {
   return header + body;
 }
 
+/** Board note for Bob's run cost + stall telemetry, or "" if neither is known. `maxIdleMs` (the worst
+ *  silent-but-running gap) accumulates the evidence for a future stall-watchdog threshold. */
+function usageNote(res: DispatchResult): string {
+  const bits: string[] = [];
+  if (res.tokensUsed) bits.push(`~${res.tokensUsed} output tokens`);
+  if (res.maxIdleMs) bits.push(`max idle ${Math.round(res.maxIdleMs / 1000)}s between updates`);
+  return bits.length ? `Bob usage: ${bits.join(", ")}.` : "";
+}
+
 /**
  * Drive ONE eligible task through the driver: route → claim → dispatch → finalize. Returns true if a task
  * was processed, false if the board had nothing eligible (empty / all risk-gated / dependency-blocked).
@@ -94,7 +103,8 @@ async function finalize(
       repo.recordArtifact(task.id, { kind: "file", path: f, detail: ranReadOnly ? "side-effect" : "modified" });
     if (changed.diffstat)
       repo.addNote(task.id, `Changed ${changed.count} file(s) (evidence):\n${changed.diffstat}`, "worker");
-    if (res.tokensUsed) repo.addNote(task.id, `Bob usage: ~${res.tokensUsed} output tokens.`, "worker");
+    const usage = usageNote(res);
+    if (usage) repo.addNote(task.id, usage, "worker");
     const completed = repo.completeTask(task.id, { result, ranReadOnly, evidenceReliable: changed.gitAvailable });
     if (task.retry_attempts > 0) repo.resetRetryAttempts(task.id);
     const finalStatus = completed?.status ?? "done";
@@ -126,7 +136,8 @@ async function finalize(
   repo.updateStatus(task.id, "blocked");
   const branchNote = branch ? ` Partial work preserved to ${branch}.` : "";
   const detail = res.lastText.trim() ? `: ${res.lastText.trim().replace(/\s+/g, " ").slice(0, 140)}` : "";
-  repo.addNote(task.id, `Dispatch ended '${res.status}'${detail}.${branchNote}`, "worker");
+  const idleNote = res.maxIdleMs ? ` Max idle ${Math.round(res.maxIdleMs / 1000)}s between updates.` : "";
+  repo.addNote(task.id, `Dispatch ended '${res.status}'${detail}.${branchNote}${idleNote}`, "worker");
   log(`  ✗ #${task.id} ${res.status} — marked blocked`);
   cfg.emit?.("taskFail", { id: task.id, title: task.title, status: res.status, branch });
 }

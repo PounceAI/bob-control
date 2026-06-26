@@ -221,22 +221,33 @@ export async function awaitTurnSettled(
   store: Bob2TaskStore,
   id: string,
   opts: { pollMs?: number; timeoutMs?: number; quietMs?: number; isSettled?: (row: Bob2TaskRow) => boolean } = {},
-): Promise<{ settled: boolean; row: Bob2TaskRow | null }> {
+): Promise<{ settled: boolean; row: Bob2TaskRow | null; maxGapMs: number }> {
   const pollMs = opts.pollMs ?? 1000;
   const timeoutMs = opts.timeoutMs ?? 300_000;
   const quietMs = opts.quietMs ?? 8000;
   const deadline = Date.now() + timeoutMs;
+  // Stall-watchdog telemetry: the largest gap (ms) between consecutive `updated_at` bumps that ended a
+  // running stretch — i.e. how long Bob can be silent yet still working. prevRunning qualifies the gap by
+  // the status DURING it (the prior poll), so the active-tail bump after a turn doesn't inflate it.
+  let prevUpdated: number | null = null;
+  let prevRunning = false;
+  let maxGapMs = 0;
   for (;;) {
     const row = store.read(id);
     if (row) {
+      const u = row.updated_at;
+      if (u != null && prevUpdated != null && u > prevUpdated && prevRunning)
+        maxGapMs = Math.max(maxGapMs, u - prevUpdated);
+      if (u != null) prevUpdated = u;
+      prevRunning = isActivelyRunning(row.status);
       const settled = opts.isSettled
         ? opts.isSettled(row)
         : taskError(row) != null ||
           isTerminal(row.status) ||
           (!isActivelyRunning(row.status) && hasRun(row) && Date.now() - (row.updated_at ?? 0) >= quietMs);
-      if (settled) return { settled: true, row };
+      if (settled) return { settled: true, row, maxGapMs };
     }
-    if (Date.now() >= deadline) return { settled: false, row };
+    if (Date.now() >= deadline) return { settled: false, row, maxGapMs };
     await sleep(pollMs);
   }
 }

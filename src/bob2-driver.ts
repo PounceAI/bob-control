@@ -74,17 +74,24 @@ export interface InProcessDriverOptions {
  * → aborted, checked FIRST so a failure isn't masked. Otherwise a settled turn → completed (Bob leaves a
  * finished task at 'active', so "settled" = the turn went quiet, which IS completion here); an unsettled
  * row (wall-clock elapsed mid-turn) → timeout. The raw Bob status is carried in lastText for diagnostics.
- * `extras` carries the V6 reads off bob.db: `result` (Bob's summary, only meaningful on completion) and
- * `tokensUsed` (output tokens from `costs`, reported on any outcome).
+ * `extras` carries the V6 reads off bob.db: `result` (Bob's summary, only meaningful on completion),
+ * `tokensUsed` (output tokens from `costs`), and `maxIdleMs` (stall-watchdog telemetry) — both on any outcome.
  */
 export function mapOutcome(
   row: Bob2TaskRow | null,
   settled: boolean,
-  extras: { result?: string; tokensUsed?: number } = {},
+  extras: { result?: string; tokensUsed?: number; maxIdleMs?: number } = {},
 ): DispatchResult {
   const err = row ? taskError(row) : null;
   const detail = row ? `bob2 status=${row.status}${err ? ` error=${err}` : ""}` : "";
-  const base = { taskId: row?.id ?? null, result: "", lastText: detail, tokensUsed: extras.tokensUsed ?? 0, turns: 0 };
+  const base = {
+    taskId: row?.id ?? null,
+    result: "",
+    lastText: detail,
+    tokensUsed: extras.tokensUsed ?? 0,
+    turns: 0,
+    maxIdleMs: extras.maxIdleMs ?? 0,
+  };
   if (err) return { ...base, status: "aborted" };
   if (settled) return { ...base, status: "completed", result: extras.result ?? "" };
   return { ...base, status: "timeout" };
@@ -211,16 +218,17 @@ export class InProcessDriver implements BobDriver {
         // (db never materialized, or directory/timing assumptions wrong) — surface it, don't fake idle.
         return fail("dispatched task did not appear in bob.db (could not correlate)");
       }
-      const { settled, row } = await awaitTurnSettled(store, id, {
+      const { settled, row, maxGapMs } = await awaitTurnSettled(store, id, {
         pollMs: this.pollMs,
         quietMs: this.quietMs,
         timeoutMs: opts.timeoutMs ?? 300_000,
       });
       // V6: enrich the outcome from bob.db — output tokens (any outcome) + Bob's summary text (only on a
-      // clean completion; a timeout/error row's last message would be partial/misleading).
+      // clean completion; a timeout/error row's last message would be partial/misleading). maxGapMs is
+      // stall-watchdog telemetry (see DispatchResult.maxIdleMs).
       const tokensUsed = parseCosts(row?.costs ?? null)?.output ?? 0;
       const result = settled && row && !taskError(row) ? (store.readResultText(id) ?? "") : "";
-      return mapOutcome(row, settled, { result, tokensUsed });
+      return mapOutcome(row, settled, { result, tokensUsed, maxIdleMs: maxGapMs });
     } finally {
       store?.close();
     }

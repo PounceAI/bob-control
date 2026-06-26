@@ -120,6 +120,9 @@ export interface DispatchResult {
   tokensUsed?: number;
   /** Distinct api requests observed (≈ assistant turns). */
   turns?: number;
+  /** Bob2 only: max gap (ms) between task-row `updated_at` bumps while running — telemetry for picking a
+   *  safe stall-watchdog threshold (the worst-case "Bob silent but working" we must not false-kill). */
+  maxIdleMs?: number;
 }
 
 export interface TaskLifecycleEvent {
