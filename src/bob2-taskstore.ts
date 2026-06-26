@@ -111,13 +111,21 @@ export function parseCosts(raw: string | null): Bob2Costs | null {
 
 /** Does a row's `first_message` look like the prompt we dispatched? Bob stores our content verbatim, so
  *  this tells OUR new root apart from a concurrent dispatch by ANOTHER Bob window on the shared global db.
- *  Whitespace-normalized prefix/containment, tolerant of minor reformatting (e.g. a mask prefix). */
+ *
+ *  Rule (whitespace-collapsed): first_message must CONTAIN our FULL content — covers the exact case and
+ *  Bob's observed mask-prefix ("[mask] <content>"). We require the WHOLE prompt, never a prefix of it, so a
+ *  foreign task that merely shares our opening chars can't hijack the correlation poll on the shared bob.db
+ *  (cross-window task confusion — CWE-284). Both looser branches are gone: the original
+ *  `a.includes(b.slice(0,120))` matched on a 120-char prefix, and `b.startsWith(a)` matched when a SHORT
+ *  foreign first_message was a prefix of our prompt — each a partial-knowledge confusion vector. If Bob ever
+ *  truncated first_message (unobserved — the schema stores it verbatim) this would fail to correlate and the
+ *  dispatch would abort: a SAFE failure (we never grab a stranger's task), preferable to a loose match. */
 export function firstMessageMatches(firstMessage: string | null | undefined, content: string): boolean {
   if (!firstMessage) return false;
   const a = firstMessage.replace(/\s+/g, " ").trim();
   const b = content.replace(/\s+/g, " ").trim();
   if (!b) return false;
-  return a === b || a.startsWith(b) || b.startsWith(a) || a.includes(b.slice(0, 120));
+  return a.includes(b); // full-content containment (a === b is subsumed)
 }
 
 /** The `workspace` fsPath out of a task's `env` JSON (live shape: {id,workspace,scheme,…}), or null. */

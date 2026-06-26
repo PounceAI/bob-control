@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 
 // Bob 2.0's auto-approve config. Replaces the 1.x set-bob-autoapprove.mjs (which wrote state.vscdb
 // globalState keys that no longer exist). 2.0's source of truth is ~/.bob/settings/settings.json
@@ -102,7 +103,9 @@ export function writeAutoApprove(path = bob2SettingsPath()): { path: string; cre
   // Atomic write (temp + rename): a crash or a concurrent Bob read can't observe a truncated file — rename
   // is atomic on the same volume, so settings.json is never left half-written. If the rename itself fails
   // (cross-volume, permission), unlink the temp file rather than orphan it beside settings.json.
-  const tmp = `${path}.tmp`;
+  // Random suffix (not a fixed `.tmp`): a local attacker can't pre-place a symlink at a predictable temp
+  // path to redirect this write to an arbitrary file (TOCTOU on the temp name — CWE-377).
+  const tmp = `${path}.${randomBytes(6).toString("hex")}.tmp`;
   writeFileSync(tmp, JSON.stringify(mergeAutoApprove(current), null, 2) + "\n");
   try {
     renameSync(tmp, path);

@@ -553,7 +553,10 @@ function toggleWorker(): void {
  */
 function handleUri(uri: vscode.Uri): void {
   const action = uri.path.replace(/^\/+/, "").toLowerCase();
-  out.appendLine(`[uri] ${uri.toString()} → ${action || "(none)"}`);
+  // Sanitize before logging: a crafted URI with embedded newlines/CRs could inject fake log lines into
+  // the output channel, misleading diagnostics (CWE-117). Replace control chars with a visible placeholder.
+  const safeUri = uri.toString().replace(/[\r\n\x00-\x1f\x7f]/g, "·");
+  out.appendLine(`[uri] ${safeUri} → ${action || "(none)"}`);
   switch (action) {
     case "start":
       startWorker();

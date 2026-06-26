@@ -171,6 +171,9 @@ test("firstMessageMatches tolerates reformatting (prefix/containment), rejects m
   assert.ok(firstMessageMatches("Task #5:  build the   widget", "Task #5: build the widget")); // whitespace
   assert.ok(firstMessageMatches("[mask] Task #5: build the widget now", "Task #5: build the widget")); // contained
   assert.ok(!firstMessageMatches("Task #9: something else", "Task #5: build the widget"));
+  // Task-confusion guard: a foreign first_message that's only a PREFIX of our prompt must NOT match —
+  // requiring the full content is what blocks a partial-knowledge hijack on the shared bob.db.
+  assert.ok(!firstMessageMatches("Task #5: build", "Task #5: build the widget"));
   assert.ok(!firstMessageMatches(null, "x") && !firstMessageMatches("x", ""));
 });
 
