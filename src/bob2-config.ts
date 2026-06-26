@@ -15,7 +15,14 @@ export function bob2SettingsPath(): string {
   return join(bob2HomeDir(), "settings", "settings.json");
 }
 
-/** Bob 2.0's permission categories (the `allowed_permissions` enum). */
+/** Permission categories the connector auto-approves for headless dispatch (enumerated from the bob-code
+ *  bundle's tool declarations, 2026-06-26). A tool auto-approves only when its `permission` is in
+ *  `allowed_permissions`, so a missing category silently prompts even under "auto-approve everything":
+ *  `review` gates `submit_review_findings` (Bob's finish-the-review tool — a headless review wedged on it);
+ *  `subtask`/`workflow` gate sub-agent / workflow spawning (granted for headless agentic work — note the only
+ *  cap is the dispatch-time maxRisk gate, none per-spawn). Deliberately OMITS Bob's 14th category `ask`: it
+ *  gates the human-input tool, and auto-approving it would swallow that escalation checkpoint while buying
+ *  nothing (2.0 has no reply channel, so an ask wedges a headless run either way) — better to let it surface. */
 export const ALL_PERMISSIONS = [
   "read",
   "edit",
@@ -25,6 +32,9 @@ export const ALL_PERMISSIONS = [
   "todo",
   "artifact",
   "subagent",
+  "subtask",
+  "workflow",
+  "review",
   "mode",
 ] as const;
 
@@ -56,7 +66,12 @@ export function mergeAutoApprove(current: Record<string, unknown>): Record<strin
   return { ...current, ...autoApproveSettings() };
 }
 
-/** Write the auto-approve config into settings.json (default: the global file), keeping other keys. */
+/** Write the auto-approve config into settings.json (default: the global file), keeping other keys.
+ *  WARNING — blast radius: this edits Bob's USER-GLOBAL settings (`~/.bob/settings/settings.json`), so it
+ *  makes EVERY Bob window/project for this user headless for command execution (`approvedCommands:["*"]` +
+ *  `isCommandSecurityEnabled:false`) and PERSISTS after the connector stops / is uninstalled. Unlike the 1.x
+ *  window-scoped globalState, nothing reverts it. Future hardening (tracked): snapshot+restore on close(), or
+ *  prompt before the first write. */
 export function writeAutoApprove(path = bob2SettingsPath()): { path: string; created: boolean } {
   const existed = existsSync(path);
   let current: Record<string, unknown> = {};

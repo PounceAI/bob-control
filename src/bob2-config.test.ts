@@ -24,6 +24,11 @@ test("autoApproveSettings allows every permission and disables the command secur
   const approval = s.approval as Record<string, unknown>;
   assert.equal(approval.autoApprovalEnabled, true);
   assert.deepEqual(approval.allowed_permissions, [...ALL_PERMISSIONS]);
+  // Regression: these gate finish-the-review / subtask / workflow tools — if any drops out, a headless
+  // dispatch wedges on a manual approval (submit_review_findings did, before 'review' was added).
+  const perms: readonly string[] = ALL_PERMISSIONS;
+  for (const p of ["review", "subtask", "workflow"]) assert.ok(perms.includes(p), `missing ${p}`);
+  assert.ok(!perms.includes("ask"), "'ask' must stay OUT — it gates the human-input checkpoint");
   assert.deepEqual(approval.allowedExecutors, [
     { toolId: "execute_command", approvedCommands: ["*"], deniedCommands: [] },
   ]);
