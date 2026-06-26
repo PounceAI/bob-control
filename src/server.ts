@@ -4,8 +4,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import * as repo from "./db.js";
 import { TASK_STATUSES, TASK_PRIORITIES, ARTIFACT_KINDS, isFinished } from "./types.js";
-import type { TaskStatus } from "./types.js";
-import { resolveMode, isReadOnlyMode } from "./modes.js";
+import type { Task, TaskStatus } from "./types.js";
+import { resolveMode, isReadOnlyMode, profileFor } from "./modes.js";
 import { revertTaskToCheckpoint, deleteTaskAndCheckpoint } from "./checkpoint.js";
 import { buildReport } from "./report.js";
 import { awaitTaskOutcome } from "./await-task.js";
@@ -186,6 +186,40 @@ server.registerTool(
       return json(repo.claimTask(task.id, assignee ?? "bob"));
     }
     return json(task);
+  },
+);
+
+server.registerTool(
+  "predict_mode",
+  {
+    title: "Predict Mode",
+    description:
+      "Preview which Bob mode a task dispatches in, computed from the connector's router (modes.ts) — the " +
+      "single source of truth, so callers never re-encode the keyword table. Pass `id` to route an existing " +
+      "task, or `text` to route a hypothetical task (the text is treated as the title). Resolution order " +
+      "(first match wins): an " +
+      "explicit `mode` › a tag naming a mode › the keyword auto-router › `code`. Returns {mode, source: " +
+      "explicit|tag|auto-router|default, risk: safe|standard|elevated}. Risk gates dispatch — the worker " +
+      "auto-runs only at/below its --max-risk (default standard), so an `advanced` (elevated) task waits " +
+      "for manual dispatch.",
+    inputSchema: {
+      id: z.number().int().optional().describe("Route an existing task by id"),
+      text: z.string().optional().describe("Route hypothetical task text (treated as the task title) instead of an id"),
+    },
+  },
+  async ({ id, text }) => {
+    let task: Pick<Task, "mode" | "title" | "description" | "tags">;
+    if (id !== undefined) {
+      const t = repo.getTask(id);
+      if (!t) return fail(`Task ${id} not found`);
+      task = t;
+    } else if (text && text.trim()) {
+      task = { mode: null, title: text.trim(), description: null, tags: [] };
+    } else {
+      return fail("predict_mode needs either `id` or `text`");
+    }
+    const { mode, source } = resolveMode(task);
+    return json({ mode, source, risk: profileFor(mode).risk });
   },
 );
 
@@ -425,7 +459,8 @@ server.registerTool(
       "worker. Use after dispatching a task you want to act on as soon as it's done. PREFER this over " +
       "looping on list_tasks/board_status/get_task to watch a task — it blocks server-side until the " +
       "settling write lands and hands back needs_input questions to answer, so you should NOT poll the " +
-      "board by hand. Requires a worker draining the board (check board_status.worker_draining first).",
+      "board by hand. Requires something draining the board — a 1.x worker process or the 2.0 in-process " +
+      "loop; check board_status.worker_draining first (it reflects both).",
     inputSchema: {
       task_id: z.number().int(),
       wait_ms: z
@@ -581,13 +616,17 @@ server.registerTool(
     title: "Board Status",
     description:
       "Dispatch state, counts, and the live task list: whether the board is `armed`, task `counts` by " +
-      "status, whether a worker looks active, whether a worker is currently draining the board " +
-      "(`worker_draining` — a live heartbeat), `worker_leases` (which checkout each live worker owns), " +
+      "status, whether a worker looks active, whether a drainer is currently servicing the board " +
+      "(`worker_draining` — a live heartbeat from either a 1.x worker process or the 2.0 in-process " +
+      "loop, with `.tags` = the --tag each live worker drains, null = an unfiltered worker that drains " +
+      "all tags), `worker_leases` (which checkout each live worker owns), " +
       "and `open_tasks` — the non-terminal tasks (staged / " +
       "pending / in_progress / needs_input / blocked) as compact {id,title,status,mode,tags,priority} " +
       "rows for deduping before create_task (capped; see open_tasks_truncated). Check " +
-      "`worker_draining.draining` before await_task: if false, nothing will pull the task, so don't " +
-      "block — start a worker first. " +
+      "`worker_draining.draining` before await_task: if false, nothing is draining the board, so don't " +
+      "block — start a drainer first (open the repo in a Bob 2.0 window, or run a 1.x worker). And if " +
+      "draining is true but no entry in `worker_draining.tags` is null or matches your task's tags, a " +
+      "tag-pinned worker still won't pull it. " +
       "Also check before a bulk-create.",
     inputSchema: {},
   },

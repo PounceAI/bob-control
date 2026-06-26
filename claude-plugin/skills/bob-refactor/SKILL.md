@@ -33,15 +33,19 @@ Do this:
      off-limits. If useful, include the current `git diff`/`git log` context, bounded.
 
 3. **Wait for Bob, then surface what changed.** Report the new task id and that it routes to
-   `{refactor}`. Use the `worker_draining` from step 1: if `worker_draining.draining` is **false**, no worker will
-   pull this — say it's **queued as #id** and tell the user to start one (`launch-worker.cmd`),
-   then stop. Otherwise call `await_task {task_id: id}` — it **blocks until the worker drains the
-   task and Bob settles it**, so the result comes back in this same turn:
+   `{refactor}`. Use the `worker_draining` from step 1 (it reflects a **2.0 in-process loop** as well as a
+   **1.x worker**): if `worker_draining.draining` is **false**, nothing is draining the board — say it's
+   **queued as #id** and tell the user to start a drainer (open the repo in a **Bob 2.0** window, whose
+   in-process loop drains automatically, or run a **1.x** worker via `launch-worker.cmd`), then stop.
+   Otherwise call `await_task {task_id: id}` — it **blocks until the drainer runs the task and Bob settles
+   it**, so the result comes back in this same turn:
    - `done` → summarize what Bob changed from the task **`result`** and remind the user to review
      the diff / run tests before merging.
    - `waiting` (poll window elapsed) → call `await_task` again; keep waiting while Bob works. If
-     it stays `waiting` across several calls, **no worker is draining the board** — say it's
-     **queued as #id**; start the worker (`npm run worker`) or check `/bob-board`.
-   - `needs_input` → Bob asked a question (in the response); surface it for the user to answer,
-     then `await_task` again. `blocked` / `cancelled` → report Bob stopped, with the note reason
-     (a refactor that couldn't keep tests green often lands here).
+     it stays `waiting` across several calls, nothing is draining the board — say it's
+     **queued as #id**; start a drainer (as above) or check `/bob-board`.
+   - `needs_input` → Bob asked a question (in the response). A **1.x** worker parks it on the board —
+     surface it; once the user answers (`answer_task_question`) call `await_task` again. A **2.0**
+     in-process Bob has no board reply channel, so surface the question for the user to steer in Bob's
+     window (or re-file a follow-up with the answer baked in). `blocked` / `cancelled` → report Bob
+     stopped, with the note reason (a refactor that couldn't keep tests green often lands here).

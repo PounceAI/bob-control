@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import type { BobDriver } from "./bob-driver.js";
 import type { DispatchResult } from "./bob-ipc.js";
-import { type Opts, pickEligible } from "./worker.js";
+import { type Opts, pickEligible, pidAlive } from "./worker.js";
 import * as repo from "./db.js";
 import { resolveMode, profileFor, isReadOnlyMode } from "./modes.js";
 import { preserveWipToBranch } from "./checkpoint.js";
@@ -214,8 +215,9 @@ async function finalize(
 /**
  * Drain the board, then idle-poll for more — the long-running loop the extension starts/stops. Honors the
  * board-armed gate, the defer-while-chatting gate (driver.externalActivity), and the --once flag;
- * `shouldStop` lets the host cancel between tasks. Lease/heartbeat stays the 1.x worker's job (one
- * extension = one loop/window, so no cross-worker lease to coordinate).
+ * `shouldStop` lets the host cancel between tasks. Emits a liveness heartbeat while it runs — this loop IS
+ * the 2.0 drainer, so board_status.worker_draining (and await_task) must be able to see dispatch is being
+ * serviced — but claims no worktree lease: one extension = one loop/window, nothing to coordinate.
  */
 export async function runDriverLoop(cfg: DriverLoopConfig, shouldStop: () => boolean = () => false): Promise<void> {
   const { opts } = cfg;
@@ -229,57 +231,88 @@ export async function runDriverLoop(cfg: DriverLoopConfig, shouldStop: () => boo
     return;
   }
   cfg.emit?.("connected", { maxRisk: opts.maxRisk });
-  let deferred = false; // tracks defer state across iterations for one-shot deferred/resumed emits
-  while (!shouldStop()) {
-    if (!repo.isBoardArmed()) {
-      if (opts.once) break;
-      cfg.emit?.("idle", { disarmed: true });
-      await sleep(opts.pollMs);
-      continue;
-    }
-    // Defer-while-chatting (2.0): pause dispatch while the user is mid-conversation in this window's Bob, so
-    // the loop never opens a task over a live chat. The signal is the driver's (a bob.db poll); skipped when
-    // --no-defer is set or the driver doesn't implement it (1.x derives defer in the worker, not here). The
-    // probe is contracted not to throw, but guard it anyway so it can't kill the loop (as with driveOnce).
-    let chatting = false;
-    if (opts.defer && cfg.driver.externalActivity) {
-      try {
-        chatting = await cfg.driver.externalActivity(opts.deferIdleMs);
-      } catch (e) {
-        log(`defer probe failed (treating as idle): ${(e as Error).message}`);
-      }
-    }
-    if (chatting) {
-      if (!deferred) {
-        deferred = true;
-        log("⏸ deferring auto-dispatch — Bob chat active");
-        cfg.emit?.("deferred", {});
-      }
-      if (opts.once) break;
-      await sleep(opts.pollMs);
-      continue;
-    }
-    if (deferred) {
-      deferred = false;
-      log("▶ resuming auto-dispatch — Bob chat idle");
-      cfg.emit?.("resumed", {});
-    }
-    let processed = false;
-    try {
-      processed = await driveOnce(cfg);
-    } catch (e) {
-      log(`loop error: ${(e as Error).message}`); // driveOnce shouldn't throw, but never let the loop die
-    }
-    if (processed) {
-      if (opts.once) break;
-      continue; // pull the next immediately while the board has work
-    }
-    if (opts.once) break;
-    cfg.emit?.("idle", {});
-    await sleep(opts.pollMs);
+
+  const workerId = randomUUID();
+
+  // Recover tasks a prior crashed loop left in_progress (the 1.x worker does this too). No worktree lease
+  // here, so gate on hasLivePeer: skip while a live peer drains this assignee — else we'd re-queue its
+  // in-flight task → double-run. A reload's dead-pid beat isn't a live peer, so it still reclaims.
+  if (!repo.hasLivePeer(opts.assignee, workerId, pidAlive)) {
+    const reclaimed = repo.reclaimStaleInProgress(opts.assignee, opts.tag);
+    if (reclaimed) log(`↻ re-queued ${reclaimed} stale in_progress task(s) from a prior run`);
   }
-  cfg.driver.close();
-  cfg.emit?.("stopped", {});
+
+  // Liveness beat — no worktree, so it shows under worker_draining but holds no lease (one window, one loop).
+  // startHeartbeat is shared with the 1.x worker; stopHeartbeat() clears the timer + row.
+  const stopHeartbeat = repo.startHeartbeat(workerId, { assignee: opts.assignee, pid: process.pid, tag: opts.tag });
+
+  let deferred = false; // tracks defer state across iterations for one-shot deferred/resumed emits
+  // Teardown in `finally` so a throw from isBoardArmed()/sleep/shouldStop/emit can't leak the heartbeat: an
+  // orphaned interval would keep beating in the never-exiting extension host, pinning worker_draining true.
+  try {
+    while (!shouldStop()) {
+      if (!repo.isBoardArmed()) {
+        if (opts.once) break;
+        cfg.emit?.("idle", { disarmed: true });
+        await sleep(opts.pollMs);
+        continue;
+      }
+      // Defer-while-chatting (2.0): pause dispatch while the user is mid-conversation in this window's Bob, so
+      // the loop never opens a task over a live chat. The signal is the driver's (a bob.db poll); skipped when
+      // --no-defer is set or the driver doesn't implement it (1.x derives defer in the worker, not here). The
+      // probe is contracted not to throw, but guard it anyway so it can't kill the loop (as with driveOnce).
+      let chatting = false;
+      if (opts.defer && cfg.driver.externalActivity) {
+        try {
+          chatting = await cfg.driver.externalActivity(opts.deferIdleMs);
+        } catch (e) {
+          log(`defer probe failed (treating as idle): ${(e as Error).message}`);
+        }
+      }
+      if (chatting) {
+        if (!deferred) {
+          deferred = true;
+          log("⏸ deferring auto-dispatch — Bob chat active");
+          cfg.emit?.("deferred", {});
+        }
+        if (opts.once) break;
+        await sleep(opts.pollMs);
+        continue;
+      }
+      if (deferred) {
+        deferred = false;
+        log("▶ resuming auto-dispatch — Bob chat idle");
+        cfg.emit?.("resumed", {});
+      }
+      let processed = false;
+      try {
+        processed = await driveOnce(cfg);
+      } catch (e) {
+        log(`loop error: ${(e as Error).message}`); // driveOnce shouldn't throw, but never let the loop die
+      }
+      if (processed) {
+        if (opts.once) break;
+        continue; // pull the next immediately while the board has work
+      }
+      if (opts.once) break;
+      cfg.emit?.("idle", {});
+      await sleep(opts.pollMs);
+    }
+  } finally {
+    // Best-effort, step-isolated: a throw in one teardown step (e.g. a DELETE on an already-closed DB) must
+    // not skip the rest — the heartbeat must clear, the driver close, and "stopped" emit regardless.
+    try {
+      stopHeartbeat();
+    } catch {
+      /* best-effort */
+    }
+    try {
+      cfg.driver.close();
+    } catch {
+      /* best-effort */
+    }
+    cfg.emit?.("stopped", {});
+  }
 }
 
 // Git evidence/checkpoint are best-effort: a non-git cwd (or a transient git error) must never fail a

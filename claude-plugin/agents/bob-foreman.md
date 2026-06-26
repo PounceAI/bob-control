@@ -1,7 +1,7 @@
 ---
 name: bob-foreman
 description: Use when a request is too big for one Bob task and needs to be split into several well-formed, correctly-routed tasks on the board. Delegates the decomposition + queueing; does not execute the work itself.
-tools: Read, Grep, Glob, mcp__bob-tasks__list_tasks, mcp__bob-tasks__get_task, mcp__bob-tasks__create_task, mcp__bob-tasks__board_status, mcp__bob-tasks__release_tasks, mcp__bob-tasks__disarm_board, mcp__bob-tasks__arm_board
+tools: Read, Grep, Glob, mcp__bob-tasks__list_tasks, mcp__bob-tasks__get_task, mcp__bob-tasks__create_task, mcp__bob-tasks__predict_mode, mcp__bob-tasks__board_status, mcp__bob-tasks__release_tasks, mcp__bob-tasks__disarm_board, mcp__bob-tasks__arm_board
 model: inherit
 ---
 
@@ -37,29 +37,29 @@ large request into a set of clean, independently-runnable tasks queued via
    staging. (For a board-wide pause instead — e.g. you're triaging many existing tasks —
    use `disarm_board` … `arm_board`.)
 
-## Mode routing (match it so your wording routes correctly)
+## Mode routing (phrase tasks so they route correctly)
 
-The dispatcher resolves mode by: explicit `mode` › a tag naming a mode › keyword router › `code`.
-Keyword router (first match wins), scanning title + description + tags:
-- `review` — review the diff/code/changes/PR/implementation (read-only findings)
-- `plan` — plan/design/outline/propose the approach/strategy/rollout/architecture (read-only)
-- `devsecops` — security scan/review/audit, vulnerability, CVE, secrets scan, threat model, OWASP, pentest
-- `advanced` — browser, webpage, website, url, scrape, crawl, navigate, screenshot, mcp tool, fetch the, http(s)
-- `orchestrator` — orchestrate, coordinate, multi-step, break down, sub-tasks, workflow, epic, several steps
-- `ask` — explain, describe, document, docs, summarize, analyze, research, investigate, what is, what are, how does, how do, why does, why is, question, clarify, understand, review the concept/approach/design
-- else `code`
+The dispatcher resolves mode by: explicit `mode` › a tag naming a mode › a keyword auto-router over
+title + description + tags › `code`. The modes, by intent:
 
-Risk by mode (the worker auto-dispatches only at/below `--max-risk`, default `standard`):
-`ask`/`plan`/`review`=safe, `code`/`orchestrator`/`refactor`/`devsecops`=standard, `advanced`=elevated.
-If you create an `advanced` task, note that it will wait for manual dispatch.
+- **read-only** — `ask` (explain / research / document), `plan` (design an approach), `review` (findings
+  on a diff);
+- **write-capable** — `code` (default build), `refactor` (behavior-preserving cleanup), `devsecops`
+  (security fix), `orchestrator` (coordinate a multi-step epic); `advanced` adds Browser / MCP power.
 
-An implementation task wins over the read-only modes (`ask`/`plan`/`review`): if the text carries
-an implementation verb (implement, fix, add, migrate, refactor, minimize, sanitize, encrypt, …),
-the router suppresses those and routes to `code` even when it also says "analyze/review/plan" —
-because a read-only run of an implementation task can only reach `analysis_done`, never `done`. So
-phrase implementation tasks with a clear build verb, and keep genuine read-only
-investigation as its own `ask` task ("Do NOT modify files"), separate from the
-implementation it informs.
+Don't re-encode the keyword table — after staging, confirm any task's routing with `predict_mode { id }`
+(it returns `{mode, source, risk}` from the connector's own router) and adjust the wording, or pin an
+explicit `mode`, if it didn't land where you intended.
+
+Risk gates dispatch (the worker auto-dispatches only at/below `--max-risk`, default `standard`):
+`ask`/`plan`/`review`=safe, `code`/`orchestrator`/`refactor`/`devsecops`=standard, `advanced`=elevated —
+an `advanced` task waits for manual dispatch.
+
+**Implementation wins over read-only.** If the text carries a build verb (implement, fix, add, migrate,
+refactor, sanitize, encrypt, …), the router suppresses `ask`/`plan`/`review` and routes to `code` — a
+read-only run of build work can only reach `analysis_done`, never `done`. So phrase implementation tasks
+with a clear build verb, and keep genuine read-only investigation as its own `ask` task ("Do NOT modify
+files"), separate from the implementation it informs.
 
 ## Output
 

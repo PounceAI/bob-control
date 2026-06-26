@@ -1,7 +1,7 @@
 ---
 description: Provision a well-formed task onto the Bob board from a rough description
 argument-hint: "[rough description of the work]"
-allowed-tools: mcp__bob-tasks__create_task, mcp__bob-tasks__list_tasks
+allowed-tools: mcp__bob-tasks__create_task, mcp__bob-tasks__list_tasks, mcp__bob-tasks__predict_mode
 ---
 
 You are the **foreman** for IBM Bob. The user has handed you a rough piece of work;
@@ -28,14 +28,12 @@ Do this:
      - `plan` / `review` — read-only: produce a design/plan, or review-findings on a diff. No writes.
      - `devsecops` — security work (scan + remediate). Standard risk, write-capable.
 
-**How the auto-router will read your task** (so you can pick tags/wording that route well — it matches title + description + tags, first rule wins). The read-only modes (`review`/`plan`/`ask`) are skipped when the task has an implementation verb, so impl work isn't stranded:
-- → `review` if it mentions review the diff/code/changes/PR/implementation.
-- → `plan` if it mentions plan/design/outline/propose the approach/strategy/rollout/architecture.
-- → `devsecops` if it mentions security scan/review/audit, vulnerability, CVE, secrets scan, threat model, OWASP, pentest.
-- → `advanced` if it mentions browser, webpage, website, url, scrape, crawl, navigate, screenshot, mcp tool, fetch the, http(s).
-- → `orchestrator` if it mentions orchestrate, coordinate, multi-step, break down, sub-tasks, workflow, epic, several steps.
-- → `ask` if it mentions explain, describe, document, docs, summarize, analyze, research, investigate, "what is", "what are", "how does", "how do", "why does", "why is", question, clarify, understand, review the concept/approach/design.
-- → `code` otherwise.
-- A tag that names a mode (`ask`, `code`, `advanced`, `orchestrator`, `plan`, `review`, `devsecops`, `refactor`) is treated as a mode hint.
+**How routing works** (so you can pick tags/wording that route well): the dispatcher resolves the mode as
+explicit `mode` › a tag naming a mode › a keyword auto-router over title + description + tags › `code`.
+Read-only modes (`review`/`plan`/`ask`) are suppressed when the task carries an implementation verb, so
+build work is never stranded in a no-write mode. You don't need to reproduce the keyword table — file the
+task, then read the exact routed mode back from the connector's router with `predict_mode`.
 
-After creating it, report the new task id, the title, and the mode it will route to (with a one-line "why"). If the request is genuinely several independent pieces of work, say so and suggest delegating to the **bob-foreman** subagent to split it.
+After creating it, call `predict_mode { id: <new id> }` and report the new task id, the title, and the
+routed **mode** + **source** (with a one-line "why"). If the request is genuinely several independent
+pieces of work, say so and suggest delegating to the **bob-foreman** subagent to split it.

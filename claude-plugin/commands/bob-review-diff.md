@@ -44,20 +44,24 @@ Do this:
      findings format, so keep this short; don't over-specify.)
 
 3. **Wait for Bob, then surface the findings.** Report the new task id and that it routes to
-   `{review}`. First check `board_status`: if `worker_draining.draining` is **false**, no worker will
-   pull this — tell the user it's **queued as #id** and to start one (`launch-worker.cmd`), then
-   stop. Otherwise call `await_task {task_id: id}` — it **blocks until the worker drains the task
-   and Bob settles it**, so the review comes back in this same turn:
+   `{review}`. First check `board_status` (its `worker_draining` reflects a **2.0 in-process loop** as well
+   as a **1.x worker**): if `worker_draining.draining` is **false**, nothing is draining the board — tell
+   the user it's **queued as #id** and to start a drainer (open the repo in a **Bob 2.0** window, whose
+   in-process loop drains automatically, or run a **1.x** worker via `launch-worker.cmd`), then stop.
+   Otherwise call `await_task {task_id: id}` — it **blocks until the drainer runs the task and Bob settles
+   it**, so the review comes back in this same turn:
    - `analysis_done` (or `done`) → the full review is in the task **`result`** plus a structured
      **`bob-review` note** (severity / location / category, with any `fixed_diff`). Surface the
      findings, correctness issues first.
    - `waiting` (poll window elapsed) → call `await_task` again; keep waiting while Bob works. If
-     it stays `waiting` across several calls, **no worker is draining the board** — tell the user
-     it's **queued as #id** and to start the worker (`npm run worker`) or check `/bob-board`.
-   - `needs_input` → Bob asked a question (in the response); surface it and have the user answer,
-     then `await_task` again. `blocked` / `cancelled` → report Bob stopped, with the note reason.
+     it stays `waiting` across several calls, nothing is draining the board — tell the user
+     it's **queued as #id** and to start a drainer (as above) or check `/bob-board`.
+   - `needs_input` → Bob asked a question (in the response). A **1.x** worker parks it on the board —
+     surface it and have the user answer, then `await_task` again. A **2.0** in-process Bob has no board
+     reply channel, so surface the question for the user to steer in Bob's window. `blocked` /
+     `cancelled` → report Bob stopped, with the note reason.
 
-Note: `await_task` only **waits** — Bob runs the task when his auto-dispatch worker pulls it, so
-this loop is autonomous only while a worker is draining the board (`npm run worker`); otherwise it
-falls back to "queued as #id". `review` mode is read-only, safe to drain unattended. (If you want
-the review text returned **inline** rather than via the board, file it in `ask` mode instead.)
+Note: `await_task` only **waits** — Bob runs the task when a drainer pulls it (a 2.0 in-process loop or a
+1.x worker), so this loop is autonomous only while one is draining the board; otherwise it falls back to
+"queued as #id". `review` mode is read-only, safe to drain unattended. (If you want the review text returned
+**inline** rather than via the board, file it in `ask` mode instead.)

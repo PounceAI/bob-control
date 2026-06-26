@@ -48,18 +48,22 @@ Do this:
      user's focus note if any. Keep it short; review mode supplies its own rubric.
 
 4. **Wait for Bob, then surface the findings.** Report the new task id and that it routes to
-   `{review}`. Use the `worker_draining` from step 1: if `worker_draining.draining` is **false**, no worker
-   will pull this — tell the user it's **queued as #id** and to start one (`launch-worker.cmd`), then
-   stop. Otherwise call `await_task {task_id: id}` — it **blocks until the worker drains the task
-   and Bob settles it**, so the whole review loop completes in this one turn (no "check back later"):
+   `{review}`. Use the `worker_draining` from step 1 (it reflects a **2.0 in-process loop** as well as a
+   **1.x worker**): if `worker_draining.draining` is **false**, nothing is draining the board — tell the
+   user it's **queued as #id** and to start a drainer (open the repo in a **Bob 2.0** window, whose
+   in-process loop drains automatically, or run a **1.x** worker via `launch-worker.cmd`), then stop.
+   Otherwise call `await_task {task_id: id}` — it **blocks until the drainer runs the task and Bob settles
+   it**, so the whole review loop completes in this one turn (no "check back later"):
    - `analysis_done` (or `done`) → the review is in the task **`result`** plus a structured
      **`bob-review` note** (severity / location / `fixed_diff`). Present the findings,
      correctness issues first.
    - `waiting` (the poll window elapsed) → call `await_task` again and keep waiting while Bob
-     works. If it stays `waiting` across several calls, **no worker is draining the board** —
-     tell the user it's **queued as #id** and to start the worker (`npm run worker`) or check
+     works. If it stays `waiting` across several calls, nothing is draining the board —
+     tell the user it's **queued as #id** and to start a drainer (as above) or check
      `/bob-board`.
-   - `needs_input` → Bob asked a question (it's in the response); surface it and have the user
-     answer (`answer_task_question` or the board), then `await_task` again.
+   - `needs_input` → Bob asked a question (it's in the response). A **1.x** worker parks it on the
+     board — surface it; once the user answers (`answer_task_question` or the board) call `await_task`
+     again. A **2.0** in-process Bob has no board reply channel, so surface the question for the user
+     to steer in Bob's window (or re-file a follow-up with the answer baked in).
    - `blocked` / `cancelled` → Bob stopped without completing; report that with the reason from
      the task notes.

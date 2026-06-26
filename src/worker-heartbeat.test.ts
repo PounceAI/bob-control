@@ -8,6 +8,7 @@ import {
   recordWorkerHeartbeat,
   clearWorkerHeartbeat,
   getWorkerLiveness,
+  hasLivePeer,
   WORKER_HEARTBEAT_WINDOW_MS,
 } from "./db.js";
 
@@ -39,6 +40,7 @@ describe("worker heartbeat liveness", () => {
       draining: false,
       workers: 0,
       last_beat_seconds_ago: null,
+      tags: [],
     });
   });
 
@@ -85,5 +87,27 @@ describe("worker heartbeat liveness", () => {
     getWorkerLiveness(WIN, Date.now() + WIN * 31);
     const row = getDb().prepare("SELECT COUNT(*) c FROM worker_heartbeats").get() as { c: number };
     assert.equal(row.c, 0);
+  });
+
+  it("surfaces each live worker's --tag pin (null = an unfiltered worker)", () => {
+    // Table is empty here (prior test pruned it). A tag-pinned worker + an unfiltered one.
+    recordWorkerHeartbeat("pinned", { tag: "bob2-e2e" });
+    recordWorkerHeartbeat("open", {}); // no tag → drains all tags
+    const live = getWorkerLiveness(WIN, Date.now());
+    assert.equal(live.workers, 2);
+    assert.ok(live.tags.includes("bob2-e2e"), "the pinned worker's tag should surface");
+    assert.ok(live.tags.includes(null), "an unfiltered worker should surface as null");
+  });
+
+  it("hasLivePeer: fresh+live-pid is a co-running drainer; a dead pid (reload) is not; excludes self/others", () => {
+    getDb().exec("DELETE FROM worker_heartbeats"); // isolate from prior beats
+    const onlyMe = (pid: number) => pid === process.pid;
+    recordWorkerHeartbeat("peer", { assignee: "bob", pid: process.pid }); // fresh beat, live pid
+    assert.equal(hasLivePeer("bob", "me", onlyMe), true); // a live co-running drainer on this assignee
+    assert.equal(hasLivePeer("bob", "peer", onlyMe), false); // excluding the only peer → none
+    assert.equal(hasLivePeer("other", "me", onlyMe), false); // different assignee → none
+    clearWorkerHeartbeat("peer");
+    recordWorkerHeartbeat("reloaded", { assignee: "bob", pid: 999999 }); // fresh beat, but the process is gone
+    assert.equal(hasLivePeer("bob", "me", onlyMe), false); // dead pid → the reload case still reclaims
   });
 });

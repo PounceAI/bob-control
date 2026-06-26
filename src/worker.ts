@@ -340,8 +340,9 @@ function emit(opts: Opts, type: string, data: Record<string, unknown> = {}): voi
 }
 
 /** Is a process alive? `process.kill(pid, 0)` sends no signal but throws ESRCH if the pid is gone
- *  (EPERM = it exists but we can't signal it = alive). Lets the lease tell a dead holder from a live one. */
-function pidAlive(pid: number): boolean {
+ *  (EPERM = it exists but we can't signal it = alive). Lets the lease tell a dead holder from a live one.
+ *  Exported so the 2.0 in-process loop can reuse it for its reclaim peer-check (hasLivePeer). */
+export function pidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -979,7 +980,7 @@ export async function main(): Promise<void> {
   // both proceed. The claim doubles as the first liveness heartbeat board_status reads.
   const workerId = randomUUID();
   const worktreeKey = normalizeWorkspacePath(process.cwd());
-  const beatMeta = { assignee: opts.assignee, pid: process.pid, worktree: worktreeKey };
+  const beatMeta = { assignee: opts.assignee, pid: process.pid, worktree: worktreeKey, tag: opts.tag };
   if (!opts.dryRun) {
     let res = repo.claimWorktreeLease(workerId, beatMeta);
     // A holder whose pid is provably dead (hard kill) is reclaimable; an unknown (null) pid counts as
@@ -1005,12 +1006,12 @@ export async function main(): Promise<void> {
       emit(opts, "error", { message: `worktree lease held by pid ${h.pid ?? "?"} on ${process.cwd()}` });
       process.exit(1);
     }
-    // Lease held (the claim recorded the first beat). Refresh on a timer, independent of the dispatch
-    // loop, and clear on graceful exit; a hard kill is covered by the freshness window + pid reclaim.
-    setInterval(() => repo.recordWorkerHeartbeat(workerId, beatMeta), repo.WORKER_HEARTBEAT_INTERVAL_MS).unref();
+    // Lease held (the claim recorded the first beat). startHeartbeat refreshes on a timer; its stop() is
+    // wired to process exit here (vs the 2.0 loop's finally). A hard kill is covered by the window + pid reclaim.
+    const stopHeartbeat = repo.startHeartbeat(workerId, beatMeta);
     process.on("exit", () => {
       try {
-        repo.clearWorkerHeartbeat(workerId);
+        stopHeartbeat();
       } catch {
         /* best-effort on the way out */
       }
