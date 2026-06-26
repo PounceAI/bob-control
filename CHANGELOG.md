@@ -51,8 +51,7 @@ waits for you in Bob's chat. The related settings (`commandClassifier`, `answerF
 
 ## [1.1.0] — 2026-06-25
 
-The **last Bob-1.x-only release** — see [Compatibility](#compatibility-1x-vs-2x) below. (Bob 2.0
-support landed after this, in the Unreleased entry above.)
+The **last Bob-1.x-only release** — see [Compatibility](#compatibility-1x-vs-2x) below.
 
 ### Added — run N worktrees of one repo in parallel
 

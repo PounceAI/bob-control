@@ -15,7 +15,7 @@ Either way it:
 - **Enforces a risk gate** — only dispatches tasks whose mode risk is at or below your configured threshold
 - **Defers while chatting** — pauses auto-dispatch when you're actively using Bob's chat, so it never aborts your live conversation
 - **Shows native notifications** — in-IDE toasts when tasks complete or fail
-- **Provides controls** — Start/Stop/Toggle commands and a status-bar item showing loop/worker state
+- **Provides controls** — Start/Stop/Toggle commands and a status-bar item showing dispatch state
 
 ## Settings
 

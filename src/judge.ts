@@ -267,5 +267,3 @@ export function buildJudgeVerifier(
     return { passed: verdict.pass, reason: verdict.reason };
   };
 }
-
-// Made with Bob

@@ -18,12 +18,8 @@ pipe** — auto-detected, one build. Bob is the MCP client; this is the server i
 Claude Code speaks the same MCP, so it can work the **same board** as foreman (provision / route /
 triage) or worker.
 
-> **Bob 1.x and 2.0 — both supported, auto-detected.** The companion extension detects which Bob a
-> window is and picks the transport: **Bob 2.0** (current) runs the dispatch loop **in-process** —
-> IBM Bob 2.0 removed the `node-ipc` pipe, so there is no external control channel — while **Bob 1.x**
-> drives Bob **over that pipe** (legacy). One build serves both. Still on 1.x and want the last
-> pipe-only release? Grab **v1.1.0** from
-> [Releases](https://github.com/PounceAI/bob-control/releases). Full matrix:
+> **One build, both Bobs — auto-detected.** Still on 1.x and want the last pipe-only release? Grab
+> **v1.1.0** from [Releases](https://github.com/PounceAI/bob-control/releases). Full matrix:
 > [CHANGELOG → Compatibility](CHANGELOG.md#compatibility-1x-vs-2x).
 
 ### Where it fits
@@ -85,8 +81,8 @@ same `mcpServers` block in the global file instead:
 
 > **Bob 2.0** keeps its settings under `~/.bob/` rather than the `%APPDATA%\IBM Bob` path above; the
 > simplest version-independent route is the in-app **MCP Servers** panel (**＋ Add Server**), which
-> writes to whichever location your Bob build uses. The `mcpServers` block itself is identical — only
-> where the file lives differs. This wiring is independent of the dispatch transport.
+> writes to whichever location your Bob build uses. The `mcpServers` block is identical either way —
+> this wiring is independent of the dispatch transport.
 
 ## Bob Companion (Claude Code plugin)
 
@@ -600,9 +596,8 @@ window's dispatch is isolated.
 
 ### Bob 2.0 (in-process — recommended)
 
-2.0 makes this **simpler**: with no IPC pipe, each Bob window's in-process loop dispatches into **its
-own** workspace natively — there's no shared pipe to contend for, so the per-instance pipe plumbing
-(the 1.x section below) disappears entirely. Per worktree:
+2.0 makes this **simpler**: with no IPC pipe, each window's in-process loop dispatches into **its
+own** workspace — the per-instance pipe plumbing (the 1.x section below) is gone. Per worktree:
 
 **1. Add the worktree** and build once in the main checkout (each window's loop loads its `dist/`):
 
@@ -705,9 +700,6 @@ The pin is a convention the tag filter enforces at *discovery*, not at claim (bo
 **Verify:** create one task per worktree, confirm each lands in its own window and edits its own
 checkout, that `board_status` shows one lease per worktree, and that feat-a's worker never pulls
 feat-b's task.
-
-> **Bob-1.x only** — worktree parallelism rides Bob's IPC pipe, which IBM Bob 2.0 removes; see
-> [CHANGELOG → Compatibility](CHANGELOG.md#compatibility-1x-vs-2x).
 
 ## Task model
 

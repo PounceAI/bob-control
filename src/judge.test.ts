@@ -344,5 +344,3 @@ test("buildJudgeVerifier: a judge LLM failure fails OPEN (passes) and records a 
 });
 
 test.after(() => rmSync(VDIR, { recursive: true, force: true }));
-
-// Made with Bob

@@ -179,5 +179,3 @@ test("submit_review_findings payload structure", () => {
   assert.equal(toolPayload.issues[0].title, "Memory leak");
   assert.equal(toolPayload.issues[1].fixed_diff?.includes("receive"), true);
 });
-
-// Made with Bob
