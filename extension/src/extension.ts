@@ -416,6 +416,18 @@ function startInProcessLoop(connector: string, mods: ConnectorModules, host: unk
   if (tag && tag.trim()) args.push("--tag", tag.trim());
   const maxRetry = c.get<number>("maxRetryAttempts") ?? 0;
   if (maxRetry > 0) args.push("--retry", String(maxRetry));
+  // Verify-and-continue: command-verify + plan-stop are ported to the in-process loop. The LLM judge is
+  // NOT yet (it needs the classifier backend in-process), so --verify-judge is intentionally not passed;
+  // warn if it's configured so the user knows it's a no-op on 2.0.
+  if (c.get<boolean>("verifyAndContinue")) {
+    args.push("--verify-and-continue");
+    const verifyCmd = c.get<string>("verifyCommand");
+    if (verifyCmd && verifyCmd.trim()) args.push("--verify-command", verifyCmd.trim());
+    args.push("--max-continues", String(c.get<number>("maxContinues") ?? 3));
+    if (c.get<boolean>("verifyJudge"))
+      out.appendLine("[start] note: verifyJudge isn't supported on the 2.0 in-process loop yet — using command-verify + plan-stop only.");
+  }
+  if (c.get<boolean>("detectPlanStop")) args.push("--detect-plan-stop");
   const opts = mods.parseOpts(args);
   const driver = new mods.InProcessDriver(host);
 

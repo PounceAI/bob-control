@@ -95,6 +95,24 @@ test("driveOnce retries a transient failure when --retry is set (re-queues pendi
   assert.equal(after.retry_attempts, 1);
 });
 
+test("driveOnce --verify-and-continue: a passing verify command completes on the first dispatch", async () => {
+  const t = createTask({ title: "passes verify", mode: "code" });
+  const driver = fakeDriver({ status: "completed", result: "did it" });
+  await driveOnce(cfg(driver, ["--verify-and-continue", "--verify-command", "exit 0"]));
+  assert.equal(driver.calls.length, 1); // no continue
+  assert.ok(isCompleted(getTask(t.id)!.status));
+});
+
+test("driveOnce --verify-and-continue: a failing verify command re-dispatches, then blocks at max-continues", async () => {
+  const t = createTask({ title: "needs verify", mode: "code" });
+  const driver = fakeDriver({ status: "completed", result: "did it" });
+  await driveOnce(cfg(driver, ["--verify-and-continue", "--verify-command", "exit 1", "--max-continues", "2"]));
+  assert.equal(driver.calls.length, 3); // initial + 2 continues
+  assert.match(driver.calls[1].text, /did NOT pass verification/i); // continue re-sends task + failure
+  assert.match(driver.calls[1].text, /needs verify/); // ...and the original task
+  assert.equal(getTask(t.id)!.status, "blocked"); // never passed → blocked, NOT completed despite result text
+});
+
 test("driveOnce dry-run neither claims nor dispatches", async () => {
   const t = createTask({ title: "peek", mode: "code" });
   const driver = fakeDriver();

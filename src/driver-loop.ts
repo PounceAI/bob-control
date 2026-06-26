@@ -6,13 +6,16 @@ import { resolveMode, profileFor, isReadOnlyMode } from "./modes.js";
 import { preserveWipToBranch } from "./checkpoint.js";
 import { captureGitBaseline, captureChangedFiles, type GitBaseline } from "./judge.js";
 import { shouldRetry, executeRetry } from "./retry-policy.js";
+import { createPollLoop, defaultCaptureSnapshot } from "./bob-polls.js";
 import type { Task } from "./types.js";
 
 // V5 tail: the transport-agnostic board-drain loop the EXTENSION HOST runs in-process for Bob 2.0 (the
 // 2.0 driver can't be a child process — see docs/bob-2-inprocess.md). It drives any BobDriver, so the
 // same loop serves a future refactor of the 1.x path. This is the MVP analog of worker.ts's runOne MINUS
 // the IPC-only gate layer (command/permission/mode-switch/followup): on 2.0 auto-approve is config-driven
-// (V4) and there is no event stream to gate on. Verify/judge/defer-while-chatting are not ported yet.
+// (V4) and there is no event stream to gate on. Defer-while-chatting is not ported. Verify-and-continue
+// IS (command-verify + plan-stop, both transport-agnostic via bob-polls); the LLM judge is not yet —
+// it needs the classifier backend threaded into the in-process loop (follow-up).
 
 export interface DriverLoopConfig {
   driver: BobDriver;
@@ -71,6 +74,9 @@ export async function driveOnce(cfg: DriverLoopConfig): Promise<boolean> {
   );
 
   const baseline = await gitBaseline(cwd);
+  // Plan-stop baseline: a working-tree snapshot taken BEFORE the dispatch, so the poll loop can tell a
+  // plan-only completion (no new changes) from real work. Only needed when verify-and-continue runs it.
+  const planStopBaseline = opts.verifyAndContinue && opts.detectPlanStop ? await snapshot(cwd) : undefined;
   let res: DispatchResult;
   try {
     res = await driver.dispatch({ text: buildPrompt(task), mode, timeoutMs: opts.timeoutMs });
@@ -78,8 +84,40 @@ export async function driveOnce(cfg: DriverLoopConfig): Promise<boolean> {
     // BobDriver.dispatch is contracted never to reject; stay defensive for a third-party driver.
     res = { taskId: null, result: "", lastText: (e as Error).message, status: "aborted", tokensUsed: 0, turns: 0 };
   }
+  res = await verifyAndContinue(cfg, task, mode, res, planStopBaseline);
   await finalize(cfg, task, mode, res, baseline);
   return true;
+}
+
+/**
+ * Verify-and-continue for the 2.0 loop: after the initial dispatch, run the acceptance check (the
+ * --verify-command, plus --detect-plan-stop) and, on failure, re-dispatch the task + the failure via the
+ * driver until it passes or --max-continues is hit. Reuses the transport-agnostic bob-polls loop with the
+ * 2.0 driver as its dispatcher. No-op when --verify-and-continue is off. The LLM judge is NOT wired here
+ * yet (it needs the classifier backend in the in-process loop) — command + plan-stop only.
+ */
+async function verifyAndContinue(
+  cfg: DriverLoopConfig,
+  task: Task,
+  mode: string,
+  initial: DispatchResult,
+  planStopBaseline: string | undefined,
+): Promise<DispatchResult> {
+  const { driver, opts, cwd } = cfg;
+  if (!opts.verifyAndContinue) return initial;
+  const loop = createPollLoop({
+    enabled: true,
+    verifyCommand: opts.verifyCommand,
+    maxContinues: opts.maxContinues,
+    cwd,
+    taskPrompt: buildPrompt(task),
+    task: { id: task.id, title: task.title },
+    addNote: repo.addNote,
+    log: cfg.log ?? (() => {}),
+    dispatch: (text: string) => driver.dispatch({ text, mode, timeoutMs: opts.timeoutMs }),
+    detectPlanStop: opts.detectPlanStop,
+  });
+  return loop(initial, planStopBaseline);
 }
 
 /** Record a genuine completion (with file evidence), else retry a transient failure or preserve WIP + block. */
@@ -93,7 +131,9 @@ async function finalize(
   const { opts, cwd } = cfg;
   const log = cfg.log ?? (() => {});
 
-  if (res.status === "completed" || res.result.trim()) {
+  // Gate completion on the status, NOT on result text: the verify-and-continue loop returns Bob's last
+  // (non-empty) result with status 'aborted' when it gives up, and that must block, not falsely complete.
+  if (res.status === "completed") {
     const result = res.result.trim() || "(completed; no result text captured on 2.0)";
     const ranReadOnly = isReadOnlyMode(mode);
     const changed = await changedFiles(cwd, baseline);
@@ -191,6 +231,16 @@ async function gitBaseline(cwd: string): Promise<GitBaseline | undefined> {
     return await captureGitBaseline(cwd);
   } catch {
     return undefined;
+  }
+}
+/** Pre-dispatch working-tree snapshot for plan-stop detection. On any failure return the GIT_ERROR
+ *  sentinel (which checkDidWork reads as "assume work done"), never undefined — an undefined baseline
+ *  would make the poll loop re-snapshot POST-dispatch and false-trigger a plan-stop. */
+async function snapshot(cwd: string): Promise<string> {
+  try {
+    return await defaultCaptureSnapshot(cwd);
+  } catch {
+    return "GIT_ERROR";
   }
 }
 async function changedFiles(cwd: string, baseline?: GitBaseline) {
