@@ -161,5 +161,3 @@ test("parseReviewFindings ignores a '### ' heading inside a fenced diff (no spur
   assert.equal(issues[0].title, "Refactor the header");
   assert.ok(issues[0].fixed_diff?.includes("+### new heading"), "the diff fix must survive intact");
 });
-
-// Made with Bob

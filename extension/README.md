@@ -4,13 +4,18 @@ Auto-dispatch queued board tasks to IBM Bob with mode auto-routing, a risk gate,
 
 ## What It Does
 
-The Bob Tasks extension runs the project's `dist/worker.js` to automatically claim and dispatch queued tasks from the task board to IBM Bob. It:
+The Bob Tasks extension claims and dispatches queued board tasks to IBM Bob from inside the editor. It **auto-detects which Bob it's running in** and picks the transport:
 
-- **Auto-routes tasks** to the appropriate Bob mode (`code`, `advanced`, `ask`, `orchestrator`) based on task content/metadata
+- **Bob 2.0** (current) — runs the dispatch loop **in-process**, calling Bob's exported `startTask` API; no child process, no pipe. Completion is read from Bob's task store (`~/.bob/db/bob.db`), and headless auto-approve is written to Bob's global settings (gated by `bobTasks.autoApproveGlobal`).
+- **Bob 1.x** (legacy) — spawns the project's `dist/worker.js`, which dispatches over the `node-ipc` pipe (`ROO_CODE_IPC_SOCKET_PATH`).
+
+Either way it:
+
+- **Auto-routes tasks** to the appropriate Bob mode (`code`, `advanced`, `ask`, `orchestrator`, …) based on task content/metadata
 - **Enforces a risk gate** — only dispatches tasks whose mode risk is at or below your configured threshold
-- **Defers while chatting** — pauses auto-dispatch when you're actively using Bob's chat, so the worker never aborts your live conversation
+- **Defers while chatting** — pauses auto-dispatch when you're actively using Bob's chat, so it never aborts your live conversation
 - **Shows native notifications** — in-IDE toasts when tasks complete or fail
-- **Provides worker controls** — Start/Stop/Toggle commands and a status-bar item showing worker state
+- **Provides controls** — Start/Stop/Toggle commands and a status-bar item showing dispatch state
 
 ## Settings
 
@@ -23,13 +28,17 @@ All settings are under the `bobTasks.*` namespace:
 - **`bobTasks.nodePath`** — Node executable used to run the worker. Must be Node >= 22.5 (for `node:sqlite`). Set an absolute path if `node` on PATH is older.
 - **`bobTasks.dbPath`** — SQLite task DB (`BOB_TASKS_DB`). Empty = the project's `data/tasks.db`. Must match the MCP server's DB.
 - **`bobTasks.worktreeShared`** — Share ONE board across all linked git worktrees of a repo: this worktree's worker drains the **main** worktree's `data/tasks.db`. Governs the worker only — to also make a Claude session running *inside* a linked worktree file to the shared board, set `BOB_TASKS_WORKTREE_SHARED=1` in the environment (every consumer reads it). Ignored when `bobTasks.dbPath` is set; a no-op for non-worktree projects.
-- **`bobTasks.pipe`** — Bob IPC named pipe. Blank = auto-detect this instance's own pipe from `ROO_CODE_IPC_SOCKET_PATH` (needed when multiple Bob instances run at once); set only to override. Fallback: `\\.\pipe\pipe\bob-ipc`.
+- **`bobTasks.pipe`** *(Bob 1.x only — no effect on Bob 2.0, which has no IPC pipe)* — Bob IPC named pipe. Blank = auto-detect this instance's own pipe from `ROO_CODE_IPC_SOCKET_PATH` (needed when multiple Bob instances run at once); set only to override. Fallback: `\\.\pipe\pipe\bob-ipc`.
 - **`bobTasks.maxRisk`** — Only auto-dispatch tasks whose mode risk is at or below this. Options: `safe`, `standard`, `elevated`. Default: `standard`. (`advanced` mode is elevated.)
 - **`bobTasks.pollMs`** — Idle poll interval (ms). Default: `3000`.
 - **`bobTasks.timeoutMs`** — Per-task dispatch timeout (ms). Default: `300000` (5 minutes).
 - **`bobTasks.assignee`** — Assignee recorded when the worker claims a task. Default: `bob`.
 - **`bobTasks.tag`** — Only process tasks with this tag. Empty = all tasks.
-- **`bobTasks.autoStart`** — Start the worker automatically when Bob launches. Default: `false`.
+- **`bobTasks.autoStart`** — Start the loop automatically when Bob launches. Default: `false`.
+
+### Auto-Approve (Bob 2.0)
+
+- **`bobTasks.autoApproveGlobal`** — On the first Bob 2.0 dispatch, write Bob's headless auto-approve into its **global** settings (`~/.bob/settings/settings.json`) so queued tasks run unattended. This disables Bob's command security for **every** Bob window/project for your user and **persists** until you change it; a **one-time notice** (with an *Open Setting* button) fires on the first write. Default: `true`. Turn it off to keep Bob's normal approval prompts — auto-dispatch then stalls on the first prompt. *(Bob 1.x ignores this — 1.x auto-approve is seeded by `launch-bob-ipc.cmd`/`set-bob-autoapprove.mjs` while Bob is closed.)*
 
 ### UI Settings
 
@@ -44,12 +53,17 @@ All settings are under the `bobTasks.*` namespace:
 
 ### Command Classifier & Followup Answerer
 
-- **`bobTasks.commandClassifier`** — Let Claude approve/deny commands that fall outside the safe allowlist (instead of Bob's manual prompt) for code, orchestrator, and advanced modes. Requires the Bob button patch (`tools/patch-bob-buttons.mjs`). Default: `false`.
-- **`bobTasks.answerFollowups`** — Let Claude answer Bob's followup questions during a task (sending the reply over IPC), escalating to you when it's unsure. Off = questions wait for you. Default: `false`.
-- **`bobTasks.escalateAll`** — Escalate ALL followup questions to you for review (including plan approvals), instead of auto-answering. Only applies when `answerFollowups` is on. Default: `false`.
-- **`bobTasks.reviewPlans`** — Escalate plan/design-approval questions to you for review, while auto-answering mechanical clarifications (file paths, flag names, etc.). Only applies when `answerFollowups` is on. Takes precedence over `escalateAll` when both are on. Default: `false`.
-- **`bobTasks.classifierBackend`** — How the command classifier reaches Claude. Options: `cli` (run the installed `claude` CLI headless), `api` (one raw Anthropic API call). Default: `cli`.
-- **`bobTasks.classifierModel`** — Model the command classifier uses. Empty = per-backend default (`cli`→`claude-sonnet-4-6`, `api`→`claude-haiku-4-5`).
+> **`commandClassifier`, `answerFollowups`, `escalateAll`, `reviewPlans` are Bob 1.x only** — they
+> ride the IPC channel (a button patch / an inbound reply) that **Bob 2.0 removed**, so they have no
+> effect on a 2.0 window. `classifierBackend` / `classifierModel` / `classifierCliPath` still apply on
+> 2.0: the LLM **verify judge** (below) reaches Claude through the same backend.
+
+- **`bobTasks.commandClassifier`** *(Bob 1.x only)* — Let Claude approve/deny commands that fall outside the safe allowlist (instead of Bob's manual prompt) for code, orchestrator, and advanced modes. Requires the Bob button patch (`tools/patch-bob-buttons.mjs`). Default: `false`.
+- **`bobTasks.answerFollowups`** *(Bob 1.x only)* — Let Claude answer Bob's followup questions during a task (sending the reply over IPC), escalating to you when it's unsure. Off = questions wait for you. Default: `false`.
+- **`bobTasks.escalateAll`** *(Bob 1.x only)* — Escalate ALL followup questions to you for review (including plan approvals), instead of auto-answering. Only applies when `answerFollowups` is on. Default: `false`.
+- **`bobTasks.reviewPlans`** *(Bob 1.x only)* — Escalate plan/design-approval questions to you for review, while auto-answering mechanical clarifications (file paths, flag names, etc.). Only applies when `answerFollowups` is on. Takes precedence over `escalateAll` when both are on. Default: `false`.
+- **`bobTasks.classifierBackend`** — How the classifier/judge reach Claude. Options: `cli` (run the installed `claude` CLI headless), `api` (one raw Anthropic API call). Default: `cli`. *(Used by the 2.0 verify judge too.)*
+- **`bobTasks.classifierModel`** — Model the classifier/judge uses. Empty = per-backend default (`cli`→`claude-sonnet-4-6`, `api`→`claude-haiku-4-5`).
 - **`bobTasks.classifierCliPath`** — Path to the `claude` executable for the cli backend. Empty = resolve `claude` on PATH.
 
 ### Verify-and-Continue
@@ -116,7 +130,7 @@ When the extension is active, a status-bar item shows the worker state (click it
 ### Prerequisites
 
 1. **Bob Control built** — The parent project must be built at `../dist` (relative to this extension directory). Run `npm install && npm run build` in the project root.
-2. **Bob launched with IPC** — Bob must be running with `ROO_CODE_IPC_SOCKET_PATH` set to `\\.\pipe\bob-ipc`. Use the project's `launch-bob-ipc.cmd` script. (node-ipc internally mangles that into a doubled `\\.\pipe\pipe\bob-ipc` — the name the worker actually connects to, and the default of `bobTasks.pipe`.) Launching Bob any other way (Start menu, taskbar) skips both the IPC pipe **and** `set-bob-autoapprove.mjs`, so the worker can't connect and commands stall on manual prompts. Start the worker without `ROO_CODE_IPC_SOCKET_PATH` set and the extension warns with *How to fix* / *Start anyway* rather than spawning a doomed worker. Repoint your Start/taskbar shortcut at `launch-bob-ipc.cmd` so it can't be bypassed.
+2. **Bob launched with IPC** *(Bob 1.x only)* — On **Bob 2.0** there's no pipe and nothing special to launch: open Bob normally and the extension drives it in-process (auto-approve is handled by `bobTasks.autoApproveGlobal`). On **Bob 1.x**, Bob must be running with `ROO_CODE_IPC_SOCKET_PATH` set to `\\.\pipe\bob-ipc` — use the project's `launch-bob-ipc.cmd` script. (node-ipc internally mangles that into a doubled `\\.\pipe\pipe\bob-ipc` — the name the worker actually connects to, and the default of `bobTasks.pipe`.) Launching 1.x Bob any other way (Start menu, taskbar) skips both the IPC pipe **and** `set-bob-autoapprove.mjs`, so the worker can't connect and commands stall on manual prompts. Start the worker without `ROO_CODE_IPC_SOCKET_PATH` set and the extension warns with *How to fix* / *Start anyway* rather than spawning a doomed worker. Repoint your Start/taskbar shortcut at `launch-bob-ipc.cmd` so it can't be bypassed.
 3. **Node >= 22.5** — The worker requires Node 22.5 or later for `node:sqlite`. Verify with `node --version`. If your system Node is older, set `bobTasks.nodePath` to an absolute path to a newer Node binary.
 
 ### Build Steps

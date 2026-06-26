@@ -2,7 +2,7 @@
   "name": "bob-tasks",
   "displayName": "Bob Tasks",
   "description": "Auto-dispatch queued tasks to IBM Bob, with mode routing, a safety gate, defer-while-chatting, and native notifications.",
-  "version": "1.1.0",
+  "version": "1.1.3",
   "publisher": "local",
   "license": "Apache-2.0",
   "engines": { "vscode": "^1.94.0" },
@@ -41,7 +41,7 @@
         },
         "bobTasks.pipe": {
           "type": "string",
-          "description": "Bob IPC named pipe. Blank = auto-detect this instance's own pipe from ROO_CODE_IPC_SOCKET_PATH (needed when multiple Bob instances run at once). Set only to override."
+          "description": "[Bob 1.x only — no effect on Bob 2.0, which has no IPC pipe] Bob IPC named pipe. Blank = auto-detect this instance's own pipe from ROO_CODE_IPC_SOCKET_PATH (needed when multiple Bob instances run at once). Set only to override."
         },
         "bobTasks.maxRisk": {
           "type": "string",
@@ -54,6 +54,11 @@
         "bobTasks.assignee": { "type": "string", "default": "bob", "description": "Assignee recorded when the worker claims a task." },
         "bobTasks.tag": { "type": "string", "default": "", "description": "Only process tasks with this tag. Empty = all tasks." },
         "bobTasks.autoStart": { "type": "boolean", "default": false, "description": "Start the worker automatically when Bob launches." },
+        "bobTasks.autoApproveGlobal": {
+          "type": "boolean",
+          "default": true,
+          "description": "On the first 2.0 dispatch, write Bob's headless auto-approve into its GLOBAL settings (~/.bob/settings/settings.json) so queued tasks run unattended. This disables Bob's command security for every Bob window/project for your user and persists until changed (a one-time notice is shown the first time). Turn off to keep Bob's normal approval prompts — auto-dispatch will then stall on the first prompt."
+        },
         "bobTasks.notify.enabled": { "type": "boolean", "default": true, "description": "Show a notification when a task finishes." },
         "bobTasks.dispatch.surface": {
           "type": "string",
@@ -79,22 +84,22 @@
         "bobTasks.commandClassifier": {
           "type": "boolean",
           "default": false,
-          "description": "Let Claude approve/deny commands that fall outside the safe allowlist (instead of Bob's manual prompt) for code, orchestrator, and advanced modes. Requires the Bob button patch (tools/patch-bob-buttons.mjs). Turn off to revert to manual approval."
+          "description": "[Bob 1.x only — no effect on Bob 2.0, which removed the IPC button channel] Let Claude approve/deny commands that fall outside the safe allowlist (instead of Bob's manual prompt) for code, orchestrator, and advanced modes. Requires the Bob button patch (tools/patch-bob-buttons.mjs). Turn off to revert to manual approval."
         },
         "bobTasks.answerFollowups": {
           "type": "boolean",
           "default": false,
-          "description": "Let Claude answer Bob's followup questions during a task (sending the reply over IPC), escalating to you when it's unsure. Off = questions wait for you. Uses the same backend as the command classifier; no button patch needed."
+          "description": "[Bob 1.x only — no effect on Bob 2.0, which has no IPC reply channel] Let Claude answer Bob's followup questions during a task (sending the reply over IPC), escalating to you when it's unsure. Off = questions wait for you. Uses the same backend as the command classifier; no button patch needed."
         },
         "bobTasks.escalateAll": {
           "type": "boolean",
           "default": false,
-          "description": "Escalate ALL followup questions to you for review (including plan approvals), instead of auto-answering. Only applies when bobTasks.answerFollowups is on. Off = Claude answers confident questions."
+          "description": "[Bob 1.x only — depends on answerFollowups, which is inert on Bob 2.0] Escalate ALL followup questions to you for review (including plan approvals), instead of auto-answering. Only applies when bobTasks.answerFollowups is on. Off = Claude answers confident questions."
         },
         "bobTasks.reviewPlans": {
           "type": "boolean",
           "default": false,
-          "description": "Escalate plan/design-approval questions to you for review, while auto-answering mechanical clarifications (file paths, flag names, etc.). Only applies when bobTasks.answerFollowups is on. Off = Claude answers all confident questions. Takes precedence over escalateAll when both are on."
+          "description": "[Bob 1.x only — depends on answerFollowups, which is inert on Bob 2.0] Escalate plan/design-approval questions to you for review, while auto-answering mechanical clarifications (file paths, flag names, etc.). Only applies when bobTasks.answerFollowups is on. Off = Claude answers all confident questions. Takes precedence over escalateAll when both are on."
         },
         "bobTasks.classifierBackend": {
           "type": "string",

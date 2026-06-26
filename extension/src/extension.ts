@@ -1,26 +1,37 @@
 import * as vscode from "vscode";
 import { ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { StringDecoder } from "string_decoder";
+import { pathToFileURL } from "url";
 import * as path from "path";
 import * as fs from "fs";
 
 /**
- * Bob Tasks extension. Drives dist/worker.js as a child process (real Node >=22.5
- * so node:sqlite works) and wraps it with VS Code UI: settings map to worker flags,
- * native notifications come from the worker's @@WORKER {json} stream, plus optional
- * bring-to-front focus, start/stop commands, and a status-bar item.
+ * Bob Tasks extension. Two transports, auto-detected:
+ *   - Bob 2.0 (in-process): the node-ipc pipe is gone, so the board-pull loop runs HERE in the extension
+ *     host (the only place that can reach `getExtension('IBM.bob-code').exports.startTask`). We import the
+ *     connector's compiled driver-loop + in-process driver and run them in-process.
+ *   - Bob 1.x (child process): spawn dist/worker.js (real Node >=22.5 for node:sqlite) which dispatches
+ *     over the IPC pipe, wired to this UI via its @@WORKER {json} stdout stream.
+ * Either way: settings map to worker options, native notifications, optional bring-to-front, start/stop
+ * commands, and a status-bar item.
  */
 
 let worker: ChildProcessWithoutNullStreams | null = null;
 let starting = false; // set between spawn() and child going live; blocks double-start
 let connected = false; // true once the worker reports `connected`; reset on each start
 let connectTimer: ReturnType<typeof setTimeout> | null = null; // startup watchdog
+// Bob 2.0 in-process loop handle (mutually exclusive with `worker`): stop() signals it to finish.
+let loop: { stop: () => void } | null = null;
 let status: vscode.StatusBarItem;
 let out: vscode.OutputChannel;
+let memento: vscode.Memento | null = null; // globalState, for the one-time auto-approve notice
 
 const CONNECT_TIMEOUT_MS = 30_000;
+// globalState key: have we shown the "auto-approve is a global, persistent change" notice yet?
+const AUTO_APPROVE_NOTICE_KEY = "bobTasks.autoApproveNoticeShown";
 
 export function activate(context: vscode.ExtensionContext): void {
+  memento = context.globalState;
   out = vscode.window.createOutputChannel("Bob Tasks");
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   status.command = "bobTasks.toggleWorker";
@@ -98,21 +109,12 @@ function setStatus(state: "stopped" | "running" | "deferred" | "idle", detail = 
     state === "deferred" ? "$(debug-pause)" :
     state === "idle" ? "$(watch)" : "$(circle-slash)";
   status.text = `${icon} Bob Tasks: ${state}${detail ? ` ${detail}` : ""}`;
-  status.tooltip = worker ? "Click to stop the Bob Tasks worker" : "Click to start the Bob Tasks worker";
+  status.tooltip = worker || loop ? "Click to stop the Bob Tasks worker" : "Click to start the Bob Tasks worker";
 }
 
 function startWorker(force = false): void {
-  if (worker || starting) {
+  if (worker || starting || loop) {
     vscode.window.showInformationMessage("Bob Tasks worker is already running.");
-    return;
-  }
-  // launch-bob-ipc.cmd exports ROO_CODE_IPC_SOCKET_PATH (so Bob opens the IPC pipe we
-  // dispatch over); this host inherits it, so an absent var means Bob was started the wrong
-  // way and the worker can't connect. Warn rather than spawn a worker that would only burn
-  // the 30s connect watchdog. Done here, not at activation, so CLI/MCP-only users aren't
-  // nagged; `force` is the "Start anyway" bypass.
-  if (!force && !process.env.ROO_CODE_IPC_SOCKET_PATH) {
-    warnLaunchEnvironment();
     return;
   }
   const connector = connectorRoot();
@@ -123,6 +125,98 @@ function startWorker(force = false): void {
     );
     return;
   }
+  // Detect the transport (Bob 2.0 in-process vs 1.x IPC child) — async because the 2.0 driver lives in
+  // the connector's compiled dist, dynamically imported. Block double-starts during detection.
+  starting = true;
+  void detectAndStart(connector, force).catch((err) => {
+    starting = false;
+    setStatus("stopped");
+    out.appendLine(`[start] detection failed: ${(err as Error).message}`);
+    vscode.window.showErrorMessage(`Bob Tasks: failed to start — ${(err as Error).message}`);
+  });
+}
+
+/**
+ * Resolve which Bob this window is and start the matching transport: the in-process loop when Bob 2.0's
+ * exports are reachable, else the 1.x IPC child. The 2.0 path needs no ROO_CODE_IPC_SOCKET_PATH (no pipe).
+ */
+async function detectAndStart(connector: string, force: boolean): Promise<void> {
+  // bob-code's exports are only populated once it has activated. At autostart it may not have yet, which
+  // would misdetect a 2.0 window as 1.x — so activate it first (no-op if absent or already active).
+  const bobExt = vscode.extensions.getExtension("IBM.bob-code");
+  if (bobExt && !bobExt.isActive) {
+    try {
+      await bobExt.activate();
+    } catch {
+      /* fall through — isBob2Window will be false and we take the 1.x path */
+    }
+  }
+  const mods = await loadConnector(connector);
+  const host = mods.createBob2Host({
+    getExtension: (id: string) => vscode.extensions.getExtension(id),
+    workspaceFolders: () => vscode.workspace.workspaceFolders,
+  });
+  if (mods.isBob2Window(host)) {
+    out.appendLine("[start] Bob 2.0 detected — running the board loop in-process (no IPC child).");
+    startInProcessLoop(connector, mods, host);
+    return;
+  }
+  // Bob 1.x: the worker connects over the IPC pipe, which launch-bob-ipc.cmd opens via
+  // ROO_CODE_IPC_SOCKET_PATH. An absent var means Bob was started the wrong way; warn rather than burn
+  // the 30s connect watchdog. `force` is the "Start anyway" bypass.
+  starting = false;
+  if (!force && !process.env.ROO_CODE_IPC_SOCKET_PATH) {
+    warnLaunchEnvironment();
+    return;
+  }
+  spawnWorker(connector);
+}
+
+/**
+ * The worker flags identical on both transports (the 1.x child and the 2.0 in-process loop), built from
+ * settings. Each path appends its own transport-specific flags afterward (the child: --emit-json/--pipe/
+ * --surface + the 1.x-only classifier/followup toggles; the loop: none). One source of truth so the two
+ * arg-builders can't drift (they had drifted: --verify-judge spelled two ways, --max-continues reordered).
+ */
+function commonWorkerArgs(c: vscode.WorkspaceConfiguration): string[] {
+  const args = [
+    "--max-risk", c.get<string>("maxRisk") ?? "standard",
+    "--poll", String(c.get<number>("pollMs") ?? 3000),
+    "--timeout", String(c.get<number>("timeoutMs") ?? 300000),
+    "--assignee", c.get<string>("assignee") ?? "bob",
+    "--defer-idle", String(c.get<number>("deferIdleMs") ?? 60000),
+  ];
+  if (c.get<boolean>("deferWhileChatting") === false) args.push("--no-defer"); // only when EXPLICITLY off
+  const tag = c.get<string>("tag");
+  if (tag && tag.trim()) args.push("--tag", tag.trim());
+  const maxRetry = c.get<number>("maxRetryAttempts") ?? 0;
+  if (maxRetry > 0) args.push("--retry", String(maxRetry));
+  // Verify-and-continue: loop back to Bob to fix issues until the acceptance check passes.
+  if (c.get<boolean>("verifyAndContinue")) {
+    args.push("--verify-and-continue");
+    const verifyCmd = c.get<string>("verifyCommand");
+    if (verifyCmd && verifyCmd.trim()) args.push("--verify-command", verifyCmd.trim());
+    args.push("--max-continues", String(c.get<number>("maxContinues") ?? 3));
+    if (c.get<boolean>("verifyJudge")) args.push("--verify-judge");
+  }
+  if (c.get<boolean>("detectPlanStop")) args.push("--detect-plan-stop"); // auto-continue a plan-only completion
+  return args;
+}
+
+/** The Claude-backend flags shared by the command classifier, the followup answerer, and the LLM judge —
+ *  identical wherever a backend is reached; each path gates WHEN to include them (1.x: classifier/followups/
+ *  judge; 2.0: judge only). */
+function classifierBackendArgs(c: vscode.WorkspaceConfiguration): string[] {
+  const args = ["--classifier-backend", c.get<string>("classifierBackend") ?? "cli"];
+  const model = c.get<string>("classifierModel");
+  if (model && model.trim()) args.push("--classifier-model", model.trim());
+  const cliPath = c.get<string>("classifierCliPath");
+  if (cliPath && cliPath.trim()) args.push("--classifier-cli", cliPath.trim());
+  return args;
+}
+
+function spawnWorker(connector: string): void {
+  if (worker || starting || loop) return; // re-entrancy guard (detection already passed)
   const c = cfg();
   const workerJs = path.join(connector, "dist", "worker.js");
   if (!fs.existsSync(workerJs)) {
@@ -139,77 +233,28 @@ function startWorker(force = false): void {
     workerJs,
     "--emit-json",
     "--no-notify", // extension shows native notifications instead
-    "--max-risk", c.get<string>("maxRisk") ?? "standard",
-    "--poll", String(c.get<number>("pollMs") ?? 3000),
-    "--timeout", String(c.get<number>("timeoutMs") ?? 300000),
-    "--assignee", c.get<string>("assignee") ?? "bob",
+    ...commonWorkerArgs(c),
     // Default to this host Bob's own socket so the worker targets the instance it runs in, not
     // whichever Bob owns the shared global pipe; an explicit bobTasks.pipe still overrides.
     "--pipe", c.get<string>("pipe") || process.env.ROO_CODE_IPC_SOCKET_PATH || "\\\\.\\pipe\\pipe\\bob-ipc",
     "--surface", c.get<string>("dispatch.surface") ?? "sidebar",
-    "--defer-idle", String(c.get<number>("deferIdleMs") ?? 60000),
   ];
-  if (!c.get<boolean>("deferWhileChatting")) args.push("--no-defer");
-  const tag = c.get<string>("tag");
-  if (tag && tag.trim()) args.push("--tag", tag.trim());
-  // Reversible toggles. The command classifier (approve/deny gray-zone commands,
-  // needs the Bob button patch), the followup answerer (answer Bob's questions),
-  // and the LLM judge (verify task completion) are independent but share one Claude
-  // backend, so push the backend config when any is on. Off by default = manual
-  // approval / questions wait for you / no judge.
+  // 1.x-only gates (they need the IPC channel Bob 2.0 removed): the command classifier (approve/deny
+  // gray-zone commands, needs the Bob button patch) and the followup answerer (answer Bob's questions),
+  // off by default. classifier/followups/judge share one Claude backend, so push it when any is on.
   const wantClassifier = c.get<boolean>("commandClassifier");
   const wantFollowups = c.get<boolean>("answerFollowups");
-  const verifyAndContinue = c.get<boolean>("verifyAndContinue");
-  const wantJudge = verifyAndContinue && c.get<boolean>("verifyJudge");
+  const wantJudge = c.get<boolean>("verifyAndContinue") && c.get<boolean>("verifyJudge");
   if (wantClassifier) args.push("--command-classifier");
   if (wantFollowups) args.push("--answer-followups");
   if (c.get<boolean>("escalateAll")) args.push("--escalate-all");
   if (c.get<boolean>("reviewPlans")) args.push("--review-plans");
-  if (wantClassifier || wantFollowups || wantJudge) {
-    args.push("--classifier-backend", c.get<string>("classifierBackend") ?? "cli");
-    const model = c.get<string>("classifierModel");
-    if (model && model.trim()) args.push("--classifier-model", model.trim());
-    const cliPath = c.get<string>("classifierCliPath");
-    if (cliPath && cliPath.trim()) args.push("--classifier-cli", cliPath.trim());
-  }
-  // Verify-and-continue: loop back to Bob to fix issues until acceptance check passes
-  if (verifyAndContinue) {
-    args.push("--verify-and-continue");
-    const verifyCmd = c.get<string>("verifyCommand");
-    if (verifyCmd && verifyCmd.trim()) args.push("--verify-command", verifyCmd.trim());
-    if (c.get<boolean>("verifyJudge")) args.push("--verify-judge");
-    args.push("--max-continues", String(c.get<number>("maxContinues") ?? 3));
-  }
-  // Detect plan-only completions (no code written) and auto-continue
-  if (c.get<boolean>("detectPlanStop")) args.push("--detect-plan-stop");
-  // Auto-retry transient failures (timeout/abort)
-  const maxRetryAttempts = c.get<number>("maxRetryAttempts") ?? 0;
-  if (maxRetryAttempts > 0) args.push("--retry", String(maxRetryAttempts));
-  // Extend the safe command allowlist for advanced mode
-  const allowCommands = c.get<string>("allowCommands");
+  if (wantClassifier || wantFollowups || wantJudge) args.push(...classifierBackendArgs(c));
+  const allowCommands = c.get<string>("allowCommands"); // extend advanced mode's command allowlist (1.x-only)
   if (allowCommands && allowCommands.trim()) args.push("--allow-commands", allowCommands.trim());
 
   const env = { ...process.env };
-  // Board selection, in precedence: explicit bobTasks.dbPath > worktree-shared > per-project. Per-project
-  // (default) gives each project its own queue (matching the plugin MCP's ${CLAUDE_PROJECT_DIR} board);
-  // without it the worker falls back to db.ts's module-relative default = the connector's board.
-  const dbPath = c.get<string>("dbPath");
-  // Honor an INHERITED BOB_TASKS_WORKTREE_SHARED too, not just the setting: the env var is the one opt-in
-  // every consumer (plugin MCP, statusline, CLI) reads, so the worker must agree or it'd drain a different
-  // board than the plugin fills. If we pinned BOB_TASKS_DB below, it would (rule 1) override that flag.
-  const worktreeShared = c.get<boolean>("worktreeShared") || !!process.env.BOB_TASKS_WORKTREE_SHARED;
-  if (dbPath && dbPath.trim()) {
-    env.BOB_TASKS_DB = dbPath.trim();
-  } else if (worktreeShared) {
-    // Every linked worktree drains the MAIN worktree's queue. Don't pin BOB_TASKS_DB (it would override
-    // the resolver). Pin CLAUDE_PROJECT_DIR to THIS worktree (cwd) so the resolver's base is deterministic
-    // — a stale CLAUDE_PROJECT_DIR inherited from the host process must not redirect it to another tree.
-    env.BOB_TASKS_WORKTREE_SHARED = "1";
-    env.CLAUDE_PROJECT_DIR = cwd;
-    delete env.BOB_TASKS_DB; // drop any inherited pin so the resolver runs
-  } else {
-    env.BOB_TASKS_DB = path.join(cwd, "data", "tasks.db");
-  }
+  applyBoardEnv(cwd, env); // board selection (dbPath > worktree-shared > per-project) — see applyBoardEnv
 
   const node = c.get<string>("nodePath") || "node";
   out.appendLine(`[start] (cwd ${cwd}) ${node} ${args.join(" ")}`);
@@ -297,6 +342,152 @@ function startWorker(force = false): void {
   vscode.window.showInformationMessage("Bob Tasks worker started.");
 }
 
+/** The connector exports the in-process loop needs — dynamically imported from the install's compiled
+ *  dist (ESM), since the connector path is configurable and not bundled into the extension. */
+interface ConnectorModules {
+  createBob2Host: (deps: {
+    getExtension: (id: string) => unknown;
+    workspaceFolders: () => readonly { uri: { fsPath: string } }[] | undefined;
+  }) => unknown;
+  isBob2Window: (host: unknown) => boolean;
+  InProcessDriver: new (host: unknown, opts?: unknown) => unknown;
+  runDriverLoop: (cfg: unknown, shouldStop?: () => boolean) => Promise<void>;
+  parseOpts: (argv: string[]) => unknown;
+  /** Writes Bob's headless auto-approve into global settings.json; we inject a gated wrapper (the setting +
+   *  one-time notice live in the extension, keeping the driver vscode-free). Returns the path written. */
+  writeAutoApprove: (path?: string) => { path: string; created: boolean };
+}
+
+async function loadConnector(connector: string): Promise<ConnectorModules> {
+  // import() (not require) so Node loads the connector's ESM dist from a CJS extension; Node16 module
+  // mode preserves the dynamic import. file:// URL so Windows paths resolve.
+  const load = (f: string): Promise<Record<string, unknown>> =>
+    import(pathToFileURL(path.join(connector, "dist", f)).href) as Promise<Record<string, unknown>>;
+  const [host, driver, loopMod, workerMod, configMod] = await Promise.all([
+    load("bob2-host.js"),
+    load("bob2-driver.js"),
+    load("driver-loop.js"),
+    load("worker.js"),
+    load("bob2-config.js"),
+  ]);
+  return {
+    createBob2Host: host.createBob2Host as ConnectorModules["createBob2Host"],
+    isBob2Window: driver.isBob2Window as ConnectorModules["isBob2Window"],
+    InProcessDriver: driver.InProcessDriver as ConnectorModules["InProcessDriver"],
+    runDriverLoop: loopMod.runDriverLoop as ConnectorModules["runDriverLoop"],
+    parseOpts: workerMod.parseOpts as ConnectorModules["parseOpts"],
+    writeAutoApprove: configMod.writeAutoApprove as ConnectorModules["writeAutoApprove"],
+  };
+}
+
+/**
+ * The auto-approve write the driver runs on connect(), gated + surfaced per Bob's design review (option e):
+ * the `bobTasks.autoApproveGlobal` setting can turn it off (Bob then prompts), and the FIRST write shows a
+ * one-time notice — because it's a user-global, persistent change that disables Bob's command security
+ * across every window/project. Injected via the driver's `writeApproval` seam so the driver stays vscode-free.
+ */
+function makeWriteApproval(writeAutoApprove: ConnectorModules["writeAutoApprove"]): () => void {
+  return () => {
+    if (cfg().get<boolean>("autoApproveGlobal") === false) {
+      out.appendLine("[approve] autoApproveGlobal is off — skipping the global auto-approve write (Bob will prompt).");
+      return;
+    }
+    const { path: written } = writeAutoApprove();
+    out.appendLine(`[approve] wrote headless auto-approve to ${written}`);
+    if (memento && !memento.get<boolean>(AUTO_APPROVE_NOTICE_KEY)) {
+      void memento.update(AUTO_APPROVE_NOTICE_KEY, true);
+      void vscode.window
+        .showInformationMessage(
+          `Bob Tasks enabled headless auto-approve in ${written} — this disables Bob's command security ` +
+            `globally (every window/project) so queued tasks run unattended. Turn it off with the ` +
+            `'bobTasks.autoApproveGlobal' setting.`,
+          "Open Setting",
+        )
+        .then((pick) => {
+          if (pick === "Open Setting")
+            void vscode.commands.executeCommand("workbench.action.openSettings", "bobTasks.autoApproveGlobal");
+        });
+    }
+  };
+}
+
+/**
+ * Point the board resolver at the right DB by setting env vars on `target` — a fresh env copy for the 1.x
+ * child, or process.env for the in-process 2.0 loop (so the resolver, which reads process.env, sees them).
+ * Precedence: explicit dbPath > worktree-shared (drain the main worktree's board) > per-project data/tasks.db.
+ * Per-project (default) matches the plugin MCP's ${CLAUDE_PROJECT_DIR} board; absent any pin the resolver
+ * falls back to db.ts's module-relative default = the connector's board. For worktree-shared, pin
+ * CLAUDE_PROJECT_DIR to THIS worktree so the resolver's base is deterministic and DROP any inherited
+ * BOB_TASKS_DB (which would override the resolver). The flag is honored when INHERITED from the env too, since
+ * it's the one opt-in every consumer (plugin MCP, statusline, CLI) reads — the worker must agree with them.
+ */
+function applyBoardEnv(cwd: string, target: Record<string, string | undefined>): void {
+  const c = cfg();
+  const dbPath = c.get<string>("dbPath");
+  const worktreeShared = c.get<boolean>("worktreeShared") || !!process.env.BOB_TASKS_WORKTREE_SHARED;
+  if (dbPath && dbPath.trim()) {
+    target.BOB_TASKS_DB = dbPath.trim();
+  } else if (worktreeShared) {
+    target.BOB_TASKS_WORKTREE_SHARED = "1";
+    target.CLAUDE_PROJECT_DIR = cwd;
+    delete target.BOB_TASKS_DB; // drop any inherited pin so the resolver runs
+  } else {
+    target.BOB_TASKS_DB = path.join(cwd, "data", "tasks.db");
+  }
+}
+
+/**
+ * Start the Bob 2.0 board loop IN this extension host. No child process, no pipe: the loop calls
+ * exports.startTask and watches ~/.bob/db/bob.db. The genuinely IPC-bound 1.x flags (classifier/followups/
+ * pipe/surface) don't apply — 2.0 auto-approves via config and exposes no reply channel. Defer-while-
+ * chatting and verify-and-continue (command-verify + plan-stop + the LLM judge) DO apply, both re-derived
+ * from a bob.db poll.
+ */
+function startInProcessLoop(connector: string, mods: ConnectorModules, host: unknown): void {
+  const c = cfg();
+  const cwd = projectRoot() ?? connector; // git evidence / checkpoint run here (the open project)
+  applyBoardEnv(cwd, process.env);
+  // Only the shared flags; the 2.0 path adds none of the 1.x-only ones (pipe/surface/classifier/followups).
+  const args = [...commonWorkerArgs(c)];
+  // The judge needs a Claude backend (cli default, or api with ANTHROPIC_API_KEY in the host env).
+  if (c.get<boolean>("verifyAndContinue") && c.get<boolean>("verifyJudge")) args.push(...classifierBackendArgs(c));
+  const opts = mods.parseOpts(args);
+  const driver = new mods.InProcessDriver(host, { writeApproval: makeWriteApproval(mods.writeAutoApprove) });
+
+  let stopped = false;
+  loop = { stop: () => void (stopped = true) };
+  starting = false;
+  connected = false;
+  setStatus("running");
+  out.appendLine(`[start] (cwd ${cwd}) in-process 2.0 loop — ${args.join(" ")}`);
+
+  void mods
+    .runDriverLoop(
+      {
+        driver,
+        opts,
+        cwd,
+        log: (m: string) => out.appendLine(m),
+        emit: (type: string, data: Record<string, unknown>) => handleEventObj({ type, ...data }),
+      },
+      () => stopped,
+    )
+    .then(
+      () => {
+        loop = null;
+        setStatus("stopped");
+        out.appendLine("[exit] in-process loop ended");
+      },
+      (err: unknown) => {
+        loop = null;
+        setStatus("stopped");
+        const msg = (err as Error).message;
+        out.appendLine(`[error] in-process loop: ${msg}`);
+        vscode.window.showErrorMessage(`Bob Tasks loop error: ${msg}`);
+      },
+    );
+}
+
 /**
  * Warn that Bob was started without launch-bob-ipc.cmd, and offer a fix or a one-shot bypass.
  * Fires only on an actual start attempt — no persisted suppression that could later hide a
@@ -334,6 +525,14 @@ function stopWorker(): void {
     connectTimer = null;
   }
   starting = false;
+  // Bob 2.0 in-process loop: signal it to stop. It finishes the current dispatch (if any) then resolves,
+  // which nulls `loop`. Reflect intent in the UI now.
+  if (loop) {
+    out.appendLine("[stop] stopping in-process loop");
+    loop.stop();
+    setStatus("stopped");
+    return;
+  }
   if (!worker) return;
   out.appendLine("[stop] terminating worker");
   // Leave `worker = null` to the exit handler so a quick stop->start can't race
@@ -343,7 +542,7 @@ function stopWorker(): void {
 }
 
 function toggleWorker(): void {
-  if (worker) stopWorker();
+  if (worker || loop) stopWorker();
   else startWorker();
 }
 
@@ -354,7 +553,10 @@ function toggleWorker(): void {
  */
 function handleUri(uri: vscode.Uri): void {
   const action = uri.path.replace(/^\/+/, "").toLowerCase();
-  out.appendLine(`[uri] ${uri.toString()} → ${action || "(none)"}`);
+  // Sanitize before logging: a crafted URI with embedded newlines/CRs could inject fake log lines into
+  // the output channel, misleading diagnostics (CWE-117). Replace control chars with a visible placeholder.
+  const safeUri = uri.toString().replace(/[\r\n\x00-\x1f\x7f]/g, "·");
+  out.appendLine(`[uri] ${safeUri} → ${action || "(none)"}`);
   switch (action) {
     case "start":
       startWorker();
@@ -379,6 +581,12 @@ function handleEvent(json: string): void {
   } catch {
     return;
   }
+  handleEventObj(ev);
+}
+
+/** The parsed-event handler, shared by the 1.x child's @@WORKER stream and the 2.0 in-process loop's
+ *  emit(). Both speak the same event vocabulary (connected/taskStart/taskDone/taskFail/idle/stopped/error). */
+function handleEventObj(ev: any): void {
   switch (ev.type) {
     case "connected":
       connected = true; // the exit handler uses this to tell a clean stop from a failed start

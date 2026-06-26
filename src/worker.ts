@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import "./suppress-warnings.js";
 import { randomUUID } from "node:crypto";
+import { pathToFileURL } from "node:url";
 import * as repo from "./db.js";
 import {
   resolveMode,
@@ -11,7 +12,6 @@ import {
   classifierReachable,
   policyHasGrayZone,
   producesReviewFindings,
-  judgeAppliesToMode,
   isReadOnlyMode,
   type ModeProfile,
   type Risk,
@@ -26,19 +26,12 @@ import { BobClient, resolvePipe, type DispatchResult } from "./bob-ipc.js";
 import { workspaceVerdict, workspaceMismatchQuestion, type WorkspaceMismatch } from "./workspace-guard.js";
 import { normalizeWorkspacePath } from "./pipe-name.js";
 import { formatReviewFindings, parseReviewFindings } from "./review-findings.js";
-import { createPollLoop, defaultVerify, defaultCaptureSnapshot, type VerifyResult } from "./bob-polls.js";
+import { createPollLoop, defaultCaptureSnapshot } from "./bob-polls.js";
 import { ExternalActivity } from "./defer.js";
 import { PollStatusLatch } from "./worker-status.js";
 import { notify } from "./notify.js";
 import { shouldRetry, executeRetry } from "./retry-policy.js";
-import {
-  judgeCompletion,
-  captureGitDiff,
-  captureGitBaseline,
-  captureChangedFiles,
-  type JudgeContext,
-  type GitBaseline,
-} from "./judge.js";
+import { buildJudgeVerifier, captureGitBaseline, captureChangedFiles, type GitBaseline } from "./judge.js";
 import { captureCheckpoint, preserveWipToBranch, releaseCheckpoint } from "./checkpoint.js";
 import { computeCeiling } from "./budget.js";
 import type { Task } from "./types.js";
@@ -127,7 +120,7 @@ function buttonPatchPresent(): boolean | null {
  * treats this as a failure and auto-continues, asking Bob to implement the plan.
  */
 
-interface Opts {
+export interface Opts {
   once: boolean;
   newTab: boolean;
   dryRun: boolean;
@@ -190,7 +183,7 @@ const DEFAULT_BUDGET_FLAT_CAP = 100_000;
 /** Floor for the estimate-derived ceiling, so a low estimate can't abort real work early. */
 const BUDGET_CEILING_FLOOR = 50_000;
 
-function parseOpts(argv: string[]): Opts {
+export function parseOpts(argv: string[]): Opts {
   const val = (name: string): string | undefined => {
     const i = argv.indexOf(name);
     return i !== -1 ? argv[i + 1] : undefined;
@@ -305,7 +298,7 @@ const TERMINAL_CAUSE: Record<DispatchResult["status"], string> = {
  * and whose dependencies are all satisfied.
  * Returns the task plus counts of tasks skipped due to risk gate or blocked dependencies.
  */
-function pickEligible(opts: Opts): { task: Task | null; gated: number; blocked: number } {
+export function pickEligible(opts: Opts): { task: Task | null; gated: number; blocked: number } {
   const max = RISK_RANK[opts.maxRisk];
   const pending = repo.listTasks({ status: "pending", tag: opts.tag });
   let gated = 0;
@@ -699,66 +692,28 @@ function buildPollLoop(
   evidenceBaseline: GitBaseline,
   apiKey: string | undefined,
 ): (initial: DispatchResult, baseline?: string) => Promise<DispatchResult> {
-  // Construct a composite verifier that combines command verification with LLM judge.
-  // When --verify-judge is on:
-  // - If verifyCommand is set, it runs FIRST and must pass, then judge provides additional gate
-  // - If NO command is set, judge is the sole acceptance signal
-  // When --verify-judge is off, the default verifier handles command execution (or blind-pass).
-  //
-  // The judge is diff-based, so it only applies to modes that write code. Read-only
-  // and review-producing modes (ask/plan/review/devsecops) return prose/findings with
-  // no diff; judging them against an empty diff would wrongly FAIL them and loop until
-  // --max-continues, parking a completed task as blocked. For those modes we fall back
-  // to the default verifier (runs --verify-command if set, else blind-passes).
-  const judgeOn = opts.verifyJudge && judgeAppliesToMode(mode);
-  if (opts.verifyJudge && !judgeOn) {
-    console.log(`  [judge] skipped for {${mode}} (no code diff expected in this mode)`);
-  }
-  const compositeVerifier = judgeOn
-    ? async (result: string, command: string | undefined, cwd: string): Promise<VerifyResult> => {
-        // Run command verifier first if a command is set (reuse defaultVerify logic)
-        if (command) {
-          const cmdResult = await defaultVerify(result, command, cwd);
-          if (!cmdResult.passed) {
-            // Command failed: short-circuit, don't run judge
-            return cmdResult;
-          }
-          // Command passed: run judge as additional gate
-        }
-
-        // Run the LLM judge (either as sole verifier or additional gate after command),
-        // scoping the diff to this task's changes via the pre-dispatch baseline.
-        const gitDiff = await captureGitDiff(cwd, 4000, evidenceBaseline.ref, evidenceBaseline.untracked);
-        const ctx: JudgeContext = {
-          taskPrompt: buildPrompt(task),
-          completionResult: result,
-          gitDiff,
-        };
-        const verdict = await judgeCompletion(ctx, {
+  // The composite command-then-judge verifier (shared with the 2.0 loop), or undefined when --verify-judge
+  // is off OR the judge doesn't apply to this mode — then createPollLoop falls back to command-only verify.
+  const verify = opts.verifyJudge
+    ? buildJudgeVerifier({
+        mode,
+        taskPrompt: buildPrompt(task),
+        evidenceBaseline,
+        judge: {
           backend: opts.classifierBackend,
           model: opts.classifierModel,
           apiKey,
           cliPath: opts.classifierCli,
           timeoutMs: 30_000,
-        });
-
-        // Fail-open: a judge that couldn't reach the LLM must never block a task.
-        if (verdict.error) {
-          console.log(`  [judge] ${verdict.reason} — failing open (treating as passed)`);
-          repo.addNote(task.id, `Judge infrastructure failure: ${verdict.reason}`, "judge");
-          return { passed: true, reason: verdict.reason };
-        }
-
-        // With a command, it already passed (short-circuited above on failure), so the
-        // verdict is the deciding signal; without one the judge is the sole gate.
-        if (command) {
-          return verdict.pass
-            ? { passed: true, reason: "command and judge both passed" }
-            : { passed: false, reason: `command passed but judge failed: ${verdict.reason}` };
-        }
-        return { passed: verdict.pass, reason: verdict.reason };
-      }
+        },
+        taskId: task.id,
+        addNote: repo.addNote,
+        log: (m) => console.log(m),
+      })
     : undefined;
+  if (opts.verifyJudge && !verify) {
+    console.log(`  [judge] skipped for {${mode}} (no code diff expected in this mode)`);
+  }
 
   // Verify-and-continue loop: on a failed verify it re-dispatches the FULL task plus
   // the failure (via doDispatch) so Bob has the context to fix it.
@@ -773,7 +728,7 @@ function buildPollLoop(
     log: (m) => console.log(m),
     dispatch: doDispatch,
     detectPlanStop: opts.detectPlanStop,
-    verify: compositeVerifier,
+    verify,
   });
 }
 
@@ -1009,7 +964,7 @@ async function finalizeDispatch(
   }
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const opts = parseOpts(process.argv.slice(2));
   // A stray unhandled rejection must not crash a long-running drain — log it and keep going.
   process.on("unhandledRejection", (reason) => {
@@ -1345,7 +1300,11 @@ async function main(): Promise<void> {
   process.exit(0);
 }
 
-main().catch((err) => {
-  console.error("bob-worker fatal:", err);
-  process.exit(1);
-});
+// Auto-run only as a CLI. Importing worker.ts — to reuse parseOpts / pickEligible / main from the 2.0
+// in-process driver (or a test) — must have no side effects. Matches cli.ts's is-main guard.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error("bob-worker fatal:", err);
+    process.exit(1);
+  });
+}
