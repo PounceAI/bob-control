@@ -13,6 +13,7 @@ import {
   taskError,
   hasRun,
   parseCosts,
+  firstMessageMatches,
   bob2DbPath,
   bob2DbExists,
   type Bob2TaskRow,
@@ -28,7 +29,7 @@ function makeStore(): { db: DatabaseSync; store: Bob2TaskStore } {
   const { DatabaseSync } = requireModule("node:sqlite") as typeof import("node:sqlite");
   const db = new DatabaseSync(":memory:");
   db.exec(
-    "CREATE TABLE tasks (id TEXT PRIMARY KEY, parent_id TEXT, status TEXT, directory TEXT, created_at INTEGER, updated_at INTEGER, costs TEXT, last_error TEXT)",
+    "CREATE TABLE tasks (id TEXT PRIMARY KEY, parent_id TEXT, status TEXT, directory TEXT, created_at INTEGER, updated_at INTEGER, costs TEXT, last_error TEXT, first_message TEXT)",
   );
   db.exec("CREATE TABLE messages (id TEXT PRIMARY KEY, task_id TEXT, role TEXT, data TEXT, created_at INTEGER)");
   return { db, store: new Bob2TaskStore(db) };
@@ -54,10 +55,11 @@ function insert(
     created_at: number;
     updated_at?: number;
     last_error?: string | null;
+    first_message?: string;
   },
 ): void {
   db.prepare(
-    "INSERT INTO tasks (id, parent_id, status, directory, created_at, updated_at, costs, last_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO tasks (id, parent_id, status, directory, created_at, updated_at, costs, last_error, first_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
   ).run(
     row.id,
     row.parent ?? null,
@@ -67,6 +69,7 @@ function insert(
     row.updated_at ?? row.created_at,
     null,
     row.last_error ?? null,
+    row.first_message ?? null,
   );
 }
 
@@ -137,6 +140,36 @@ test("newRootSince returns null when no new root has appeared yet", () => {
   insert(db, { id: "old", status: "active", created_at: 200 });
   const snap = store.snapshotRoots();
   assert.equal(store.newRootSince(snap.ids, snap.sinceMs), null);
+});
+
+// ── multi-window correlation (Tier 3): two Bob windows share the one global bob.db ──────────────────
+
+test("newRootSince: a lone new root is ours even if content doesn't match (startTask already created it)", () => {
+  const { db, store } = makeStore();
+  insert(db, { id: "old", status: "active", created_at: 100 });
+  const snap = store.snapshotRoots();
+  insert(db, { id: "ours", status: "active", created_at: 200, first_message: "Task #5: do X" });
+  assert.equal(store.newRootSince(snap.ids, snap.sinceMs, "Task #5: do X")?.id, "ours");
+  assert.equal(store.newRootSince(snap.ids, snap.sinceMs, "totally different")?.id, "ours"); // lone → ours
+});
+
+test("newRootSince: with a concurrent window's competing new root, content picks OURS — not newest", () => {
+  const { db, store } = makeStore();
+  insert(db, { id: "old", status: "active", created_at: 100 });
+  const snap = store.snapshotRoots();
+  insert(db, { id: "ours", status: "active", created_at: 250, first_message: "Task #5: our job" });
+  insert(db, { id: "theirs", status: "active", created_at: 300, first_message: "Task #9: their job" }); // newer
+  assert.equal(store.newRootSince(snap.ids, snap.sinceMs, "Task #5: our job")?.id, "ours"); // content wins
+  assert.equal(store.newRootSince(snap.ids, snap.sinceMs)?.id, "theirs"); // legacy newest-wins = the old race
+  assert.equal(store.newRootSince(snap.ids, snap.sinceMs, "no match yet"), null); // 2+ & no match → keep polling
+});
+
+test("firstMessageMatches tolerates reformatting (prefix/containment), rejects mismatch/empty", () => {
+  assert.ok(firstMessageMatches("Task #5: build the widget", "Task #5: build the widget")); // exact
+  assert.ok(firstMessageMatches("Task #5:  build the   widget", "Task #5: build the widget")); // whitespace
+  assert.ok(firstMessageMatches("[mask] Task #5: build the widget now", "Task #5: build the widget")); // contained
+  assert.ok(!firstMessageMatches("Task #9: something else", "Task #5: build the widget"));
+  assert.ok(!firstMessageMatches(null, "x") && !firstMessageMatches("x", ""));
 });
 
 // ── completion watch (live active→running→active lifecycle) ───────────────────────────────────────

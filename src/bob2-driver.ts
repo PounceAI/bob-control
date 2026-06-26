@@ -212,7 +212,7 @@ export class InProcessDriver implements BobDriver {
           return fail(`task store (post-start): ${(e as Error).message}`);
         }
       }
-      const id = store ? await this.correlate(store, snapshot) : null;
+      const id = store ? await this.correlate(store, snapshot, opts.text) : null;
       if (!store || id === null) {
         // startTask returned but no new root row matched within the window: a hard wiring failure
         // (db never materialized, or directory/timing assumptions wrong) — surface it, don't fake idle.
@@ -244,15 +244,17 @@ export class InProcessDriver implements BobDriver {
 
   /**
    * Find our task's row after startTask (which returns none): poll for the new root that wasn't in the
-   * pre-dispatch snapshot. Returns its id, or null if nothing materializes within correlateTimeoutMs.
+   * pre-dispatch snapshot, matched to our `content` so a concurrent dispatch from another Bob window on the
+   * shared db can't be mistaken for ours. Returns its id, or null if nothing matches within correlateTimeoutMs.
    */
   private async correlate(
     store: Bob2TaskStore,
     snapshot: { ids: Set<string>; sinceMs: number },
+    content: string,
   ): Promise<string | null> {
     const deadline = Date.now() + this.correlateTimeoutMs;
     for (;;) {
-      const row = store.newRootSince(snapshot.ids, snapshot.sinceMs);
+      const row = store.newRootSince(snapshot.ids, snapshot.sinceMs, content);
       if (row) return row.id;
       if (Date.now() >= deadline) return null;
       await sleep(this.pollMs);

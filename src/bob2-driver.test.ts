@@ -26,7 +26,7 @@ function makeStore() {
   const { DatabaseSync } = requireModule("node:sqlite") as typeof import("node:sqlite");
   const db = new DatabaseSync(":memory:");
   db.exec(
-    "CREATE TABLE tasks (id TEXT PRIMARY KEY, parent_id TEXT, status TEXT, directory TEXT, created_at INTEGER, updated_at INTEGER, costs TEXT, last_error TEXT)",
+    "CREATE TABLE tasks (id TEXT PRIMARY KEY, parent_id TEXT, status TEXT, directory TEXT, created_at INTEGER, updated_at INTEGER, costs TEXT, last_error TEXT, first_message TEXT)",
   );
   db.exec("CREATE TABLE messages (id TEXT PRIMARY KEY, task_id TEXT, role TEXT, data TEXT, created_at INTEGER)");
   const store = new Bob2TaskStore(db);
@@ -35,12 +35,12 @@ function makeStore() {
   let clock = 0;
   let n = 0;
   // A new root, created but not yet started (updated_at == created_at).
-  const seedRoot = (status: string): string => {
+  const seedRoot = (status: string, firstMessage = ""): string => {
     const id = `task-${++n}`;
     const ca = base + ++clock * 1000;
     db.prepare(
-      "INSERT INTO tasks (id, parent_id, status, directory, created_at, updated_at, costs, last_error) VALUES (?, NULL, ?, ?, ?, ?, NULL, NULL)",
-    ).run(id, status, DIR, ca, ca);
+      "INSERT INTO tasks (id, parent_id, status, directory, created_at, updated_at, costs, last_error, first_message) VALUES (?, NULL, ?, ?, ?, ?, NULL, NULL, ?)",
+    ).run(id, status, DIR, ca, ca, firstMessage);
     return id;
   };
   // Bob touching the row mid/end-of-turn: advances updated_at to "now" (so it reads as run, then quiet).
@@ -245,6 +245,24 @@ test("dispatch ignores a pre-existing root and a subtask, picking our new root",
   setTimeout(() => bump(ours, "active"), 15);
   const res = await driver.dispatch({ text: "do it" });
   assert.equal(res.taskId, ours);
+  assert.equal(res.status, "completed");
+});
+
+test("dispatch correlates OUR task by content when a concurrent Bob window adds a competing newer root", async () => {
+  const { store, seedRoot, bump } = makeStore();
+  let ours = "";
+  const driver = new InProcessDriver(
+    makeHost({
+      startTask: (o) => {
+        ours = seedRoot("running", o.content as string); // our root: first_message == the content we dispatched
+        seedRoot("running", "another window's task"); // a concurrent dispatch on the shared db — NEWER created_at
+      },
+    }),
+    { openStore: () => store, ...fast },
+  );
+  setTimeout(() => bump(ours, "active"), 15);
+  const res = await driver.dispatch({ text: "build the widget", mode: "code" });
+  assert.equal(res.taskId, ours); // matched by content, not grabbed by recency (the stranger is newer)
   assert.equal(res.status, "completed");
 });
 

@@ -110,6 +110,17 @@ export function parseCosts(raw: string | null): Bob2Costs | null {
   }
 }
 
+/** Does a row's `first_message` look like the prompt we dispatched? Bob stores our content verbatim, so
+ *  this tells OUR new root apart from a concurrent dispatch by ANOTHER Bob window on the shared global db.
+ *  Whitespace-normalized prefix/containment, tolerant of minor reformatting (e.g. a mask prefix). */
+export function firstMessageMatches(firstMessage: string | null | undefined, content: string): boolean {
+  if (!firstMessage) return false;
+  const a = firstMessage.replace(/\s+/g, " ").trim();
+  const b = content.replace(/\s+/g, " ").trim();
+  if (!b) return false;
+  return a === b || a.startsWith(b) || b.startsWith(a) || a.includes(b.slice(0, 120));
+}
+
 /** Flatten a message `content` (string, or an array of text blocks) to plain text; null when empty. */
 function extractText(content: unknown): string | null {
   if (typeof content === "string") return content.trim() || null;
@@ -172,14 +183,20 @@ export class Bob2TaskStore {
   }
 
   /**
-   * The newest root task created since the snapshot whose id wasn't already there — i.e. OUR dispatch.
-   * Subtasks (parent_id set) are excluded so we watch the root turn. id is a uuid, so created_at orders.
+   * OUR dispatched root among the new roots created since the snapshot (subtasks excluded; created_at
+   * orders). ONE new root ⇒ ours — startTask resolves only after Bob creates the row, so a lone new root
+   * can only be ours. TWO+ new roots ⇒ a concurrent dispatch from ANOTHER Bob window shares this global
+   * db, so pick the one whose `first_message` matches our `content`; null if none match yet, so the caller
+   * keeps polling rather than grabbing a stranger's task. With no `content` (legacy) it is newest-wins.
    */
-  newRootSince(seen: Set<string>, sinceMs: number): Bob2TaskRow | null {
+  newRootSince(seen: Set<string>, sinceMs: number, content?: string): Bob2TaskRow | null {
     const rows = this.q(
-      `SELECT ${COLS} FROM tasks WHERE parent_id IS NULL AND created_at >= ? ORDER BY created_at DESC LIMIT 16`,
-    ).all(sinceMs) as unknown as Bob2TaskRow[];
-    return rows.find((r) => !seen.has(r.id)) ?? null;
+      `SELECT ${COLS}, first_message FROM tasks WHERE parent_id IS NULL AND created_at >= ? ORDER BY created_at DESC LIMIT 16`,
+    ).all(sinceMs) as unknown as (Bob2TaskRow & { first_message: string | null })[];
+    const fresh = rows.filter((r) => !seen.has(r.id));
+    if (fresh.length <= 1) return fresh[0] ?? null; // no concurrency — the lone new root is ours
+    if (content) return fresh.find((r) => firstMessageMatches(r.first_message, content)) ?? null;
+    return fresh[0]; // legacy callers with no content to match on: newest-wins
   }
 
   read(id: string): Bob2TaskRow | null {
