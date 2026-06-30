@@ -16,6 +16,8 @@ import {
   firstMessageMatches,
   bob2DbPath,
   bob2DbExists,
+  DEFAULT_QUIET_MS,
+  DEFAULT_POLL_MS,
   type Bob2TaskRow,
 } from "./bob2-taskstore.js";
 
@@ -330,6 +332,19 @@ test("awaitTurnSettled settles immediately on a real last_error", async () => {
   const res = await awaitTurnSettled(store, "e", { pollMs: 5, quietMs: 5_000, timeoutMs: 2_000 });
   assert.equal(res.settled, true);
   assert.equal(res.row?.last_error, "kaboom");
+});
+
+test("completion tuning: defaults are in the measured range and a quiet-but-recent row is NOT yet settled", async () => {
+  // Guards the 2026-06-30 measurement (board went terminal ~9.3s after visible completion, ~8s of it the
+  // quiet debounce; result text lands within ~0.3s). Keep quiet well under the old 8s but above that tail.
+  assert.ok(DEFAULT_QUIET_MS >= 1000 && DEFAULT_QUIET_MS <= 4000, `DEFAULT_QUIET_MS ${DEFAULT_QUIET_MS} out of range`);
+  assert.ok(DEFAULT_POLL_MS >= 100 && DEFAULT_POLL_MS <= 1000, `DEFAULT_POLL_MS ${DEFAULT_POLL_MS} out of range`);
+  const { db, store } = makeStore();
+  // Left 'running', went quiet only ~40ms ago. With quietMs omitted (→ DEFAULT_QUIET_MS, > 300ms), a watch
+  // bounded to 300ms must NOT settle — proving the default quiet window is applied, not an instant settle.
+  insert(db, { id: "d", status: "active", created_at: Date.now() - 1_000, updated_at: Date.now() - 40 });
+  const res = await awaitTurnSettled(store, "d", { pollMs: 5, timeoutMs: 300 });
+  assert.equal(res.settled, false);
 });
 
 test("awaitTurnSettled records the max inter-bump gap while running (watchdog telemetry)", async () => {

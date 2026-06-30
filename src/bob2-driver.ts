@@ -7,6 +7,8 @@ import {
   parseCosts,
   sleep,
   taskError,
+  DEFAULT_QUIET_MS,
+  DEFAULT_POLL_MS,
   type Bob2TaskRow,
 } from "./bob2-taskstore.js";
 import { writeAutoApprove } from "./bob2-config.js";
@@ -133,8 +135,8 @@ export class InProcessDriver implements BobDriver {
     private readonly host: Bob2Host,
     private readonly opts: InProcessDriverOptions = {},
   ) {
-    this.pollMs = opts.pollMs ?? 1000;
-    this.quietMs = opts.quietMs ?? 8000;
+    this.pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
+    this.quietMs = opts.quietMs ?? DEFAULT_QUIET_MS;
     this.correlateTimeoutMs = opts.correlateTimeoutMs ?? 15_000;
   }
 
