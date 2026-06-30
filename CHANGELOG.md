@@ -3,6 +3,31 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
+## [2.0.2] — 2026-06-30 — Faster completion + Bob-skill correctness
+
+### Fixed
+
+- **The board settles ~3× faster after Bob finishes.** With no "done" event on 2.0, the completion watch
+  infers a finished turn by waiting for the root to leave `running` and stay quiet — a fixed 8s window, so
+  `await_task` (and the board) lagged Bob's visible completion by ~9s on *every* task. Measured against the
+  live loop: the lag is flat regardless of turn length, and the result text lands within ~0.3s of the status
+  flip. The quiet window is cut to 2s (poll 1s→0.4s), dropping the post-completion lag to ~3s with a ~6×
+  margin over the result-write tail.
+- **Bob review/security skills hand over a scope, not an embedded diff.** `bob-review` / `bob-security` (and
+  the `/bob-review-diff` command) pasted the whole diff into the task on a false "review mode can't run git"
+  premise — but `review` / `refactor` / `devsecops` modes carry the `read` + `command` groups and run git
+  themselves. They now pass a git range or file list, which also scopes cleanly in a shared working tree
+  (and stops a large diff overrunning the task's own size bound).
+- **Dispatch tasks pin to the live drainer.** The skills hardcoded categorization tags; a tag-pinned drainer
+  wouldn't pull them, so the task sat `pending` and the skill dead-ended at "queued." Each skill now adds the
+  live drainer's pin tag (when it serves this checkout) so the task actually drains.
+
+### Internal
+
+- Completion-watch tuning single-sourced as `DEFAULT_QUIET_MS` / `DEFAULT_POLL_MS` in `bob2-taskstore`
+  (imported by the in-process driver), where it was duplicated.
+- PR & commit message convention added to `CLAUDE.md`.
+
 ## [2.0.1] — 2026-06-26 — Bob 2.0 liveness + routing single-source
 
 Makes the board honest about the Bob 2.0 in-process loop, recovers tasks it strands on a crash, and
