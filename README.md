@@ -764,5 +764,6 @@ src/
   smoke.ts        self-test
 tools/
   patch-bob-buttons.mjs   expose Bob's approve/reject buttons + GetReviewFindings over IPC
+  measure-completion-latency.mjs  read-only probe: Bob's completion -> board settling (await_task lag)
 extension/                VS Code / Bob "Bob Tasks" extension — packages the worker (see extension/README.md)
 ```
