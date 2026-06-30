@@ -29,6 +29,14 @@ const requireModule = createRequire(import.meta.url);
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+// Completion-watch tuning, single-sourced (the in-process driver imports these). Measured 2026-06-30
+// against the live 2.0 loop: the board went terminal a flat ~9.3s after Bob's visible completion (the
+// root leaving 'running'), independent of turn length — ~8s of it this quiet debounce, ~1s detection.
+// Bob writes the result text within ~0.3s of the status flip, so a 2s quiet keeps a ~6x margin over
+// that tail while cutting most of the dead time; a 400ms poll tightens detection without loading the db.
+export const DEFAULT_QUIET_MS = 2000;
+export const DEFAULT_POLL_MS = 400;
+
 export interface Bob2TaskRow {
   id: string;
   parent_id: string | null;
@@ -296,9 +304,9 @@ export async function awaitTurnSettled(
   id: string,
   opts: { pollMs?: number; timeoutMs?: number; quietMs?: number; isSettled?: (row: Bob2TaskRow) => boolean } = {},
 ): Promise<{ settled: boolean; row: Bob2TaskRow | null; maxGapMs: number }> {
-  const pollMs = opts.pollMs ?? 1000;
+  const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
   const timeoutMs = opts.timeoutMs ?? 300_000;
-  const quietMs = opts.quietMs ?? 8000;
+  const quietMs = opts.quietMs ?? DEFAULT_QUIET_MS;
   const deadline = Date.now() + timeoutMs;
   // Stall-watchdog telemetry: the largest gap (ms) between consecutive `updated_at` bumps that ended a
   // running stretch — i.e. how long Bob can be silent yet still working. prevRunning qualifies the gap by
