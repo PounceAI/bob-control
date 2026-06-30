@@ -25,28 +25,34 @@ Do this:
    unsure, fall back to `list_tasks {status: 'pending'}`. `worker_draining` is a step-1 snapshot —
    keep it for step 4 rather than re-calling `board_status`.
 
-2. **Decide the scope.** Either a **diff** (recent changes) or a **target area** (paths /
-   subsystem). For a diff, capture it the same way as a review: `git diff HEAD` (+ untracked via
-   `--intent-to-add`, then `git reset`), or an explicit `git diff <range>`; bound it to
-   ~12,000 chars and note any truncation.
+2. **Decide the scope — let Bob gather it itself.** `devsecops` mode has the `read` + `command`
+   groups (it can run `git diff` / scans itself), so hand it the *scope*, don't embed a big diff.
+   Either a **diff** (recent changes) — name the files in scope and tell Bob to review them via
+   `git diff HEAD -- <files>` (or an explicit `git diff <range>`) — or a **target area** (paths /
+   subsystem). Only embed a fenced ```diff (bounded to ~12,000 chars, note truncation) when
+   there's no git scope to point at, e.g. a diff pasted into the request.
 
 3. **Shape the security task** with `create_task`:
    - **mode**: `devsecops`.
    - **title**: specific, e.g. `Security review: auth + input handling in src/api`.
-   - **tags**: `['security', 'devsecops']` plus a domain tag when obvious.
+   - **tags**: `['security']` (+ a domain tag when obvious). If step-1 `worker_draining` shows a
+     tag-pinned drainer serving this checkout, **add its pin tag too** — a worker only pulls tasks
+     whose tags include its pin, else the task sits `pending`.
    - **priority**: `high` for anything the user frames as a vuln/incident, else `medium`.
    - **description**: what to inspect (injection, authz, secrets/credentials, unsafe
-     deserialization, path traversal, dependency risk, etc.), the scope (paths or the embedded
-     ```diff block), and ask Bob to **fix the vulnerabilities it finds**, highest-severity first,
-     and summarize what it changed (note anything it flagged but deliberately left unfixed).
+     deserialization, path traversal, dependency risk, etc.), the scope (the git command + file
+     list, or the fenced ```diff only if embedding), and ask Bob to **fix the vulnerabilities it
+     finds** highest-severity first, and summarize what it changed (noting anything it flagged but
+     deliberately left unfixed).
 
 4. **Wait for Bob, then surface what was fixed.** Report the new task id and that it routes to
    `{devsecops}`. Use the `worker_draining` from step 1 (it reflects a **2.0 in-process loop** as well as a
    **1.x worker**): if `worker_draining.draining` is **false**, nothing is draining the board — say it's
    **queued as #id** and tell the user to start a drainer (open the repo in a **Bob 2.0** window, whose
    in-process loop drains automatically, or run a **1.x** worker via `launch-worker.cmd`), then stop.
-   Otherwise call `await_task {task_id: id}` — it **blocks until the drainer runs the task and Bob settles
-   it**, so the result comes back in this same turn:
+   Otherwise a drainer is live and step 3 tagged the task to its pin, so don't report "queued" for a
+   tag-pinned drainer — call `await_task {task_id: id}`. It **blocks until the drainer runs the task and
+   Bob settles it**, so the result comes back this turn:
    - `done` → present what Bob **fixed** from the task **`result`** (highest-severity first), plus
      any residual risks it flagged. The diff is on the working tree for the user to review.
    - `waiting` (poll window elapsed) → call `await_task` again; keep waiting while Bob works. If
