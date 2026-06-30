@@ -12,7 +12,7 @@ import {
   preserveWipToBranch,
   releaseCheckpoint,
 } from "./checkpoint.js";
-import { snapshotWorktreeTree } from "./git.js";
+import { snapshotWorktreeTree, snapshotWorktreeTreeBounded } from "./git.js";
 import { getDb, createTask, setCheckpoint, getCheckpoint, clearCheckpoint, getNotes, recordArtifact } from "./db.js";
 
 function git(dir: string, ...args: string[]): string {
@@ -200,6 +200,25 @@ describe("checkpoint capture + restore (real git)", () => {
       0,
       "no temp index/lock leaked",
     );
+    rm(dir);
+  });
+
+  it("snapshotWorktreeTreeBounded returns the same tree as the unbounded call under a generous timeout", async () => {
+    const dir = makeRepo();
+    commit(dir, "tracked.txt", "v1");
+    writeFileSync(join(dir, "untracked.txt"), "new");
+    const [bounded, unbounded] = await Promise.all([
+      snapshotWorktreeTreeBounded(dir, 30_000),
+      snapshotWorktreeTree(dir),
+    ]);
+    assert.ok(bounded && /^[0-9a-f]{40}$/.test(bounded));
+    assert.equal(bounded, unbounded, "bounded wrapper yields the identical snapshot when git is fast");
+    rm(dir);
+  });
+
+  it("snapshotWorktreeTreeBounded resolves null on a non-git cwd (and never throws)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bob-nogit-"));
+    assert.equal(await snapshotWorktreeTreeBounded(dir, 30_000), null);
     rm(dir);
   });
 });

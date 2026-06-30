@@ -3,7 +3,7 @@
 // Designed to be testable: the LLM call is injected, and the verdict parsing is pure.
 import { callModel, type LlmDeps } from "./llm.js";
 import { resolve as resolvePath } from "node:path";
-import { gitOut, splitLines, isInsideWorkTree, listUntracked } from "./git.js";
+import { gitOut, splitLines, isInsideWorkTree, listUntracked, snapshotWorktreeTreeBounded } from "./git.js";
 import { extractJsonObjects } from "./json-extract.js";
 import { defaultVerify, type VerifyResult } from "./bob-polls.js";
 import { judgeAppliesToMode } from "./modes.js";
@@ -30,6 +30,9 @@ export interface GitBaseline {
   ref: string;
   /** Untracked files that already existed before the task (so new files can be told apart). */
   untracked: string[];
+  /** Untracked-aware tree sha of the pre-task worktree, so the diff can see content edits to files
+   *  that stay untracked (plain `git diff` omits untracked content). Undefined when not a git tree. */
+  tree?: string;
 }
 
 /** Backend + model + transport overrides (see llm.ts). */
@@ -58,7 +61,7 @@ function userContent(ctx: JudgeContext): string {
     "AGENT'S COMPLETION STATEMENT:",
     ctx.completionResult,
     "",
-    "ACTUAL CHANGES (git diff HEAD):",
+    "ACTUAL CHANGES (working-tree diff since the task started):",
     ctx.gitDiff || "(no changes detected)",
   ].join("\n");
 }
@@ -133,23 +136,38 @@ export function parseVerdict(text: string): JudgeVerdict {
 export async function captureGitBaseline(cwd: string): Promise<GitBaseline> {
   const ref = (await gitOut(["stash", "create"], cwd)).trim() || "HEAD";
   const untracked = await listUntracked(cwd);
-  return { ref, untracked };
+  // Untracked-aware tree so captureGitDiff diffs untracked CONTENT, not just presence; bounded
+  // against a wedged git.
+  const tree = (await snapshotWorktreeTreeBounded(cwd)) ?? undefined;
+  return { ref, untracked, tree };
 }
 
 /**
- * Capture a bounded diff of THIS task's changes for the judge's ground truth.
- * Diffs the working tree against `baselineRef` (a real ref/SHA, default HEAD, so
- * pre-existing tracked changes are excluded), and temporarily marks task-created
- * untracked files as intent-to-add so new files appear in the diff. Files in
- * `priorUntracked` are skipped (they predate the task), and the intent-to-add marks
- * are reset in a finally block so the user's index is left exactly as it was found.
+ * Bounded diff of THIS task's changes — the judge's ground truth.
+ *
+ * With `baselineTree`: diff it against a fresh untracked-aware snapshot. Both stage untracked files,
+ * so edits to files that stay untracked surface (newly created AND already-untracked pre-task) while
+ * pre-existing tracked/untracked state cancels out — which a plain `git diff` can't manage.
+ *
+ * Without one (non-git, or git too old to snapshot): diff the worktree against `baselineRef`,
+ * intent-to-adding task-created untracked files (not in `priorUntracked`) so new files appear; the
+ * marks are reset in a finally.
  */
 export async function captureGitDiff(
   cwd: string,
   maxChars = 4000,
   baselineRef = "HEAD",
   priorUntracked: string[] = [],
+  baselineTree?: string,
 ): Promise<string> {
+  if (baselineTree) {
+    const currTree = await snapshotWorktreeTreeBounded(cwd);
+    if (currTree) {
+      const diff = await gitOut(["diff", baselineTree, currTree], cwd, maxChars);
+      return diff || "(no changes detected)";
+    }
+    // currTree snapshot failed: fall through to the ref-based diff rather than returning nothing.
+  }
   const prior = new Set(priorUntracked);
   const newFiles = (await listUntracked(cwd)).filter((f) => !prior.has(f));
   if (newFiles.length) await gitOut(["add", "--intent-to-add", "--", ...newFiles], cwd);
@@ -241,12 +259,13 @@ export function buildJudgeVerifier(
   if (!judgeAppliesToMode(deps.mode)) return undefined;
   const ref = deps.evidenceBaseline?.ref ?? "HEAD";
   const priorUntracked = deps.evidenceBaseline?.untracked ?? [];
+  const baselineTree = deps.evidenceBaseline?.tree;
   return async (result, command, cwd): Promise<VerifyResult> => {
     if (command) {
       const cmd = await defaultVerify(result, command, cwd);
       if (!cmd.passed) return cmd; // command failed → short-circuit, skip the judge
     }
-    const gitDiff = await captureGitDiff(cwd, 4000, ref, priorUntracked);
+    const gitDiff = await captureGitDiff(cwd, 4000, ref, priorUntracked, baselineTree);
     const verdict = await judgeCompletion(
       { taskPrompt: deps.taskPrompt, completionResult: result, gitDiff },
       deps.judge,

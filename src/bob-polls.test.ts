@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createPollLoop, type PollDeps, type PollResult, type VerifyResult } from "./bob-polls.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  createPollLoop,
+  defaultCaptureSnapshot,
+  type PollDeps,
+  type PollResult,
+  type VerifyResult,
+} from "./bob-polls.js";
 
 // A recording harness: a poll loop wired to fakes that capture each continue
 // dispatch, log line, and note, plus a stub verifier the test controls. A continue
@@ -516,4 +526,54 @@ test("plan-stop detection: combines with verify-and-continue correctly", async (
   assert.equal(h.verifyArgs.length, 2, "verify twice after work detected");
   assert.match(h.dispatchArgs[0], /presented a plan/);
   assert.match(h.dispatchArgs[1], /did NOT pass verification/);
+});
+
+// ── defaultCaptureSnapshot: untracked-aware (real git) ────────────────────────────────────────────
+// Plan-stop shares the verifier's blind spot: a `git status`/`git diff` snapshot can't see an edit to
+// a still-untracked file, so it read as "no new work". The tree-sha snapshot changes on the edit.
+
+function gitRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "bobpolls-snap-"));
+  const run = (...args: string[]) => spawnSync("git", args, { cwd: dir });
+  run("init", "-q");
+  run("config", "user.email", "t@t.t");
+  run("config", "user.name", "t");
+  run("config", "commit.gpgsign", "false");
+  writeFileSync(join(dir, "README.md"), "# repo\n");
+  run("add", "-A");
+  run("commit", "-qm", "init");
+  return dir;
+}
+
+test("defaultCaptureSnapshot: an edit to a still-untracked file changes the snapshot", async () => {
+  const dir = gitRepo();
+  try {
+    writeFileSync(join(dir, "scratch.py"), "x = 1\n"); // untracked before the task
+    const before = await defaultCaptureSnapshot(dir);
+    assert.notEqual(before, "GIT_ERROR");
+
+    writeFileSync(join(dir, "scratch.py"), "x = 1\ny = 2\n"); // task edits the still-untracked file
+    const after = await defaultCaptureSnapshot(dir);
+    assert.notEqual(after, "GIT_ERROR");
+    assert.notEqual(after, before, "editing an untracked file must change the snapshot");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("defaultCaptureSnapshot: an unchanged tree yields a stable snapshot", async () => {
+  const dir = gitRepo();
+  try {
+    writeFileSync(join(dir, "scratch.py"), "x = 1\n");
+    const a = await defaultCaptureSnapshot(dir);
+    const b = await defaultCaptureSnapshot(dir);
+    assert.equal(a, b, "no change → identical snapshot (no false plan-stop)");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("defaultCaptureSnapshot: a non-git cwd yields the GIT_ERROR sentinel", async () => {
+  const snap = await defaultCaptureSnapshot(join(tmpdir(), "definitely-not-a-git-repo-xyz"));
+  assert.equal(snap, "GIT_ERROR");
 });

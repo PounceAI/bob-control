@@ -134,3 +134,17 @@ export async function snapshotWorktreeTree(cwd: string): Promise<string | null> 
     }
   }
 }
+
+/**
+ * snapshotWorktreeTree under a timeout: a stuck git (index.lock, a hook's credential prompt) resolves
+ * null instead of blocking the caller. On timeout the abandoned inner promise still cleans up its temp
+ * index, but the `git add -A` child is NOT killed (runGit keeps no handle) — fine, since it only fires
+ * when git is already wedged.
+ */
+export async function snapshotWorktreeTreeBounded(cwd: string, timeoutMs = 30_000): Promise<string | null> {
+  const timeout = new Promise<null>((resolve) => {
+    const t = setTimeout(() => resolve(null), timeoutMs);
+    t.unref?.();
+  });
+  return Promise.race([snapshotWorktreeTree(cwd), timeout]);
+}
