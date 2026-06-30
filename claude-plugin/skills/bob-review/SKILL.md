@@ -25,35 +25,40 @@ Do this:
    you're unsure, fall back to `list_tasks {status: 'pending', tag: 'review'}`. `worker_draining`
    is a step-1 snapshot — keep it for step 4 rather than re-calling `board_status`.
 
-2. **Gather the diff to review.** Review mode is tool-restricted under headless dispatch (it
-   can't run git itself), so the diff must be **embedded in the task**.
-   - If the user gave an explicit git range (has `..`, e.g. `main...HEAD` or `HEAD~3..HEAD`),
-     use `git diff <range>`.
-   - Otherwise review the **uncommitted working-tree changes**: `git diff HEAD` plus
-     `git status --porcelain`. Include new/untracked files — `git add --intent-to-add -- <files>`,
-     `git diff HEAD`, then `git reset -- <files>` to leave the index untouched.
-   - If `git diff HEAD` is empty, fall back to the branch vs its base:
-     `git diff @{upstream}...HEAD`, or `git diff main...HEAD` if there's no upstream.
+2. **Scope the review — let Bob gather the diff itself.** Bob's `review` mode has the `read` +
+   `command` groups and is told to run `git diff` / `git log` itself, so **don't embed a big
+   diff** — hand Bob a *scope* and let it pull the diff.
+   - **Explicit git range** (`$ARGUMENTS` has `..`, e.g. `main...HEAD`): review `git diff <range>`.
+   - **Uncommitted changes** (default): from `git status --porcelain`, name the paths in scope —
+     in a shared tree, **exclude unrelated in-progress work** — and review them via
+     `git diff HEAD -- <files>` (untracked files by path).
+   - **No working-tree changes** → branch vs base: `git diff @{upstream}...HEAD`, or
+     `git diff main...HEAD` with no upstream.
+   - **Only embed** when there's no git scope to point at (a diff pasted into the request, or not
+     a repo): a fenced ```diff block, bounded to ~12,000 chars (note any truncation).
    - If there is genuinely **nothing to review**, say so and stop — don't create an empty task.
-   - **Bound it:** if the diff exceeds ~12,000 characters, include the most relevant hunks and
-     state in the task that it was truncated (and to what).
 
 3. **File the review task** with `create_task`:
    - **mode**: `review` — Bob's native code-review mode (read-only, safe to drain unattended).
    - **title**: `Code review: <short summary of the change>` (imperative, specific).
-   - **tags**: `['code-review', 'review']`.
+   - **tags**: `['review']` (the dedup key). If step-1 `worker_draining` shows a tag-pinned drainer
+     serving this checkout, **add its pin tag too** — a worker only pulls tasks whose tags include
+     its pin, so a `review`-only task sits `pending` under one. Don't pad with tags it won't match
+     (`code-review`, etc.).
    - **priority**: `high` if the user signals urgency, else `medium`.
-   - **description**: a one-line ask to review the diff for correctness bugs first, then
-     reuse / simplification / efficiency — then the diff in a fenced ```diff block, then the
-     user's focus note if any. Keep it short; review mode supplies its own rubric.
+   - **description**: a one-line ask to review for correctness bugs first, then reuse /
+     simplification / efficiency — then the **scope** (the git command + file list, or the fenced
+     diff only if embedding), then the user's focus note if any. Keep it short; review mode
+     supplies its own rubric.
 
 4. **Wait for Bob, then surface the findings.** Report the new task id and that it routes to
    `{review}`. Use the `worker_draining` from step 1 (it reflects a **2.0 in-process loop** as well as a
    **1.x worker**): if `worker_draining.draining` is **false**, nothing is draining the board — tell the
    user it's **queued as #id** and to start a drainer (open the repo in a **Bob 2.0** window, whose
    in-process loop drains automatically, or run a **1.x** worker via `launch-worker.cmd`), then stop.
-   Otherwise call `await_task {task_id: id}` — it **blocks until the drainer runs the task and Bob settles
-   it**, so the whole review loop completes in this one turn (no "check back later"):
+   Otherwise a drainer is live and step 3 tagged the task to its pin, so don't report "queued" for a
+   tag-pinned drainer — call `await_task {task_id: id}`. It **blocks until the drainer runs the task and
+   Bob settles it**, so the review completes this turn:
    - `analysis_done` (or `done`) → the review is in the task **`result`** plus a structured
      **`bob-review` note** (severity / location / `fixed_diff`). Present the findings,
      correctness issues first.

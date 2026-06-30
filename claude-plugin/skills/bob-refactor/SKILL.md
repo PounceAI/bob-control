@@ -26,19 +26,23 @@ Do this:
 2. **Shape the refactor task** with `create_task`:
    - **mode**: `refactor`.
    - **title**: imperative and specific, e.g. `Refactor src/worker.ts: extract dispatch loop`.
-   - **tags**: `['refactor']` plus a domain tag when obvious.
+   - **tags**: `['refactor']` (+ a domain tag when obvious). If step-1 `worker_draining` shows a
+     tag-pinned drainer serving this checkout, **add its pin tag too** — a worker only pulls tasks
+     whose tags include its pin, else the task sits `pending`.
    - **priority**: infer; default `medium`.
    - **description**: name the files/scope, the desired end-state, and the constraints —
      especially **"Preserve behavior; keep the build and tests green."** Call out anything
-     off-limits. If useful, include the current `git diff`/`git log` context, bounded.
+     off-limits. `refactor` mode reads files and runs `git diff`/`git log` itself, so name the
+     scope rather than pasting a big diff.
 
 3. **Wait for Bob, then surface what changed.** Report the new task id and that it routes to
    `{refactor}`. Use the `worker_draining` from step 1 (it reflects a **2.0 in-process loop** as well as a
    **1.x worker**): if `worker_draining.draining` is **false**, nothing is draining the board — say it's
    **queued as #id** and tell the user to start a drainer (open the repo in a **Bob 2.0** window, whose
    in-process loop drains automatically, or run a **1.x** worker via `launch-worker.cmd`), then stop.
-   Otherwise call `await_task {task_id: id}` — it **blocks until the drainer runs the task and Bob settles
-   it**, so the result comes back in this same turn:
+   Otherwise a drainer is live and step 2 tagged the task to its pin, so don't report "queued" for a
+   tag-pinned drainer — call `await_task {task_id: id}`. It **blocks until the drainer runs the task and
+   Bob settles it**, so the result comes back this turn:
    - `done` → summarize what Bob changed from the task **`result`** and remind the user to review
      the diff / run tests before merging.
    - `waiting` (poll window elapsed) → call `await_task` again; keep waiting while Bob works. If
