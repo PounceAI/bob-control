@@ -136,15 +136,21 @@ export async function snapshotWorktreeTree(cwd: string): Promise<string | null> 
 }
 
 /**
- * snapshotWorktreeTree under a timeout: a stuck git (index.lock, a hook's credential prompt) resolves
- * null instead of blocking the caller. On timeout the abandoned inner promise still cleans up its temp
- * index, but the `git add -A` child is NOT killed (runGit keeps no handle) — fine, since it only fires
- * when git is already wedged.
+ * snapshotWorktreeTree under a timeout: a git that truly hangs (a stalled clean/smudge filter or a
+ * wedged network FS — note `index.lock` contention fails fast, it doesn't hang) resolves null instead
+ * of blocking the caller. On a real hang the inner promise never settles, so its temp-index cleanup
+ * never runs and the `git add -A` child is left alive (runGit keeps no handle) — accepted, since it
+ * only happens when git is already broken.
  */
 export async function snapshotWorktreeTreeBounded(cwd: string, timeoutMs = 30_000): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<null>((resolve) => {
-    const t = setTimeout(() => resolve(null), timeoutMs);
-    t.unref?.();
+    timer = setTimeout(() => resolve(null), timeoutMs);
+    timer.unref?.();
   });
-  return Promise.race([snapshotWorktreeTree(cwd), timeout]);
+  try {
+    return await Promise.race([snapshotWorktreeTree(cwd), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }

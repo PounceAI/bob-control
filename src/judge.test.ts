@@ -328,6 +328,22 @@ test("captureGitDiff: surfaces a file the task newly creates", async () => {
   }
 });
 
+test("captureGitDiff: a failed tree diff falls through to the ref diff, not a false 'no changes'", async () => {
+  const dir = gitRepo();
+  try {
+    const baseline = await captureGitBaseline(dir);
+    writeFileSync(join(dir, "work.py"), "did = 'work'\n"); // real work after baseline
+    // A well-formed but unresolvable tree sha makes `git diff <bogus> <curr>` exit non-zero with
+    // empty stdout. The fix must gate on git's exit code and fall through to the ref-based diff
+    // rather than reporting the git error as "(no changes detected)".
+    const diff = await captureGitDiff(dir, 4000, baseline.ref, baseline.untracked, "0".repeat(40));
+    assert.notEqual(diff, "(no changes detected)");
+    assert.match(diff, /work\.py/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("parseVerdict: reason containing a brace is extracted whole (balanced scan)", () => {
   // A `\{[^{}]*\}` regex would stop at the inner '{' and miss this object, falling
   // through to the token scan. The balanced scanner extracts it intact.

@@ -47,10 +47,14 @@ Or skip the clone and run the published package — the MCP server (`bob-control
 ```jsonc
 {
   "mcpServers": {
-    "bob-tasks": { "command": "npx", "args": ["-y", "@pounceai/bob-control"] }
+    "bob-tasks": { "type": "stdio", "command": "npx", "args": ["-y", "@pounceai/bob-control"] }
   }
 }
 ```
+
+Under Claude Code the board resolves automatically (it sets `CLAUDE_PROJECT_DIR`); any other MCP
+client should add `"env": { "BOB_TASKS_DB": "…" }` pointing at the board the worker drains — a bare
+`npx` server with no board env writes to a throwaway path inside the npx cache that nothing can share.
 
 The unattended **worker** and the Claude Code **plugin** still want the repo (see below).
 

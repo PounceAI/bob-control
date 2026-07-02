@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   createPollLoop,
   defaultCaptureSnapshot,
+  defaultCheckDidWork,
   type PollDeps,
   type PollResult,
   type VerifyResult,
@@ -576,4 +577,45 @@ test("defaultCaptureSnapshot: an unchanged tree yields a stable snapshot", async
 test("defaultCaptureSnapshot: a non-git cwd yields the GIT_ERROR sentinel", async () => {
   const snap = await defaultCaptureSnapshot(join(tmpdir(), "definitely-not-a-git-repo-xyz"));
   assert.equal(snap, "GIT_ERROR");
+});
+
+// ── defaultCheckDidWork: the plan-stop verdict (real git) ─────────────────────────────────────────
+// Direct coverage for the verdict itself, not just the snapshot: an inverted current===baseline check
+// or a mis-ordered GIT_ERROR guard would otherwise ship green (the loop tests inject their own stub).
+
+test("defaultCheckDidWork: an unchanged tree since baseline → didWork false (plan-stop)", async () => {
+  const dir = gitRepo();
+  try {
+    writeFileSync(join(dir, "scratch.py"), "x = 1\n");
+    const baseline = await defaultCaptureSnapshot(dir);
+    const res = await defaultCheckDidWork(dir, baseline);
+    assert.equal(res.didWork, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("defaultCheckDidWork: an edit to a still-untracked file since baseline → didWork true", async () => {
+  const dir = gitRepo();
+  try {
+    writeFileSync(join(dir, "scratch.py"), "x = 1\n");
+    const baseline = await defaultCaptureSnapshot(dir);
+    writeFileSync(join(dir, "scratch.py"), "x = 1\ny = 2\n");
+    const res = await defaultCheckDidWork(dir, baseline);
+    assert.equal(res.didWork, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("defaultCheckDidWork: a GIT_ERROR baseline is treated as work done (never a false plan-stop)", async () => {
+  const dir = gitRepo();
+  try {
+    // Both sides can read GIT_ERROR; the sentinel guard must win over the equality check, else two
+    // GIT_ERRORs would compare equal and wrongly report "no work".
+    const res = await defaultCheckDidWork(dir, "GIT_ERROR");
+    assert.equal(res.didWork, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

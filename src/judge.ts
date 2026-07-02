@@ -3,7 +3,7 @@
 // Designed to be testable: the LLM call is injected, and the verdict parsing is pure.
 import { callModel, type LlmDeps } from "./llm.js";
 import { resolve as resolvePath } from "node:path";
-import { gitOut, splitLines, isInsideWorkTree, listUntracked, snapshotWorktreeTreeBounded } from "./git.js";
+import { gitOut, runGit, splitLines, isInsideWorkTree, listUntracked, snapshotWorktreeTreeBounded } from "./git.js";
 import { extractJsonObjects } from "./json-extract.js";
 import { defaultVerify, type VerifyResult } from "./bob-polls.js";
 import { judgeAppliesToMode } from "./modes.js";
@@ -147,7 +147,8 @@ export async function captureGitBaseline(cwd: string): Promise<GitBaseline> {
  *
  * With `baselineTree`: diff it against a fresh untracked-aware snapshot. Both stage untracked files,
  * so edits to files that stay untracked surface (newly created AND already-untracked pre-task) while
- * pre-existing tracked/untracked state cancels out — which a plain `git diff` can't manage.
+ * pre-existing tracked/untracked state cancels out — which a plain `git diff` can't manage. Blind
+ * spot: `add -A` honors `.gitignore`, so a deliverable at an ignored path is invisible here.
  *
  * Without one (non-git, or git too old to snapshot): diff the worktree against `baselineRef`,
  * intent-to-adding task-created untracked files (not in `priorUntracked`) so new files appear; the
@@ -163,10 +164,14 @@ export async function captureGitDiff(
   if (baselineTree) {
     const currTree = await snapshotWorktreeTreeBounded(cwd);
     if (currTree) {
-      const diff = await gitOut(["diff", baselineTree, currTree], cwd, maxChars);
-      return diff || "(no changes detected)";
+      // Trust the tree diff only when git actually ran. A failed diff (e.g. an unresolvable
+      // baselineTree) has empty stdout, and gitOut alone can't tell that from a clean tree — so
+      // gate on `ok` and fall through rather than reporting a git error as "no changes". A
+      // maxChars truncation still counts as ok (a deliberate stop with a valid partial diff).
+      const res = await runGit(["diff", baselineTree, currTree], cwd, maxChars);
+      if (res.ok) return res.stdout || "(no changes detected)";
     }
-    // currTree snapshot failed: fall through to the ref-based diff rather than returning nothing.
+    // currTree snapshot failed, or the tree diff errored: fall through to the ref-based diff.
   }
   const prior = new Set(priorUntracked);
   const newFiles = (await listUntracked(cwd)).filter((f) => !prior.has(f));

@@ -121,7 +121,7 @@ export async function defaultCaptureSnapshot(cwd: string, timeoutMs = 30_000): P
  * Returns didWork=false if the snapshot is unchanged (no new changes since baseline),
  * meaning Bob likely just presented a plan without implementing it.
  */
-async function defaultCheckDidWork(cwd: string, baseline: string): Promise<WorkCheckResult> {
+export async function defaultCheckDidWork(cwd: string, baseline: string): Promise<WorkCheckResult> {
   const current = await defaultCaptureSnapshot(cwd);
 
   // Git command failed: conservatively assume work happened.
