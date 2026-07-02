@@ -1,5 +1,5 @@
 {
-  "name": "bob-control",
+  "name": "@pounceai/bob-control",
   "version": "2.0.2",
   "description": "Bob Control: MCP server + CLI + worker that runs IBM Bob (and any MCP-capable agent) unattended against a SQLite task board.",
   "author": "Joshua Gilbert",
@@ -18,9 +18,15 @@
   ],
   "type": "module",
   "bin": {
+    "bob-control": "dist/server.js",
     "bob-tasks": "dist/cli.js"
   },
+  "files": ["dist/**/*.js", "!dist/**/*.test.js"],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
+    "prepublishOnly": "npm run build",
     "build": "tsc && npm run build:plugin",
     "build:plugin": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node22 --outfile=claude-plugin/server/server.mjs",
     "server": "node dist/server.js",

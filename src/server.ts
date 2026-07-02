@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import "./suppress-warnings.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -41,7 +42,7 @@ function workerLikelyActive(): boolean {
 
 const server = new McpServer({
   name: "bob-control",
-  version: "1.1.0",
+  version: "2.0.2",
 });
 
 type ToolResult = {
