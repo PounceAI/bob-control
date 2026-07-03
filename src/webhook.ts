@@ -56,10 +56,10 @@ export function validateWebhookUrl(url: string): string | null {
   try {
     u = new URL(url);
   } catch {
-    return `not a valid URL: ${url}`;
+    return "not a valid URL";
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") {
-    return `unsupported scheme '${u.protocol}' (use http: or https:): ${url}`;
+    return `unsupported scheme '${u.protocol}' (use http: or https:)`;
   }
   return null;
 }
@@ -190,14 +190,19 @@ export function createWebhookSink(url: string, meta: WebhookMeta, opts: WebhookO
       }
       let body: string;
       try {
-        body = JSON.stringify(buildPayload(type, data, meta, now(), seq++));
+        // Assign seq only on successful serialization — a stringify failure (e.g. a BigInt in data) must
+        // not burn a sequence number, or a receiver tracking seq would infer a phantom dropped delivery.
+        body = JSON.stringify(buildPayload(type, data, meta, now(), seq));
       } catch (e) {
         log(`[bob-control] webhook: could not build payload for ${type}: ${(e as Error).message}`);
         return;
       }
+      seq++;
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (opts.secret)
         headers["x-bob-signature"] = `sha256=${createHmac("sha256", opts.secret).update(body).digest("hex")}`;
+      // p closes over itself in .finally; safe because .finally runs as a microtask, strictly after the
+      // synchronous inFlight.add(p) below — delete never precedes add. (Don't "simplify" by splitting.)
       const p = doFetch(url, { method: "POST", headers, body, signal: AbortSignal.timeout(timeoutMs) })
         .then((res) => {
           if (!res.ok) log(`[bob-control] webhook ${safeUrl} → HTTP ${res.status} for ${type}`);
@@ -210,17 +215,21 @@ export function createWebhookSink(url: string, meta: WebhookMeta, opts: WebhookO
       inFlight.add(p);
     },
     async flush() {
-      // Drain until the set is empty — a post() that arrives while we're awaiting is picked up on the next
-      // loop, so a late final event isn't dropped at the flush boundary. Bounded by a wall clock (a hair
-      // over the per-request timeout) so a stuck request can never hold the process exit open.
-      const drain = (async () => {
-        while (inFlight.size > 0) await Promise.allSettled([...inFlight]);
-      })();
-      const deadline = new Promise<void>((r) => {
-        const t = setTimeout(r, timeoutMs + 1000);
-        t.unref?.();
-      });
-      await Promise.race([drain, deadline]);
+      // Drain in-flight POSTs before exit; a post() arriving mid-drain is picked up on the next loop, so a
+      // late final event isn't dropped at the boundary. Hard-bounded by its own wall clock (started here,
+      // at flush time) so a slow endpoint — or a steady trickle of new POSTs — can't hold exit open.
+      const hardDeadline = Date.now() + timeoutMs + 1000;
+      while (inFlight.size > 0 && Date.now() < hardDeadline) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          Promise.allSettled([...inFlight]),
+          new Promise<void>((r) => {
+            timer = setTimeout(r, hardDeadline - Date.now());
+            timer.unref?.();
+          }),
+        ]);
+        clearTimeout(timer);
+      }
     },
   };
 }

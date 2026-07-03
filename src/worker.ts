@@ -231,7 +231,7 @@ export function parseOpts(argv: string[]): Opts {
   if (webhookUrl !== undefined) {
     const err = validateWebhookUrl(webhookUrl);
     if (err) {
-      console.error(`invalid --webhook ${err}`);
+      console.error(`invalid --webhook: ${err}`); // err omits the URL — it may carry a secret path
       process.exit(1);
     }
   }
@@ -1109,6 +1109,9 @@ export async function main(): Promise<void> {
 
   let stopping = false;
   const stop = () => {
+    // Second Ctrl-C = force-quit now: exit immediately, no flush — a force path must not block on network
+    // I/O (the endpoint may be as wedged as whatever we're killing). The graceful first press drains via
+    // the normal-stop flush at the end of main().
     if (stopping) process.exit(0);
     stopping = true;
     console.log("\nbob-worker: finishing current task, then stopping… (Ctrl-C again to force)");
@@ -1133,7 +1136,8 @@ export async function main(): Promise<void> {
     });
     process.stdin.on("end", () => {
       console.log("bob-worker: parent closed stdin — exiting.");
-      process.exit(0);
+      // Deliver any queued webhook POST before exiting (sync handler → flush, then exit).
+      void webhookSink?.flush().finally(() => process.exit(0));
     });
     process.stdin.resume();
   }

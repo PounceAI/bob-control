@@ -52,6 +52,9 @@ test("validateWebhookUrl: accepts http(s), rejects junk + non-http schemes", () 
   assert.match(validateWebhookUrl("not a url") ?? "", /not a valid URL/);
   assert.match(validateWebhookUrl("file:///etc/passwd") ?? "", /unsupported scheme/);
   assert.match(validateWebhookUrl("ftp://host/x") ?? "", /unsupported scheme/);
+  // The error must never echo the URL — a rejected-but-secret-bearing value would leak to stderr.
+  const err = validateWebhookUrl("htp://hooks.slack.com/services/T/B/SECRET") ?? "";
+  assert.ok(!err.includes("SECRET") && !err.includes("hooks.slack.com"), "error leaked the URL");
 });
 
 test("redactUrl: drops the credential-bearing path/query/userinfo", () => {
@@ -120,6 +123,16 @@ test("seq increments monotonically across posts", async () => {
   await sink.flush();
   const seqs = calls.map((c) => JSON.parse(c.init.body as string).seq);
   assert.deepEqual(seqs, [0, 1, 2]);
+});
+
+test("seq is not burned when payload serialization fails", async () => {
+  const { impl, calls } = fakeFetch();
+  const sink = createWebhookSink("http://x", META, { fetchImpl: impl, log: () => {} });
+  sink.post("taskDone", { id: 1n }); // BigInt → JSON.stringify throws → dropped; seq must NOT advance
+  sink.post("taskDone", { id: 2, status: "done" }); // first *sent* POST → seq 0, not 1
+  await sink.flush();
+  assert.equal(calls.length, 1, "the unserializable event is dropped, not sent");
+  assert.equal(JSON.parse(calls[0].init.body as string).seq, 0, "seq was not burned by the failed post");
 });
 
 test("HMAC: X-Bob-Signature present + correct when a secret is set, absent otherwise", async () => {
