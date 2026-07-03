@@ -30,6 +30,7 @@ import { createPollLoop, defaultCaptureSnapshot } from "./bob-polls.js";
 import { ExternalActivity } from "./defer.js";
 import { PollStatusLatch } from "./worker-status.js";
 import { notify } from "./notify.js";
+import { createWebhookSink, validateWebhookUrl, redactUrl, type WebhookSink, type WorkerEvent } from "./webhook.js";
 import { shouldRetry, executeRetry } from "./retry-policy.js";
 import { buildJudgeVerifier, captureGitBaseline, captureChangedFiles, type GitBaseline } from "./judge.js";
 import { captureCheckpoint, preserveWipToBranch, releaseCheckpoint } from "./checkpoint.js";
@@ -82,6 +83,8 @@ function buttonPatchPresent(): boolean | null {
  *   node dist/worker.js --verify-and-continue  verify result and loop with Bob until it passes
  *   node dist/worker.js --detect-plan-stop     catch plan-only completions (no code written) and auto-continue
  *   node dist/worker.js --emit-json     also print @@WORKER {json} event lines (for the extension)
+ *   node dist/worker.js --webhook <url> POST notable transitions (done/blocked/needs-input/…) to a URL (Slack/Discord/generic)
+ *   node dist/worker.js --webhook-secret <s>  HMAC-sign the webhook body (X-Bob-Signature) for a generic receiver to verify
  *   node dist/worker.js --retry 3       auto-retry transient failures (timeout/abort) up to 3 total attempts
  *   node dist/worker.js --no-checkpoint     don't preserve partial work to a branch on a failed dispatch
  *   node dist/worker.js --no-idle-watchdog  disable the idle / blocked-on-ask watchdog (wall-clock only)
@@ -171,6 +174,10 @@ export interface Opts {
   denyCommands: string[];
   /** Sandbox escape hatch: auto-run ALL commands (Bob commandPolicy 'auto'); disables the gate. */
   allowAllCommands: boolean;
+  /** POST notable transitions (done/blocked/needs-input/retry/stop/error) to this URL. Off when unset. */
+  webhookUrl?: string;
+  /** Shared secret to HMAC-sign the webhook body (X-Bob-Signature). Off when unset. */
+  webhookSecret?: string;
 }
 
 // Watchdog / budget defaults. The blocked-ask grace is the high-value, low-false-positive guard
@@ -219,6 +226,15 @@ export function parseOpts(argv: string[]): Opts {
           .filter((s) => s.length > 0)
       : [];
   const allowCommands = csv(val("--allow-commands"));
+  // Fail loud on a malformed --webhook rather than silently delivering nothing all session.
+  const webhookUrl = val("--webhook");
+  if (webhookUrl !== undefined) {
+    const err = validateWebhookUrl(webhookUrl);
+    if (err) {
+      console.error(`invalid --webhook ${err}`);
+      process.exit(1);
+    }
+  }
   return {
     once: has("--once"),
     newTab,
@@ -261,6 +277,8 @@ export function parseOpts(argv: string[]): Opts {
     permissionGate: !has("--no-command-gate"),
     denyCommands: csv(val("--deny-commands")),
     allowAllCommands: has("--allow-all-commands"),
+    webhookUrl,
+    webhookSecret: val("--webhook-secret"),
   };
 }
 
@@ -334,9 +352,13 @@ function buildPrompt(task: Task): string {
   return header + body;
 }
 
-/** Structured event for the extension (parsed from stdout lines). */
-function emit(opts: Opts, type: string, data: Record<string, unknown> = {}): void {
+let webhookSink: WebhookSink | null = null; // set at startup when --webhook is passed
+
+/** Structured event: to the extension over stdout (--emit-json) and/or to a webhook (--webhook).
+ *  `type` is the closed WorkerEvent union, so a mistyped event name is a compile error, not a drop. */
+function emit(opts: Opts, type: WorkerEvent, data: Record<string, unknown> = {}): void {
   if (opts.emitJson) console.log(`@@WORKER ${JSON.stringify({ type, ...data })}`);
+  webhookSink?.post(type, data);
 }
 
 /** Is a process alive? `process.kill(pid, 0)` sends no signal but throws ESRCH if the pid is gone
@@ -972,6 +994,19 @@ export async function main(): Promise<void> {
     const detail = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
     console.error(`bob-worker: unhandled rejection (ignored): ${detail}`);
   });
+  // Wire the webhook sink before the first emit so even a startup error (lease/connect) is delivered.
+  if (opts.webhookUrl) {
+    webhookSink = createWebhookSink(
+      opts.webhookUrl,
+      { cwd: process.cwd(), assignee: opts.assignee, tag: opts.tag },
+      { secret: opts.webhookSecret },
+    );
+    // Redact the URL: a Slack/Discord webhook carries its secret in the path.
+    const signed = opts.webhookSecret ? ", HMAC-signed" : "";
+    console.log(
+      `bob-worker: webhook = on → ${redactUrl(opts.webhookUrl)}${signed} (POSTs done/blocked/needs-input/retry/stop/error).`,
+    );
+  }
   repo.getDb(); // surface schema errors up front
 
   // Worktree lease + heartbeat (T7): at most one live worker per checkout. Keyed on the normalized cwd,
@@ -1004,6 +1039,7 @@ export async function main(): Promise<void> {
           `worker, or (after a hard kill) wait ${Math.ceil(repo.WORKER_HEARTBEAT_WINDOW_MS / 1000)}s for the lease to lapse.`,
       );
       emit(opts, "error", { message: `worktree lease held by pid ${h.pid ?? "?"} on ${process.cwd()}` });
+      await webhookSink?.flush();
       process.exit(1);
     }
     // Lease held (the claim recorded the first beat). startHeartbeat refreshes on a timer; its stop() is
@@ -1041,6 +1077,7 @@ export async function main(): Promise<void> {
       console.error(`bob-worker: could not connect — ${(err as Error).message}`);
       console.error("Is Bob running, launched WITH ROO_CODE_IPC_SOCKET_PATH set? Try bob-control.mjs --list-pipes");
       emit(opts, "error", { message: (err as Error).message });
+      await webhookSink?.flush();
       process.exit(1);
     }
   }
@@ -1269,6 +1306,7 @@ export async function main(): Promise<void> {
     // clean stop, so a supervisor/extension treats it as one (startup error + parked task explain it).
     if (workspaceMismatch) {
       await parkWorkspaceMismatch(task, opts, workspaceMismatch);
+      await webhookSink?.flush();
       client.close();
       process.exit(1);
     }
@@ -1297,6 +1335,7 @@ export async function main(): Promise<void> {
   }
 
   emit(opts, "stopped", {});
+  await webhookSink?.flush(); // let the final POSTs land before the hard exit
   client.close();
   process.exit(0);
 }
@@ -1304,8 +1343,14 @@ export async function main(): Promise<void> {
 // Auto-run only as a CLI. Importing worker.ts — to reuse parseOpts / pickEligible / main from the 2.0
 // in-process driver (or a test) — must have no side effects. Matches cli.ts's is-main guard.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch((err) => {
+  main().catch(async (err) => {
     console.error("bob-worker fatal:", err);
+    // A crash escaping main() is the event an operator most wants pinged — deliver any queued error POST.
+    try {
+      await webhookSink?.flush();
+    } catch {
+      /* best-effort on the way out */
+    }
     process.exit(1);
   });
 }
