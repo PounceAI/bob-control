@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -262,6 +263,85 @@ test("captureGitDiff: skips untracked files listed in priorUntracked", async () 
   const diff = await captureGitDiff("/nonexistent", 1000, "HEAD", ["already-there.txt"]);
   assert.equal(typeof diff, "string");
   assert.equal(diff, "(no changes detected)");
+});
+
+// ── captureGitDiff: untracked-aware tree diff (real git) ──────────────────────────────────────────
+// Regression: a plain `git diff` can't see an edit to a file that was already untracked when the task
+// started, so the judge read "no changes" and aborted good work. The tree-vs-tree diff surfaces it.
+
+function gitRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "judge-gitdiff-"));
+  const run = (...args: string[]) => spawnSync("git", args, { cwd: dir });
+  run("init", "-q");
+  run("config", "user.email", "t@t.t");
+  run("config", "user.name", "t");
+  run("config", "commit.gpgsign", "false");
+  writeFileSync(join(dir, "README.md"), "# repo\n");
+  run("add", "-A");
+  run("commit", "-qm", "init");
+  return dir;
+}
+
+test("captureGitDiff: surfaces edits to a file that was already untracked at baseline", async () => {
+  const dir = gitRepo();
+  try {
+    // A brand-new file created BEFORE the task — untracked, never `git add`ed (the repro).
+    writeFileSync(join(dir, "foo.py"), "original = 1\n");
+    const baseline = await captureGitBaseline(dir);
+    assert.ok(baseline.tree, "baseline should capture an untracked-aware tree");
+    assert.ok(baseline.untracked.includes("foo.py"), "foo.py predates the task → priorUntracked");
+
+    // The task edits the still-untracked file.
+    writeFileSync(join(dir, "foo.py"), "original = 1\nadded_by_task = 2\n");
+
+    const diff = await captureGitDiff(dir, 4000, baseline.ref, baseline.untracked, baseline.tree);
+    assert.match(diff, /foo\.py/, "diff names the edited file");
+    assert.match(diff, /added_by_task/, "diff shows the task's new content");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("captureGitDiff: an untouched prior-untracked file is NOT reported as changed", async () => {
+  const dir = gitRepo();
+  try {
+    writeFileSync(join(dir, "artifact.log"), "pre-existing scratch\n");
+    const baseline = await captureGitBaseline(dir);
+    // The task touches nothing: the two tree snapshots are identical → no diff.
+    const diff = await captureGitDiff(dir, 4000, baseline.ref, baseline.untracked, baseline.tree);
+    assert.equal(diff, "(no changes detected)");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("captureGitDiff: surfaces a file the task newly creates", async () => {
+  const dir = gitRepo();
+  try {
+    const baseline = await captureGitBaseline(dir);
+    writeFileSync(join(dir, "new.py"), "fresh = True\n");
+    const diff = await captureGitDiff(dir, 4000, baseline.ref, baseline.untracked, baseline.tree);
+    assert.match(diff, /new\.py/);
+    assert.match(diff, /fresh/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("captureGitDiff: a failed tree diff falls through to the ref diff, not a false 'no changes'", async () => {
+  const dir = gitRepo();
+  try {
+    const baseline = await captureGitBaseline(dir);
+    writeFileSync(join(dir, "work.py"), "did = 'work'\n"); // real work after baseline
+    // A well-formed but unresolvable tree sha makes `git diff <bogus> <curr>` exit non-zero with
+    // empty stdout. The fix must gate on git's exit code and fall through to the ref-based diff
+    // rather than reporting the git error as "(no changes detected)".
+    const diff = await captureGitDiff(dir, 4000, baseline.ref, baseline.untracked, "0".repeat(40));
+    assert.notEqual(diff, "(no changes detected)");
+    assert.match(diff, /work\.py/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("parseVerdict: reason containing a brace is extracted whole (balanced scan)", () => {

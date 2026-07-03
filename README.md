@@ -1,6 +1,7 @@
 # Bob Control
 
 [![CI](https://github.com/PounceAI/bob-control/actions/workflows/ci.yml/badge.svg)](https://github.com/PounceAI/bob-control/actions/workflows/ci.yml)
+[![MCP](https://lobehub.com/badge/mcp/pounceai-bob-control)](https://lobehub.com/mcp/pounceai-bob-control)
 
 Bob Control turns an AI coding agent from a one-prompt-at-a-time chat window into an unattended
 queue worker. Fill a board and each task gets dispatched, auto-approved inside risk guardrails,
@@ -39,6 +40,23 @@ npm install        # not --ignore-scripts: esbuild's postinstall fetches its bin
 npm run build      # tsc -> dist/, then bundles claude-plugin/server/server.mjs
 npm run smoke      # optional self-test
 ```
+
+Or skip the clone and run the published package — the MCP server (`bob-control`) and CLI
+(`bob-tasks`) come straight from npm. Point an MCP client at it instead of an absolute `dist/` path:
+
+```jsonc
+{
+  "mcpServers": {
+    "bob-tasks": { "type": "stdio", "command": "npx", "args": ["-y", "@pounceai/bob-control"] }
+  }
+}
+```
+
+Under Claude Code the board resolves automatically (it sets `CLAUDE_PROJECT_DIR`); any other MCP
+client should add `"env": { "BOB_TASKS_DB": "…" }` pointing at the board the worker drains — a bare
+`npx` server with no board env writes to a throwaway path inside the npx cache that nothing can share.
+
+The unattended **worker** and the Claude Code **plugin** still want the repo (see below).
 
 Needs Node 22.5+ (uses the built-in `node:sqlite`, so there's no native build step).
 Board path resolution: `BOB_TASKS_DB` (explicit) › `BOB_TASKS_PORTABLE=1` (a shared

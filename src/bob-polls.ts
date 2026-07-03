@@ -8,6 +8,7 @@
 
 import { spawn } from "node:child_process";
 import type { DispatchResult } from "./bob-ipc.js";
+import { snapshotWorktreeTreeBounded } from "./git.js";
 
 /**
  * The poll loop reads and passes a dispatch result straight through, so it IS a DispatchResult
@@ -106,56 +107,13 @@ export async function defaultVerify(
 }
 
 /**
- * Capture a content-aware snapshot of the working tree state.
- * Combines `git status --porcelain` (new/deleted/modified files) with `git diff HEAD`
- * (actual content changes in tracked files). This allows detecting changes even when
- * the tree is already dirty from prior tasks.
- *
- * Known limitation: editing an UNTRACKED file that a prior task created is NOT detected
- * (porcelain shows ?? for both snapshots, diff omits untracked content). This is acceptable
- * because untracked files are typically intermediate artifacts, not the primary deliverable.
+ * Working-tree snapshot as a single untracked-aware tree sha: two shas differ iff content changed —
+ * including edits to files that stay untracked, which a `git status`/`git diff` pair misses (status
+ * shows the same `??`, diff omits untracked content). null (non-git, git failure, timeout) → GIT_ERROR,
+ * which checkDidWork reads as "assume work done" over a false plan-stop.
  */
 export async function defaultCaptureSnapshot(cwd: string, timeoutMs = 30_000): Promise<string> {
-  return new Promise<string>((resolve) => {
-    // Run both commands in parallel for efficiency
-    const statusProc = spawn("git", ["status", "--porcelain"], { cwd, stdio: "pipe" });
-    const diffProc = spawn("git", ["diff", "HEAD"], { cwd, stdio: "pipe" });
-
-    let statusOut = "";
-    let diffOut = "";
-    let completed = 0;
-    let settled = false;
-
-    // Single idempotent exit: clears the timer, kills both children, resolves once. A git that hangs
-    // (a credential prompt, an index.lock) is bounded by the timeout → GIT_ERROR instead of forever.
-    const finish = (s: string) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      for (const p of [statusProc, diffProc]) {
-        try {
-          p.kill();
-        } catch {
-          /* already exited */
-        }
-      }
-      resolve(s);
-    };
-    const timer = setTimeout(() => finish("GIT_ERROR"), timeoutMs);
-    timer.unref?.();
-
-    const checkComplete = () => {
-      if (++completed === 2) finish(`STATUS:\n${statusOut}\nDIFF:\n${diffOut}`);
-    };
-
-    statusProc.stdout?.on("data", (chunk: Buffer) => (statusOut += chunk.toString()));
-    statusProc.on("close", (code: number | null) => (code !== 0 ? finish("GIT_ERROR") : checkComplete()));
-    statusProc.on("error", () => finish("GIT_ERROR"));
-
-    diffProc.stdout?.on("data", (chunk: Buffer) => (diffOut += chunk.toString()));
-    diffProc.on("close", (code: number | null) => (code !== 0 ? finish("GIT_ERROR") : checkComplete()));
-    diffProc.on("error", () => finish("GIT_ERROR"));
-  });
+  return (await snapshotWorktreeTreeBounded(cwd, timeoutMs)) ?? "GIT_ERROR";
 }
 
 /**
@@ -163,7 +121,7 @@ export async function defaultCaptureSnapshot(cwd: string, timeoutMs = 30_000): P
  * Returns didWork=false if the snapshot is unchanged (no new changes since baseline),
  * meaning Bob likely just presented a plan without implementing it.
  */
-async function defaultCheckDidWork(cwd: string, baseline: string): Promise<WorkCheckResult> {
+export async function defaultCheckDidWork(cwd: string, baseline: string): Promise<WorkCheckResult> {
   const current = await defaultCaptureSnapshot(cwd);
 
   // Git command failed: conservatively assume work happened.
@@ -171,25 +129,10 @@ async function defaultCheckDidWork(cwd: string, baseline: string): Promise<WorkC
     return { didWork: true, reason: "git check failed, assuming work done" };
   }
 
-  // Compare snapshots
   if (current === baseline) {
     return { didWork: false, reason: "working tree unchanged from baseline (no new changes)" };
   }
-
-  // Snapshot changed: work detected
-  const statusBefore = baseline.match(/STATUS:\n(.*?)\nDIFF:/s)?.[1] || "";
-  const statusAfter = current.match(/STATUS:\n(.*?)\nDIFF:/s)?.[1] || "";
-  const beforeLines = statusBefore.trim() ? statusBefore.trim().split("\n").length : 0;
-  const afterLines = statusAfter.trim() ? statusAfter.trim().split("\n").length : 0;
-  const delta = afterLines - beforeLines;
-
-  if (delta > 0) {
-    return { didWork: true, reason: `${delta} new file change${delta === 1 ? "" : "s"} detected` };
-  } else if (delta < 0) {
-    return { didWork: true, reason: `${-delta} file change${delta === -1 ? "" : "s"} resolved` };
-  } else {
-    return { didWork: true, reason: "file content changed" };
-  }
+  return { didWork: true, reason: "working tree changed since baseline" };
 }
 
 /**
