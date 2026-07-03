@@ -3,6 +3,25 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
+## [2.1.0] — 2026-07-03 — npm distribution + untracked-aware verifier
+
+### Added
+
+- **Published to npm as `@pounceai/bob-control`.** `npx -y @pounceai/bob-control` runs the MCP server
+  standalone via a new `bob-control` bin. The `files` allowlist ships only runtime `dist` (no tests or
+  fixtures), and a `check:shebang` publish gate guards both bin shebangs.
+
+### Fixed
+
+- **The verifier sees edits to files that stay untracked.** The completion check and LLM judge diffed with
+  `git status`/`git diff HEAD`, blind to an edit to a file already untracked when the task started — so real
+  work read as "no changes" and was aborted. Both now diff two untracked-aware `git write-tree` snapshots.
+  A failed tree diff falls through to the ref diff instead of reporting "no changes", a timed-out snapshot is
+  killed rather than leaked, and both degradations log to stderr.
+- **The create_task race-warning fires for a live-but-idle drainer.** It keyed off in-progress tasks, so it
+  stayed silent in exactly the mid-curation race it guards. It now reads the worker heartbeat, matched to the
+  task's tags; the redundant `worker_likely_active` field is dropped from `board_status` (use `worker_draining`).
+
 ## [2.0.2] — 2026-06-30 — Faster completion + Bob-skill correctness
 
 ### Fixed

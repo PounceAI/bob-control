@@ -41,7 +41,7 @@ function liveDrainerWouldPull(taskTags: string[] = []): boolean {
 
 const server = new McpServer({
   name: "bob-control",
-  version: "2.0.2",
+  version: "2.1.0",
 });
 
 type ToolResult = {
