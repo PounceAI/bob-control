@@ -1,6 +1,7 @@
 # Bob Control
 
 [![CI](https://github.com/PounceAI/bob-control/actions/workflows/ci.yml/badge.svg)](https://github.com/PounceAI/bob-control/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@pounceai/bob-control)](https://www.npmjs.com/package/@pounceai/bob-control)
 [![MCP](https://lobehub.com/badge/mcp/pounceai-bob-control)](https://lobehub.com/mcp/pounceai-bob-control)
 
 Bob Control turns an AI coding agent from a one-prompt-at-a-time chat window into an unattended
@@ -55,6 +56,10 @@ Or skip the clone and run the published package — the MCP server (`bob-control
 Under Claude Code the board resolves automatically (it sets `CLAUDE_PROJECT_DIR`); any other MCP
 client should add `"env": { "BOB_TASKS_DB": "…" }` pointing at the board the worker drains — a bare
 `npx` server with no board env writes to a throwaway path inside the npx cache that nothing can share.
+
+> **Windows + nvm-for-windows:** `npx` can fail to resolve the bin (`'bob-control' is not recognized`).
+> Install globally and run it with plain `node` instead: `npm i -g @pounceai/bob-control`, then set
+> `command` to `node` and `args` to `["<npm root -g>/@pounceai/bob-control/dist/server.js"]`.
 
 The unattended **worker** and the Claude Code **plugin** still want the repo (see below).
 
