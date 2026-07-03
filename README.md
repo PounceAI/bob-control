@@ -1,6 +1,7 @@
 # Bob Control
 
 [![CI](https://github.com/PounceAI/bob-control/actions/workflows/ci.yml/badge.svg)](https://github.com/PounceAI/bob-control/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@pounceai/bob-control)](https://www.npmjs.com/package/@pounceai/bob-control)
 [![MCP](https://lobehub.com/badge/mcp/pounceai-bob-control)](https://lobehub.com/mcp/pounceai-bob-control)
 
 Bob Control turns an AI coding agent from a one-prompt-at-a-time chat window into an unattended
