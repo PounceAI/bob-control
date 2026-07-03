@@ -11,8 +11,6 @@ import { revertTaskToCheckpoint, deleteTaskAndCheckpoint } from "./checkpoint.js
 import { buildReport } from "./report.js";
 import { awaitTaskOutcome } from "./await-task.js";
 
-const WORKER_ACTIVE_WINDOW_MS = 5 * 60 * 1000;
-
 // Max live tasks board_status inlines as open_tasks before it flags open_tasks_truncated.
 const OPEN_TASKS_CAP = 50;
 
@@ -23,14 +21,15 @@ const AWAIT_CHUNK_MAX_MS = 55_000;
 const AWAIT_POLL_INTERVAL_MS = 700;
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-/** Heuristic: a drainer looks active if any task is in_progress with a recent touch. (A
- *  needs_input task means a worker is WAITING on a human, not actively draining — and the
- *  human answerer bumps updated_at too — so it is deliberately NOT counted as active.) */
-function workerLikelyActive(): boolean {
-  const now = Date.now();
-  return repo
-    .listTasks({ status: "in_progress" })
-    .some((t) => now - Date.parse(t.updated_at) < WORKER_ACTIVE_WINDOW_MS);
+/** Would a live drainer pull a task carrying `taskTags` right now? A worker pulls a task only if its
+ *  --tag pin is null (drains all tags) or matches one of the task's tags. Heartbeat-based, so — unlike
+ *  the old in-progress heuristic — it fires for a live-but-idle drainer, which is exactly the
+ *  mid-curation race the create_task warning guards against. */
+function liveDrainerWouldPull(taskTags: string[] = []): boolean {
+  const live = repo.getWorkerLiveness();
+  if (!live.draining) return false;
+  const wanted = new Set(taskTags);
+  return live.tags.some((pin) => pin === null || wanted.has(pin));
 }
 
 // Bob Control MCP server. Bob connects and gets tools to pull, claim,
@@ -108,12 +107,12 @@ server.registerTool(
     try {
       const task = repo.createTask({ title, description, priority, tags, mode, depends_on, staged });
       // Warn when a pullable task drops onto a live board (bulk-create race).
-      if (!staged && repo.isBoardArmed() && workerLikelyActive()) {
+      if (!staged && repo.isBoardArmed() && liveDrainerWouldPull(task.tags)) {
         return json({
           ...task,
           warning:
-            "Board is ARMED and a worker looks active — this task may be pulled before you finish curating. " +
-            "Disarm the board (disarm_board) or create staged:true while bulk-creating, then release_tasks.",
+            "Board is ARMED and a live worker drains this task's tags — it may be pulled before you finish " +
+            "curating. Disarm the board (disarm_board) or create staged:true while bulk-creating, then release_tasks.",
         });
       }
       return json(task);
@@ -617,7 +616,7 @@ server.registerTool(
     title: "Board Status",
     description:
       "Dispatch state, counts, and the live task list: whether the board is `armed`, task `counts` by " +
-      "status, whether a worker looks active, whether a drainer is currently servicing the board " +
+      "status, whether a drainer is currently servicing the board " +
       "(`worker_draining` — a live heartbeat from either a 1.x worker process or the 2.0 in-process " +
       "loop, with `.tags` = the --tag each live worker drains, null = an unfiltered worker that drains " +
       "all tags), `worker_leases` (which checkout each live worker owns), " +
@@ -638,7 +637,6 @@ server.registerTool(
     const { open_tasks, truncated } = repo.selectOpenTasks(tasks, OPEN_TASKS_CAP);
     return json({
       armed: repo.isBoardArmed(),
-      worker_likely_active: workerLikelyActive(),
       worker_draining: repo.getWorkerLiveness(),
       worker_leases: repo.getWorkerLeases(), // T7: which worktree each live worker owns
       counts: repo.countByStatus(tasks),
