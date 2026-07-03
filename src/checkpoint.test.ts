@@ -221,6 +221,17 @@ describe("checkpoint capture + restore (real git)", () => {
     assert.equal(await snapshotWorktreeTreeBounded(dir, 30_000), null);
     rm(dir);
   });
+
+  it("snapshotWorktreeTree: an aborted signal yields null and leaves no temp index behind", async () => {
+    const dir = makeRepo();
+    commit(dir, "tracked.txt", "v1");
+    const ac = new AbortController();
+    ac.abort(); // stand in for a bounded-caller timeout: the git children must be killed, not orphaned
+    assert.equal(await snapshotWorktreeTree(dir, ac.signal), null);
+    const leftovers = readdirSync(join(dir, ".git")).filter((f) => f.startsWith("bob-tmp-index-"));
+    assert.deepEqual(leftovers, [], "the temp index must be cleaned up even when git is aborted");
+    rm(dir);
+  });
 });
 
 describe("checkpoint orchestration + persistence (db)", () => {

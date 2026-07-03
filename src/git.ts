@@ -20,11 +20,19 @@ export interface GitResult {
  * set the process is killed and output truncated once the limit is exceeded; in that case
  * `truncated` is true and `ok` only means "stopped deliberately", not "git succeeded".
  */
-export function runGit(args: string[], cwd: string, maxChars?: number, env?: NodeJS.ProcessEnv): Promise<GitResult> {
+export function runGit(
+  args: string[],
+  cwd: string,
+  maxChars?: number,
+  env?: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
+): Promise<GitResult> {
   return new Promise<GitResult>((resolve) => {
     let proc;
     try {
-      proc = spawn("git", args, { cwd, stdio: "pipe", env: env ? { ...process.env, ...env } : undefined });
+      // signal: when aborted, spawn kills the child (SIGTERM on POSIX, TerminateProcess on Windows)
+      // and emits 'error', so a bounded caller can unwedge a hung git and let cleanup run.
+      proc = spawn("git", args, { cwd, stdio: "pipe", env: env ? { ...process.env, ...env } : undefined, signal });
     } catch {
       return resolve({ ok: false, truncated: false, stdout: "" });
     }
@@ -49,8 +57,14 @@ export function runGit(args: string[], cwd: string, maxChars?: number, env?: Nod
 }
 
 /** Convenience: stdout only (for callers that don't care whether git succeeded). */
-export async function gitOut(args: string[], cwd: string, maxChars?: number, env?: NodeJS.ProcessEnv): Promise<string> {
-  return (await runGit(args, cwd, maxChars, env)).stdout;
+export async function gitOut(
+  args: string[],
+  cwd: string,
+  maxChars?: number,
+  env?: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
+): Promise<string> {
+  return (await runGit(args, cwd, maxChars, env, signal)).stdout;
 }
 
 export function splitLines(s: string): string[] {
@@ -106,9 +120,10 @@ let tmpIndexSeq = 0;
  * can't produce (it silently drops untracked files). `write-tree` persists the tree in the object
  * DB, so the returned sha stays valid after the temp index is removed. Returns null when cwd isn't a
  * git work tree or the snapshot can't be built. The temp index (and any leftover lock) is always
- * cleaned up; never throws.
+ * cleaned up; never throws. Pass `signal` to let a bounded caller abort a wedged add/write-tree — the
+ * child is killed, so the finally still runs and the temp index doesn't leak.
  */
-export async function snapshotWorktreeTree(cwd: string): Promise<string | null> {
+export async function snapshotWorktreeTree(cwd: string, signal?: AbortSignal): Promise<string | null> {
   // --absolute-git-dir needs git ≥2.13; fall back to the always-present --git-dir (possibly
   // relative) so an older git still produces a snapshot instead of silently giving up.
   let gitDir = (await gitOut(["rev-parse", "--absolute-git-dir"], cwd)).trim();
@@ -121,9 +136,10 @@ export async function snapshotWorktreeTree(cwd: string): Promise<string | null> 
   const env = { GIT_INDEX_FILE: tmpIndex };
   try {
     // add -A stages adds + modifications + deletions relative to the empty temp index → a faithful
-    // snapshot of what's on disk now (still honoring .gitignore).
-    if (!(await runGit(["add", "-A"], cwd, undefined, env)).ok) return null;
-    return (await gitOut(["write-tree"], cwd, undefined, env)).trim() || null;
+    // snapshot of what's on disk now (still honoring .gitignore). signal aborts either child if a
+    // bounded caller times out, so a hang dies here rather than orphaning a process + temp index.
+    if (!(await runGit(["add", "-A"], cwd, undefined, env, signal)).ok) return null;
+    return (await gitOut(["write-tree"], cwd, undefined, env, signal)).trim() || null;
   } finally {
     for (const f of [tmpIndex, `${tmpIndex}.lock`]) {
       try {
@@ -136,20 +152,23 @@ export async function snapshotWorktreeTree(cwd: string): Promise<string | null> 
 }
 
 /**
- * snapshotWorktreeTree under a timeout: a git that truly hangs (a stalled clean/smudge filter or a
- * wedged network FS — note `index.lock` contention fails fast, it doesn't hang) resolves null instead
- * of blocking the caller. On a real hang the inner promise never settles, so its temp-index cleanup
- * never runs and the `git add -A` child is left alive (runGit keeps no handle) — accepted, since it
- * only happens when git is already broken.
+ * snapshotWorktreeTree under a timeout: on timeout it aborts the git children so a wedged add/write-tree
+ * (a stalled clean/smudge filter, a wedged network FS — `index.lock` contention just fails fast) is
+ * killed and its temp index gets cleaned up, then resolves null so the caller isn't blocked. Only a
+ * child that ignores the kill signal AND stays wedged can still leak, and even then the caller returns.
  */
 export async function snapshotWorktreeTreeBounded(cwd: string, timeoutMs = 30_000): Promise<string | null> {
+  const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), timeoutMs);
+    timer = setTimeout(() => {
+      controller.abort(); // kill the git children so snapshotWorktreeTree's finally can drop the temp index
+      resolve(null);
+    }, timeoutMs);
     timer.unref?.();
   });
   try {
-    return await Promise.race([snapshotWorktreeTree(cwd), timeout]);
+    return await Promise.race([snapshotWorktreeTree(cwd, controller.signal), timeout]);
   } finally {
     clearTimeout(timer);
   }
