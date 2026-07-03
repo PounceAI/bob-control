@@ -284,6 +284,30 @@ export class Bob2TaskStore {
     }
   }
 
+  /** The task's assistant messages joined oldest→newest — for review read-back. A review's findings sit in
+   *  an EARLIER message than readResultText's last one (which is Bob's closing summary), so the structured
+   *  parser must see the whole transcript, not just the tail. Per-row parse guard: one bad row can't drop
+   *  the rest. Best-effort — null when there are no assistant messages (never throws). */
+  readReviewText(id: string): string | null {
+    try {
+      const rows = this.q(
+        "SELECT data FROM messages WHERE task_id = ? AND role = 'assistant' ORDER BY created_at ASC",
+      ).all(id) as { data: string }[];
+      const parts: string[] = [];
+      for (const r of rows) {
+        try {
+          const t = extractText((JSON.parse(r.data) as { content?: unknown }).content);
+          if (t) parts.push(t);
+        } catch {
+          /* skip a malformed row, keep the rest */
+        }
+      }
+      return parts.length ? parts.join("\n\n") : null;
+    } catch {
+      return null;
+    }
+  }
+
   close(): void {
     this.db.close();
   }

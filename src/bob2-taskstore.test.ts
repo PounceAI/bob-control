@@ -403,6 +403,32 @@ test("readResultText flattens array content and ignores unparseable rows", () =>
   assert.equal(store.readResultText("b"), null); // bad JSON → null, never throws
 });
 
+test("readReviewText joins all assistant messages oldest→newest (findings precede the summary)", () => {
+  const { db, store } = makeStore();
+  insertMessage(db, "r1", "user", { content: "review it" }, 100);
+  insertMessage(db, "r1", "assistant", { content: "Let me look." }, 200); // reasoning
+  insertMessage(db, "r1", "assistant", { content: "### HIGH: a real bug\nLocation: x.ts" }, 300); // findings
+  insertMessage(db, "r1", "tool", { content: "read file" }, 350); // not assistant → excluded
+  insertMessage(db, "r1", "assistant", { content: "Review complete. 1 finding." }, 400); // summary (last)
+  const text = store.readReviewText("r1") ?? "";
+  assert.ok(text.includes("### HIGH: a real bug"), "the findings message is included, not just the summary");
+  assert.ok(text.includes("Review complete"), "the closing summary is included too");
+  // Contrast with readResultText, which sees only the last (summary) message — the bug this fixes.
+  assert.equal(store.readResultText("r1"), "Review complete. 1 finding.");
+  assert.equal(store.readReviewText("none"), null);
+});
+
+test("readReviewText skips a malformed row but keeps the rest", () => {
+  const { db, store } = makeStore();
+  insertMessage(db, "r2", "assistant", { content: "### LOW: keep me" }, 10);
+  db.prepare(
+    "INSERT INTO messages (id, task_id, role, data, created_at) VALUES ('bad2','r2','assistant','{not json',20)",
+  ).run();
+  insertMessage(db, "r2", "assistant", { content: "and me" }, 30);
+  const text = store.readReviewText("r2") ?? "";
+  assert.ok(text.includes("### LOW: keep me") && text.includes("and me"));
+});
+
 test("open() throws a clear error when the db file is absent", () => {
   const missing = join(mkdtempSync(join(tmpdir(), "bob2db-")), "nope.db");
   assert.throws(() => Bob2TaskStore.open(missing), /not found/);

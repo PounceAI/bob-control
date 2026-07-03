@@ -787,8 +787,9 @@ async function prepareDispatch(
   return { planStopBaseline, evidenceBaseline };
 }
 
-/** Format and persist Bob's review findings (review-producing modes) as a structured board note. */
-function persistReviewFindings(task: Task, mode: string, res: DispatchResult): void {
+/** Format and persist Bob's review findings (review-producing modes) as a structured board note.
+ *  Exported so the 2.0 in-process driver's finalize() reuses the same capture the 1.x worker does. */
+export function persistReviewFindings(task: Task, mode: string, res: DispatchResult): void {
   // Format and persist review findings (review-producing modes: review + devsecops).
   // Prefer the structured submit_review_findings capture; but under headless IPC
   // dispatch Bob is tool-restricted and never calls that tool — it returns the review

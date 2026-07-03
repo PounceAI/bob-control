@@ -135,6 +135,10 @@ test("mapOutcome: real error → aborted, settled → completed, unsettled → t
   assert.equal(mapOutcome(r({ last_error: "boom" }), true, { result: "x", tokensUsed: 7 }).result, ""); // not on abort
   assert.equal(mapOutcome(r(), false, { tokensUsed: 42 }).tokensUsed, 42);
   assert.equal(mapOutcome(r(), true, { maxIdleMs: 6500 }).maxIdleMs, 6500); // watchdog telemetry, any outcome
+  // reviewFindings pass through on completion (parity with 1.x), absent on a non-completed outcome
+  const finding = [{ severity: "HIGH", title: "a bug", description: "details", file: "x.ts", category: "correctness" }];
+  assert.deepEqual(mapOutcome(r(), true, { reviewFindings: finding }).reviewFindings, finding);
+  assert.equal(mapOutcome(r(), false, { reviewFindings: finding }).reviewFindings, undefined); // not on timeout
 });
 
 // ── connect / queryWorkspace ─────────────────────────────────────────────────────────────────────

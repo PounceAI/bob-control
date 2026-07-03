@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { BobDriver } from "./bob-driver.js";
 import type { DispatchResult } from "./bob-ipc.js";
-import { type Opts, pickEligible, pidAlive } from "./worker.js";
+import { type Opts, pickEligible, pidAlive, persistReviewFindings } from "./worker.js";
 import * as repo from "./db.js";
 import { resolveMode, profileFor, isReadOnlyMode } from "./modes.js";
 import { preserveWipToBranch } from "./checkpoint.js";
@@ -176,6 +176,7 @@ async function finalize(
     const usage = usageNote(res);
     if (usage) repo.addNote(task.id, usage, "worker");
     const completed = repo.completeTask(task.id, { result, ranReadOnly, evidenceReliable: changed.gitAvailable });
+    persistReviewFindings(task, mode, res); // review mode → structured bob-review note (parity with 1.x)
     if (task.retry_attempts > 0) repo.resetRetryAttempts(task.id);
     const finalStatus = completed?.status ?? "done";
     log(`  ✓ ${finalStatus} — ${changed.count} file(s) changed, result captured (${result.length} chars)`);

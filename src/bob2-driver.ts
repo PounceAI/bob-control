@@ -12,6 +12,8 @@ import {
   type Bob2TaskRow,
 } from "./bob2-taskstore.js";
 import { writeAutoApprove } from "./bob2-config.js";
+import { producesReviewFindings } from "./modes.js";
+import { parseReviewFindings, type ReviewIssue } from "./review-findings.js";
 
 // The Bob 2.0 in-process driver. Bob 2.0 removed the node-ipc pipe, so the only way to start a task
 // is the extension's exported activate() API (`getExtension('IBM.bob-code').exports.startTask`), callable
@@ -82,7 +84,7 @@ export interface InProcessDriverOptions {
 export function mapOutcome(
   row: Bob2TaskRow | null,
   settled: boolean,
-  extras: { result?: string; tokensUsed?: number; maxIdleMs?: number } = {},
+  extras: { result?: string; reviewFindings?: ReviewIssue[]; tokensUsed?: number; maxIdleMs?: number } = {},
 ): DispatchResult {
   const err = row ? taskError(row) : null;
   const detail = row ? `bob2 status=${row.status}${err ? ` error=${err}` : ""}` : "";
@@ -95,7 +97,8 @@ export function mapOutcome(
     maxIdleMs: extras.maxIdleMs ?? 0,
   };
   if (err) return { ...base, status: "aborted" };
-  if (settled) return { ...base, status: "completed", result: extras.result ?? "" };
+  if (settled)
+    return { ...base, status: "completed", result: extras.result ?? "", reviewFindings: extras.reviewFindings };
   return { ...base, status: "timeout" };
 }
 
@@ -282,8 +285,15 @@ export class InProcessDriver implements BobDriver {
       // clean completion; a timeout/error row's last message would be partial/misleading). maxGapMs is
       // stall-watchdog telemetry (see DispatchResult.maxIdleMs).
       const tokensUsed = parseCosts(row?.costs ?? null)?.output ?? 0;
-      const result = settled && row && !taskError(row) ? (store.readResultText(id) ?? "") : "";
-      return mapOutcome(row, settled, { result, tokensUsed, maxIdleMs: maxGapMs });
+      const done = settled && !!row && !taskError(row);
+      const result = done ? (store.readResultText(id) ?? "") : "";
+      // Review mode: findings span the task's assistant messages and readResultText returns only the last
+      // (a summary), so parse the full transcript into structured findings for the board's bob-review note.
+      const reviewFindings =
+        done && producesReviewFindings(opts.mode ?? "")
+          ? parseReviewFindings(store.readReviewText(id) ?? "")
+          : undefined;
+      return mapOutcome(row, settled, { result, reviewFindings, tokensUsed, maxIdleMs: maxGapMs });
     } finally {
       store?.close();
     }
