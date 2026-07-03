@@ -114,14 +114,11 @@ export async function listUntracked(cwd: string): Promise<string[]> {
 let tmpIndexSeq = 0;
 
 /**
- * Snapshot the current worktree — tracked changes AND untracked (non-ignored) files — into a git
- * tree object, returning its sha WITHOUT touching the real index. Stages into a throwaway TEMP index
- * (`add -A` → `write-tree`), so callers get an untracked-aware snapshot that `git stash create`
- * can't produce (it silently drops untracked files). `write-tree` persists the tree in the object
- * DB, so the returned sha stays valid after the temp index is removed. Returns null when cwd isn't a
- * git work tree or the snapshot can't be built. The temp index (and any leftover lock) is always
- * cleaned up; never throws. Pass `signal` to let a bounded caller abort a wedged add/write-tree — the
- * child is killed, so the finally still runs and the temp index doesn't leak.
+ * Snapshot the worktree — tracked changes AND untracked (non-ignored) files — as a git tree sha,
+ * WITHOUT touching the real index: stages into a throwaway TEMP index (`add -A` → `write-tree`), so
+ * unlike `git stash create` (which drops untracked files) the snapshot is untracked-aware. The sha
+ * outlives the temp index (write-tree persists it). null on non-git / failure; temp index + lock are
+ * always cleaned up; never throws. `signal` lets a bounded caller abort a wedged add/write-tree.
  */
 export async function snapshotWorktreeTree(cwd: string, signal?: AbortSignal): Promise<string | null> {
   // --absolute-git-dir needs git ≥2.13; fall back to the always-present --git-dir (possibly
@@ -135,9 +132,8 @@ export async function snapshotWorktreeTree(cwd: string, signal?: AbortSignal): P
   const tmpIndex = resolve(gitDir, `bob-tmp-index-${process.pid}-${Date.now()}-${tmpIndexSeq++}`);
   const env = { GIT_INDEX_FILE: tmpIndex };
   try {
-    // add -A stages adds + modifications + deletions relative to the empty temp index → a faithful
-    // snapshot of what's on disk now (still honoring .gitignore). signal aborts either child if a
-    // bounded caller times out, so a hang dies here rather than orphaning a process + temp index.
+    // add -A stages adds + mods + deletions into the empty temp index → a faithful on-disk snapshot
+    // (honoring .gitignore); signal kills a wedged child so a hang doesn't orphan a process + index.
     if (!(await runGit(["add", "-A"], cwd, undefined, env, signal)).ok) return null;
     return (await gitOut(["write-tree"], cwd, undefined, env, signal)).trim() || null;
   } finally {
@@ -152,17 +148,18 @@ export async function snapshotWorktreeTree(cwd: string, signal?: AbortSignal): P
 }
 
 /**
- * snapshotWorktreeTree under a timeout: on timeout it aborts the git children so a wedged add/write-tree
- * (a stalled clean/smudge filter, a wedged network FS — `index.lock` contention just fails fast) is
- * killed and its temp index gets cleaned up, then resolves null so the caller isn't blocked. Only a
- * child that ignores the kill signal AND stays wedged can still leak, and even then the caller returns.
+ * snapshotWorktreeTree under a timeout: on timeout it aborts the git children (a wedged clean/smudge
+ * filter or network FS — `index.lock` just fails fast), so the hang is killed, its temp index cleaned
+ * up, and null returned. Only a child that ignores the kill and stays wedged can still leak.
  */
 export async function snapshotWorktreeTreeBounded(cwd: string, timeoutMs = 30_000): Promise<string | null> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<null>((resolve) => {
     timer = setTimeout(() => {
-      controller.abort(); // kill the git children so snapshotWorktreeTree's finally can drop the temp index
+      // stderr trail so a slow-git env (the judge silently seeing "no changes") is diagnosable.
+      console.error(`[bob-control] git worktree snapshot timed out after ${timeoutMs}ms in ${cwd}`);
+      controller.abort(); // kill the git children so snapshotWorktreeTree's finally drops the temp index
       resolve(null);
     }, timeoutMs);
     timer.unref?.();

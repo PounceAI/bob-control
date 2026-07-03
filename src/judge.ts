@@ -145,14 +145,11 @@ export async function captureGitBaseline(cwd: string): Promise<GitBaseline> {
 /**
  * Bounded diff of THIS task's changes — the judge's ground truth.
  *
- * With `baselineTree`: diff it against a fresh untracked-aware snapshot. Both stage untracked files,
- * so edits to files that stay untracked surface (newly created AND already-untracked pre-task) while
- * pre-existing tracked/untracked state cancels out — which a plain `git diff` can't manage. Blind
- * spot: `add -A` honors `.gitignore`, so a deliverable at an ignored path is invisible here.
- *
- * Without one (non-git, or git too old to snapshot): diff the worktree against `baselineRef`,
- * intent-to-adding task-created untracked files (not in `priorUntracked`) so new files appear; the
- * marks are reset in a finally.
+ * With `baselineTree`: tree-vs-fresh-snapshot diff. Both stage untracked files, so edits that stay
+ * untracked surface and pre-existing dirt cancels — which plain `git diff` can't do. Blind spot:
+ * `add -A` honors `.gitignore`, so an ignored-path deliverable is invisible.
+ * Without one (non-git / git too old): diff against `baselineRef`, intent-to-adding task-created
+ * untracked files (not in `priorUntracked`) so they appear; marks reset in a finally.
  */
 export async function captureGitDiff(
   cwd: string,
@@ -164,14 +161,14 @@ export async function captureGitDiff(
   if (baselineTree) {
     const currTree = await snapshotWorktreeTreeBounded(cwd);
     if (currTree) {
-      // Trust the tree diff only when git actually ran. A failed diff (e.g. an unresolvable
-      // baselineTree) has empty stdout, and gitOut alone can't tell that from a clean tree — so
-      // gate on `ok` and fall through rather than reporting a git error as "no changes". A
-      // maxChars truncation still counts as ok (a deliberate stop with a valid partial diff).
+      // Gate on `ok`: a failed diff (unresolvable baselineTree) has empty stdout that gitOut can't
+      // tell from a clean tree. Truncation counts as ok (deliberate stop, valid partial diff).
       const res = await runGit(["diff", baselineTree, currTree], cwd, maxChars);
       if (res.ok) return res.stdout || "(no changes detected)";
     }
-    // currTree snapshot failed, or the tree diff errored: fall through to the ref-based diff.
+    // Tree path failed (snapshot or diff) — degrade to the ref diff, and leave a trail: the two paths
+    // differ exactly on untracked-content edits, so a silent fallback hides why the judge saw less.
+    console.error(`[bob-control] captureGitDiff: tree path unavailable in ${cwd}, using ref-based diff`);
   }
   const prior = new Set(priorUntracked);
   const newFiles = (await listUntracked(cwd)).filter((f) => !prior.has(f));
