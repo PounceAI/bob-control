@@ -21,12 +21,13 @@
     "bob-control": "dist/server.js",
     "bob-tasks": "dist/cli.js"
   },
-  "files": ["dist/**/*.js", "!dist/**/*.test.js"],
+  "files": ["dist/**/*.js", "!dist/**/*.test.js", "!dist/ipc-test-harness.js", "!dist/smoke.js"],
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "prepublishOnly": "npm run build",
+    "prepublishOnly": "npm run build && npm run check:shebang",
+    "check:shebang": "node -e \"process.exit(require('fs').readFileSync('dist/server.js','utf8').startsWith('#!/usr/bin/env node') ? 0 : 1)\"",
     "build": "tsc && npm run build:plugin",
     "build:plugin": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node22 --outfile=claude-plugin/server/server.mjs",
     "server": "node dist/server.js",
