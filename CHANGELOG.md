@@ -10,6 +10,13 @@ All notable changes to this project are documented here. Format loosely follows
 - **Published to npm as `@pounceai/bob-control`.** `npx -y @pounceai/bob-control` runs the MCP server
   standalone via a new `bob-control` bin. The `files` allowlist ships only runtime `dist` (no tests or
   fixtures), and a `check:shebang` publish gate guards both bin shebangs.
+- **`--webhook <url>` on the worker.** POSTs notable transitions (a task done / blocked / needs-input /
+  retrying, and the worker stopping / erroring) to a URL as `application/json`. One payload serves Slack
+  (`text`), Discord (`content`), and a generic receiver (`{ event, seq, data, worker, ts }`, `seq`
+  monotonic for reordering). Best-effort: a POST never blocks or crashes the drain, an in-flight cap drops
+  bursts to a slow endpoint, and pending POSTs flush before every exit so the final event lands. The URL
+  is validated at startup (http/https only) and redacted in logs; `--webhook-secret <s>` HMAC-signs the
+  body (`X-Bob-Signature`) for a generic receiver to verify.
 
 ### Fixed
 

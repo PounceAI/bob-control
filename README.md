@@ -317,7 +317,8 @@ Flags: `--once` `--tag <t>` `--dry-run` `--pipe` `--poll` `--timeout` `--assigne
 `--no-notify` `--no-defer` `--answer-followups` `--escalate-all` `--review-plans`
 `--allow-commands <prefix,prefix>` `--deny-commands <prefix,prefix>` `--no-command-gate`
 `--allow-all-commands` `--no-checkpoint` `--no-idle-watchdog` `--idle-timeout <ms>`
-`--no-budget` `--budget-cap <tokens>` `--max-turns <n>` (plus the verify-and-continue flags below).
+`--no-budget` `--budget-cap <tokens>` `--max-turns <n>` `--webhook <url>` `--webhook-secret <s>`
+(plus the verify-and-continue flags below).
 Needs Bob running with IPC enabled (see below).
 Aborted or timed-out tasks are parked as `blocked`; with `--retry <N>` the worker first
 re-dispatches a transient failure (timeout/abort) up to N times before parking it.
@@ -332,6 +333,18 @@ Each mode has a risk level, and the worker only dispatches tasks at or below
 `--max-risk` (default `standard`); higher-risk ones stay pending for manual
 dispatch. On finish the worker pops a tray toast (`--no-notify` to silence; the
 system sound and terminal bell are off by default).
+
+`--webhook <url>` POSTs the notable transitions — a task finishing, blocking, needing input, or
+retrying, and the worker itself stopping or erroring — to a URL as `application/json`. One payload
+serves three consumers: it carries `text` (a Slack incoming webhook renders it), `content` (a Discord
+webhook renders it), and the structured `{ event, seq, data, worker, ts }` for a generic receiver
+(`seq` monotonic, so concurrent POSTs can be reordered). Delivery is
+best-effort: a POST never blocks or crashes the drain, bursts past an in-flight cap to a slow endpoint
+are dropped, and the worker flushes pending POSTs before it exits so the final event still lands. The
+URL is validated at startup (http/https only) and only its host is logged, since a Slack/Discord webhook
+URL carries its secret in the path. The payload transmits the repo path (`cwd`), task titles, and Bob's
+question text to that URL — point it only at an endpoint you trust; `--webhook-secret <s>` HMAC-signs the
+body (`X-Bob-Signature: sha256=…`) so a generic receiver can verify authenticity.
 
 **Run it standing (hands-off loop).** Creating a task doesn't start Bob — a worker has to pull it.
 Keep one **always draining** and the plugin's dispatch skills become end-to-end hands-off: they
