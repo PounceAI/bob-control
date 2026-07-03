@@ -223,9 +223,11 @@ export function createWebhookSink(url: string, meta: WebhookMeta, opts: WebhookO
         let timer: ReturnType<typeof setTimeout> | undefined;
         await Promise.race([
           Promise.allSettled([...inFlight]),
+          // Keep this timer ref'd: it both bounds the wait and, when every in-flight POST is a pure
+          // pending promise (no socket to hold the loop), is the only thing keeping the loop alive long
+          // enough for the race to settle. clearTimeout right after means it never outlives the call.
           new Promise<void>((r) => {
             timer = setTimeout(r, hardDeadline - Date.now());
-            timer.unref?.();
           }),
         ]);
         clearTimeout(timer);
