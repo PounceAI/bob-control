@@ -208,6 +208,9 @@ function migrate(d: DatabaseSync): void {
   addColumnIfMissing(d, "tasks", "estimated_tokens", "INTEGER");
   addColumnIfMissing(d, "worker_heartbeats", "worktree", "TEXT"); // T7 worktree lease
   addColumnIfMissing(d, "worker_heartbeats", "tag", "TEXT"); // the worker's --tag pin, surfaced in worker_draining
+  addColumnIfMissing(d, "worker_heartbeats", "last_dispatch_status", "TEXT"); // most recent dispatch outcome (health signal)
+  addColumnIfMissing(d, "worker_heartbeats", "last_dispatch_detail", "TEXT"); // short reason, e.g. a provider/auth error
+  addColumnIfMissing(d, "worker_heartbeats", "last_dispatch_at", "TEXT"); // when that dispatch settled (freshness)
 }
 
 /**
@@ -633,6 +636,10 @@ export interface WorkerLiveness {
   /** Distinct --tag pins of the live workers (null = unfiltered, drains every tag) — so a foreman can see
    *  why a live worker isn't pulling a task: if no entry is null or matches the task's tags, it's filtered out. */
   tags: (string | null)[];
+  /** The most recent dispatch outcome among the live workers — a health signal beyond "is anything beating".
+   *  A logged-out Bob keeps beating (the 2.0 loop runs) but its dispatches abort, so `status:"aborted"` here
+   *  flags "drainer alive but not actually working" up front. null when no live worker has dispatched yet. */
+  last_dispatch: { status: string; detail: string | null; seconds_ago: number } | null;
 }
 
 /** Identifying metadata for a beat. `worktree` is the checkout the worker is bound to (its normalized cwd)
@@ -655,6 +662,20 @@ export function recordWorkerHeartbeat(workerId: string, meta: HeartbeatMeta = {}
        ON CONFLICT(worker_id) DO UPDATE SET assignee = excluded.assignee, pid = excluded.pid, worktree = excluded.worktree, tag = excluded.tag, last_beat = excluded.last_beat`,
     )
     .run(workerId, meta.assignee ?? null, meta.pid ?? null, meta.worktree ?? null, meta.tag ?? null, now, now);
+}
+
+/** Stamp the worker's most recent dispatch outcome onto its heartbeat — a board_status health signal, so a
+ *  live-but-failing drainer (e.g. Bob logged out → every dispatch aborts) shows as last_dispatch.status
+ *  "aborted" instead of a healthy-looking "draining". Refreshes last_beat too; no-op if the row is gone
+ *  (worker stopped). `detail` (Bob's error line) is whitespace-collapsed and truncated for compact display. */
+export function recordDispatchOutcome(workerId: string, status: string, detail?: string | null): void {
+  const now = nowIso();
+  const d = detail ? detail.replace(/\s+/g, " ").trim().slice(0, 160) || null : null;
+  getDb()
+    .prepare(
+      "UPDATE worker_heartbeats SET last_dispatch_status = ?, last_dispatch_detail = ?, last_dispatch_at = ?, last_beat = ? WHERE worker_id = ?",
+    )
+    .run(status, d, now, now, workerId);
 }
 
 export interface WorktreeLeaseHolder {
@@ -800,19 +821,33 @@ export function getWorkerLiveness(windowMs = WORKER_HEARTBEAT_WINDOW_MS, nowMs =
   getDb()
     .prepare("DELETE FROM worker_heartbeats WHERE last_beat < ?")
     .run(new Date(nowMs - windowMs * 30).toISOString()); // prune workers dead far past the window
-  const rows = getDb().prepare("SELECT last_beat, tag FROM worker_heartbeats").all() as {
+  const rows = getDb()
+    .prepare(
+      "SELECT last_beat, tag, last_dispatch_status, last_dispatch_detail, last_dispatch_at FROM worker_heartbeats",
+    )
+    .all() as {
     last_beat: string;
     tag: string | null;
+    last_dispatch_status: string | null;
+    last_dispatch_detail: string | null;
+    last_dispatch_at: string | null;
   }[];
   const liveCutoff = nowMs - windowMs;
   let workers = 0;
   let mostRecent: number | null = null;
   const tags = new Set<string | null>();
+  let lastDispatch: { status: string; detail: string | null; at: number } | null = null;
   for (const r of rows) {
     const t = Date.parse(r.last_beat);
     if (t >= liveCutoff) {
       workers++;
       tags.add(r.tag); // null = an unfiltered worker (drains all tags)
+      // The freshest dispatch outcome across live workers (a dead worker's stale outcome must not surface).
+      if (r.last_dispatch_status && r.last_dispatch_at) {
+        const dt = Date.parse(r.last_dispatch_at);
+        if (!lastDispatch || dt > lastDispatch.at)
+          lastDispatch = { status: r.last_dispatch_status, detail: r.last_dispatch_detail, at: dt };
+      }
     }
     if (mostRecent === null || t > mostRecent) mostRecent = t;
   }
@@ -821,6 +856,13 @@ export function getWorkerLiveness(windowMs = WORKER_HEARTBEAT_WINDOW_MS, nowMs =
     workers,
     last_beat_seconds_ago: mostRecent === null ? null : Math.max(0, Math.round((nowMs - mostRecent) / 1000)),
     tags: [...tags],
+    last_dispatch: lastDispatch
+      ? {
+          status: lastDispatch.status,
+          detail: lastDispatch.detail,
+          seconds_ago: Math.max(0, Math.round((nowMs - lastDispatch.at) / 1000)),
+        }
+      : null,
   };
 }
 

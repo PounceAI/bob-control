@@ -32,6 +32,9 @@ export interface DriverLoopConfig {
   /** Judge LLM transport overrides (fetchImpl/spawnImpl) merged into the judge deps — injected in tests
    *  so --verify-judge runs without a real LLM call. */
   judgeLlm?: Partial<LlmDeps>;
+  /** This loop's heartbeat id — set by runDriverLoop so finalize() can stamp each dispatch outcome onto the
+   *  heartbeat (board_status health signal). Absent in a direct driveOnce() test → outcome recording no-ops. */
+  workerId?: string;
 }
 
 function buildPrompt(task: Task): string {
@@ -160,6 +163,9 @@ async function finalize(
 ): Promise<void> {
   const { opts, cwd } = cfg;
   const log = cfg.log ?? (() => {});
+  // Stamp this dispatch's outcome onto the heartbeat before branching, so board_status surfaces a
+  // live-but-failing drainer (every status — completed / aborted / timeout — is captured uniformly).
+  if (cfg.workerId) repo.recordDispatchOutcome(cfg.workerId, res.status, res.lastText);
 
   // Gate completion on the status, NOT on result text: the verify-and-continue loop returns Bob's last
   // (non-empty) result with status 'aborted' when it gives up, and that must block, not falsely complete.
@@ -246,6 +252,8 @@ export async function runDriverLoop(cfg: DriverLoopConfig, shouldStop: () => boo
   // Liveness beat — no worktree, so it shows under worker_draining but holds no lease (one window, one loop).
   // startHeartbeat is shared with the 1.x worker; stopHeartbeat() clears the timer + row.
   const stopHeartbeat = repo.startHeartbeat(workerId, { assignee: opts.assignee, pid: process.pid, tag: opts.tag });
+  // Thread the heartbeat id so finalize() can stamp each dispatch outcome onto this worker's row.
+  const driveCfg: DriverLoopConfig = { ...cfg, workerId };
 
   let deferred = false; // tracks defer state across iterations for one-shot deferred/resumed emits
   // Teardown in `finally` so a throw from isBoardArmed()/sleep/shouldStop/emit can't leak the heartbeat: an
@@ -287,7 +295,7 @@ export async function runDriverLoop(cfg: DriverLoopConfig, shouldStop: () => boo
       }
       let processed = false;
       try {
-        processed = await driveOnce(cfg);
+        processed = await driveOnce(driveCfg);
       } catch (e) {
         log(`loop error: ${(e as Error).message}`); // driveOnce shouldn't throw, but never let the loop die
       }
