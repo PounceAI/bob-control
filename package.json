@@ -1,6 +1,6 @@
 {
   "name": "@pounceai/bob-control",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Bob Control: MCP server + CLI + worker that runs IBM Bob (and any MCP-capable agent) unattended against a SQLite task board.",
   "author": "Joshua Gilbert",
   "license": "Apache-2.0",
@@ -21,7 +21,12 @@
     "bob-control": "dist/server.js",
     "bob-tasks": "dist/cli.js"
   },
-  "files": ["dist/**/*.js", "!dist/**/*.test.js", "!dist/ipc-test-harness.js", "!dist/smoke.js"],
+  "files": [
+    "dist/**/*.js",
+    "!dist/**/*.test.js",
+    "!dist/ipc-test-harness.js",
+    "!dist/smoke.js"
+  ],
   "publishConfig": {
     "access": "public"
   },

@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [2.2.0] — 2026-07-09 — worker webhook + drainer health signal
 
 ### Added
 
@@ -30,8 +30,7 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [2.1.0] — 2026-07-03 — npm distribution + untracked-aware verifier
 
-_Correction: `--webhook` was listed here but merged after the 2.1.0 npm publish; it ships in the next
-release (see Unreleased)._
+_Correction: `--webhook` was listed here but merged after the 2.1.0 npm publish; it shipped in 2.2.0._
 
 ### Added
 
