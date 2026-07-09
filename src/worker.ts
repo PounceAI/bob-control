@@ -235,6 +235,12 @@ export function parseOpts(argv: string[]): Opts {
       process.exit(1);
     }
   }
+  // A secret with no URL is a misconfiguration — fail loud rather than silently not signing all session.
+  const webhookSecret = val("--webhook-secret");
+  if (webhookSecret !== undefined && webhookUrl === undefined) {
+    console.error("--webhook-secret requires --webhook <url>");
+    process.exit(1);
+  }
   return {
     once: has("--once"),
     newTab,
@@ -278,7 +284,7 @@ export function parseOpts(argv: string[]): Opts {
     denyCommands: csv(val("--deny-commands")),
     allowAllCommands: has("--allow-all-commands"),
     webhookUrl,
-    webhookSecret: val("--webhook-secret"),
+    webhookSecret,
   };
 }
 
@@ -399,7 +405,13 @@ async function parkWorkspaceMismatch(task: Task, opts: Opts, m: WorkspaceMismatc
   }
 }
 
-async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: boolean | null): Promise<void> {
+async function runOne(
+  client: BobClient,
+  task: Task,
+  opts: Opts,
+  patchPresent: boolean | null,
+  workerId?: string,
+): Promise<void> {
   const { mode, source, profile, pressesLand } = resolveRouting(task, patchPresent);
   console.log(`\n▶ #${task.id} "${task.title}" → mode {${mode}} (${source}, risk:${profile.risk})`);
   emit(opts, "taskStart", { id: task.id, title: task.title, mode, risk: profile.risk });
@@ -428,6 +440,9 @@ async function runOne(client: BobClient, task: Task, opts: Opts, patchPresent: b
   const initialRes = await doDispatch(buildPrompt(task));
   const res = await pollLoop(initialRes, planStopBaseline);
 
+  // Stamp the outcome onto the heartbeat before terminal handling — the 1.x analog of finalize()'s
+  // last_dispatch stamp, so a live-but-failing drainer surfaces on this path too.
+  if (workerId) repo.recordDispatchOutcome(workerId, res.status, res.lastText);
   persistReviewFindings(task, mode, res);
   // The followup gate is unregistered by the caller's finally (guaranteed on every exit path).
   await finalizeDispatch(client, task, opts, mode, res, getSeenAsk(), evidenceBaseline);
@@ -995,11 +1010,14 @@ export async function main(): Promise<void> {
     const detail = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
     console.error(`bob-worker: unhandled rejection (ignored): ${detail}`);
   });
+  // One id per run: the lease heartbeat AND the webhook `run` field, so webhook events correlate to a
+  // board heartbeat and `seq` is scoped per run (a restart = a new id).
+  const workerId = randomUUID();
   // Wire the webhook sink before the first emit so even a startup error (lease/connect) is delivered.
   if (opts.webhookUrl) {
     webhookSink = createWebhookSink(
       opts.webhookUrl,
-      { cwd: process.cwd(), assignee: opts.assignee, tag: opts.tag },
+      { cwd: process.cwd(), assignee: opts.assignee, tag: opts.tag, run: workerId },
       { secret: opts.webhookSecret },
     );
     // Redact the URL: a Slack/Discord webhook carries its secret in the path.
@@ -1014,7 +1032,6 @@ export async function main(): Promise<void> {
   // so it holds whether the board is per-project or worktree-shared. claimWorktreeLease checks-and-claims
   // atomically (one transaction), so two workers starting together can't both observe "no holder" and
   // both proceed. The claim doubles as the first liveness heartbeat board_status reads.
-  const workerId = randomUUID();
   const worktreeKey = normalizeWorkspacePath(process.cwd());
   const beatMeta = { assignee: opts.assignee, pid: process.pid, worktree: worktreeKey, tag: opts.tag };
   if (!opts.dryRun) {
@@ -1317,9 +1334,11 @@ export async function main(): Promise<void> {
     }
     pollStatus.enter("active");
     try {
-      await runOne(client, task, opts, patchPresent);
+      await runOne(client, task, opts, patchPresent, workerId);
     } catch (err) {
       console.error(`  ! error on #${task.id}: ${(err as Error).message}`);
+      // A dispatch that died before runOne's stamp still marks the heartbeat as "error", not a healthy beat.
+      repo.recordDispatchOutcome(workerId, "error", (err as Error).message);
       // Only park genuinely unfinished work — don't clobber a task that already completed
       // (done OR analysis_done) or is legitimately parked awaiting a human answer (needs_input)
       // when the error is thrown after completion/parking.

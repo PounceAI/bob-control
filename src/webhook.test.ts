@@ -13,7 +13,7 @@ import {
   type WebhookMeta,
 } from "./webhook.js";
 
-const META: WebhookMeta = { cwd: "/repo", assignee: "bob", tag: "rpg" };
+const META: WebhookMeta = { cwd: "/repo", assignee: "bob", tag: "rpg", run: "r-1" };
 
 // A recording fake fetch: captures calls, returns a controllable Response.
 function fakeFetch(response: { ok: boolean; status: number } = { ok: true, status: 200 }) {
@@ -74,7 +74,7 @@ test("buildPayload: same summary in text + content, structured event, seq", () =
   assert.equal(p.event, "taskDone");
   assert.equal(p.seq, 7);
   assert.equal(p.ts, "T0");
-  assert.deepEqual(p.worker, { cwd: "/repo", assignee: "bob", tag: "rpg" });
+  assert.deepEqual(p.worker, { cwd: "/repo", assignee: "bob", tag: "rpg", run: "r-1" });
   assert.equal(p.data.filesChanged, 3); // raw event preserved for generic consumers
 });
 
@@ -163,6 +163,33 @@ test("backpressure: over the cap, excess POSTs are dropped and warned once", asy
   sink.post("taskDone", { id: 4, status: "done" }); // dropped, no second warning
   assert.equal(calls.length, 2, "only up-to-cap POSTs reach fetch");
   assert.equal(logs.filter((l) => l.includes("dropping")).length, 1, "warned exactly once");
+});
+
+test("backpressure: the warning re-arms once capacity returns — a busy-but-alive endpoint can't mute it forever", async () => {
+  const g = gatedFetch();
+  const logs: string[] = [];
+  const sink = createWebhookSink("http://x", META, { fetchImpl: g.impl, maxInFlight: 2, log: (m) => logs.push(m) });
+  sink.post("taskDone", { id: 1, status: "done" }); // in flight
+  sink.post("taskDone", { id: 2, status: "done" }); // in flight (at cap)
+  sink.post("taskDone", { id: 3, status: "done" }); // dropped + warned (episode 1)
+  g.resolvers[0]({ ok: true, status: 200 } as unknown as Response); // one settles → capacity, but never zero
+  await new Promise<void>((r) => setImmediate(r)); // let the settle's .finally re-arm run
+  sink.post("taskDone", { id: 4, status: "done" }); // back at cap
+  sink.post("taskDone", { id: 5, status: "done" }); // dropped again — a NEW episode must warn
+  assert.equal(logs.filter((l) => l.includes("dropping")).length, 2, "the second overload episode warned too");
+  g.releaseAll();
+  await sink.flush();
+});
+
+test("post() survives a synchronously-throwing fetch (never-throws contract)", async () => {
+  const logs: string[] = [];
+  const impl = (() => {
+    throw new Error("sync boom");
+  }) as unknown as typeof fetch;
+  const sink = createWebhookSink("http://x", META, { fetchImpl: impl, log: (m) => logs.push(m) });
+  assert.doesNotThrow(() => sink.post("taskDone", { id: 1, status: "done" }));
+  await sink.flush(); // nothing made it in flight — must resolve immediately, not hang
+  assert.ok(logs.some((l) => l.includes("sync boom")));
 });
 
 test("flush awaits in-flight POSTs", async () => {

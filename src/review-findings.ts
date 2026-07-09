@@ -90,6 +90,9 @@ function splitH3Sections(text: string): string[] {
  * model emits. Splits on `### ` headings; for each, recovers severity/title from
  * the heading, **Location:** (file + optional first line number), **Category:**,
  * a fenced ```diff fixed_diff, and the remaining prose as the description.
+ * A section with no severity and no Location/Category field is prose, not a
+ * finding (the 2.0 path feeds the WHOLE transcript, where a reasoning turn's
+ * `### Investigation plan` must not become a phantom "info" finding).
  * Returns [] when no `### ` sections are present.
  */
 export function parseReviewFindings(markdown: string): ReviewIssue[] {
@@ -108,7 +111,7 @@ export function parseReviewFindings(markdown: string): ReviewIssue[] {
     // Recover severity + title from the heading, tolerant of the two shapes a
     // model emits: a leading token ("HIGH: title") or an inline suffix
     // ("title - Severity: HIGH"). Falls back to a Severity: field in the body.
-    let severity = "info";
+    let severity: string | undefined;
     let title = heading;
     const sep = heading.indexOf(":");
     const leading = sep !== -1 ? heading.slice(0, sep).trim().toLowerCase() : "";
@@ -126,11 +129,15 @@ export function parseReviewFindings(markdown: string): ReviewIssue[] {
       const sv = body.match(/severity\**:?\**\s*(critical|high|medium|low|info|warning|minor|major)\b/i);
       if (sv) severity = sv[1].toLowerCase();
     }
+    // No severity and no structured field → a prose heading (a plan / narration turn), not a finding.
+    if (severity === undefined && field(body, "Location") === undefined && field(body, "Category") === undefined) {
+      continue;
+    }
     if (!title) continue;
 
     const issue: ReviewIssue = {
       title,
-      severity,
+      severity: severity ?? "info",
       category: field(body, "Category") ?? "general",
       description: "",
     };

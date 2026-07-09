@@ -667,10 +667,11 @@ export function recordWorkerHeartbeat(workerId: string, meta: HeartbeatMeta = {}
 /** Stamp the worker's most recent dispatch outcome onto its heartbeat — a board_status health signal, so a
  *  live-but-failing drainer (e.g. Bob logged out → every dispatch aborts) shows as last_dispatch.status
  *  "aborted" instead of a healthy-looking "draining". Refreshes last_beat too; no-op if the row is gone
- *  (worker stopped). `detail` (Bob's error line) is whitespace-collapsed and truncated for compact display. */
+ *  (worker stopped). `detail` (Bob's error line) is whitespace-collapsed, truncated, and stored only for a
+ *  non-completed status — success text is task content and must not leak into board_status. */
 export function recordDispatchOutcome(workerId: string, status: string, detail?: string | null): void {
   const now = nowIso();
-  const d = detail ? detail.replace(/\s+/g, " ").trim().slice(0, 160) || null : null;
+  const d = status !== "completed" && detail ? detail.replace(/\s+/g, " ").trim().slice(0, 160) || null : null;
   getDb()
     .prepare(
       "UPDATE worker_heartbeats SET last_dispatch_status = ?, last_dispatch_detail = ?, last_dispatch_at = ?, last_beat = ? WHERE worker_id = ?",

@@ -124,6 +124,15 @@ describe("worker heartbeat liveness", () => {
     assert.ok((live.last_dispatch?.seconds_ago ?? 99) < 5);
   });
 
+  it("a completed dispatch stores status but NO detail (task content must not leak into board_status)", () => {
+    getDb().exec("DELETE FROM worker_heartbeats");
+    recordWorkerHeartbeat("d2", { assignee: "bob" });
+    recordDispatchOutcome("d2", "completed", "Bob's final assistant prose — possibly sensitive");
+    const live = getWorkerLiveness(WIN, Date.now());
+    assert.equal(live.last_dispatch?.status, "completed");
+    assert.equal(live.last_dispatch?.detail, null, "detail is the error line; success stores none");
+  });
+
   it("last_dispatch is the freshest among live workers, and a dead worker's outcome doesn't surface", () => {
     getDb().exec("DELETE FROM worker_heartbeats");
     recordWorkerHeartbeat("older", { assignee: "bob" });

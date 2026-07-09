@@ -338,7 +338,8 @@ system sound and terminal bell are off by default).
 retrying, and the worker itself stopping or erroring — to a URL as `application/json`. One payload
 serves three consumers: it carries `text` (a Slack incoming webhook renders it), `content` (a Discord
 webhook renders it), and the structured `{ event, seq, data, worker, ts }` for a generic receiver
-(`seq` monotonic, so concurrent POSTs can be reordered). Delivery is
+(`seq` monotonic within `worker.run`, a per-process id, so a restart reads as a new run, not dropped
+deliveries; concurrent POSTs can be reordered). Delivery is
 best-effort: a POST never blocks or crashes the drain, bursts past an in-flight cap to a slow endpoint
 are dropped, and the worker flushes pending POSTs before it exits so the final event still lands. The
 URL is validated at startup (http/https only) and only its host is logged, since a Slack/Discord webhook
