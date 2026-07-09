@@ -23,6 +23,9 @@ export interface WebhookMeta {
   cwd: string;
   assignee: string;
   tag?: string;
+  /** Per-process run id (the worker's heartbeat id); scopes `seq`, so a restart's seq 0 reads as a new
+   *  run, not data loss. */
+  run?: string;
 }
 
 export interface WebhookSink {
@@ -80,9 +83,9 @@ export interface WebhookPayload {
   text: string; // Slack renders this
   content: string; // Discord renders this — intentionally identical to `text`
   event: WorkerEvent;
-  seq: number; // monotonic per-worker; concurrent POSTs can land out of order, so receivers can reorder
+  seq: number; // monotonic per worker.run; concurrent POSTs can land out of order, so receivers can reorder
   data: Record<string, unknown>;
-  worker: { cwd: string; assignee: string; tag?: string };
+  worker: { cwd: string; assignee: string; tag?: string; run?: string };
   ts: string;
 }
 
@@ -100,7 +103,7 @@ export function buildPayload(
     event: type,
     seq,
     data,
-    worker: { cwd: meta.cwd, assignee: meta.assignee, tag: meta.tag },
+    worker: { cwd: meta.cwd, assignee: meta.assignee, tag: meta.tag, run: meta.run },
     ts,
   };
 }
@@ -201,16 +204,26 @@ export function createWebhookSink(url: string, meta: WebhookMeta, opts: WebhookO
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (opts.secret)
         headers["x-bob-signature"] = `sha256=${createHmac("sha256", opts.secret).update(body).digest("hex")}`;
+      // post() never throws: a sync throw from a broken fetchImpl is logged and dropped like any delivery failure.
+      let fetched: Promise<Response>;
+      try {
+        fetched = doFetch(url, { method: "POST", headers, body, signal: AbortSignal.timeout(timeoutMs) });
+      } catch (e) {
+        log(`[bob-control] webhook ${safeUrl} POST failed for ${type}: ${(e as Error).message}`);
+        return;
+      }
       // p closes over itself in .finally; safe because .finally runs as a microtask, strictly after the
       // synchronous inFlight.add(p) below — delete never precedes add. (Don't "simplify" by splitting.)
-      const p = doFetch(url, { method: "POST", headers, body, signal: AbortSignal.timeout(timeoutMs) })
+      const p = fetched
         .then((res) => {
           if (!res.ok) log(`[bob-control] webhook ${safeUrl} → HTTP ${res.status} for ${type}`);
         })
         .catch((e) => log(`[bob-control] webhook ${safeUrl} POST failed for ${type}: ${(e as Error).message}`))
         .finally(() => {
           inFlight.delete(p);
-          if (inFlight.size === 0) warnedOverflow = false; // re-arm the overload warning for the next episode
+          // Re-arm the warning when capacity returns — a busy-but-alive endpoint may never reach size 0,
+          // which would mute every later overload.
+          if (inFlight.size < maxInFlight) warnedOverflow = false;
         });
       inFlight.add(p);
     },

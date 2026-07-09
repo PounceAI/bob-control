@@ -201,6 +201,23 @@ test("runDriverLoop beats a liveness heartbeat while draining, and clears it on 
   assert.equal(getWorkerLiveness().draining, false, "heartbeat should be cleared once the loop stops");
 });
 
+test("runDriverLoop stamps each dispatch outcome onto its own heartbeat (board_status last_dispatch)", async () => {
+  // Exercises the workerId threading end-to-end (runDriverLoop → driveCfg → finalize), not just the
+  // recordDispatchOutcome unit. The row clears on stop, so read it at the taskFail emit (fires post-stamp).
+  createTask({ title: "will abort", mode: "code" });
+  const driver = fakeDriver({ status: "aborted", lastText: "bob2 status=error error=ProviderAuth" });
+  const seen: { last: ReturnType<typeof getWorkerLiveness>["last_dispatch"] } = { last: null };
+  await runDriverLoop({
+    ...cfg(driver, ["--once"]),
+    emit: (t) => {
+      if (t === "taskFail") seen.last = getWorkerLiveness().last_dispatch;
+    },
+  });
+  assert.equal(seen.last?.status, "aborted", "the loop's own heartbeat carries the dispatch outcome");
+  assert.match(seen.last?.detail ?? "", /ProviderAuth/, "the failure detail surfaces for the on-call");
+  assert.equal(getWorkerLiveness().last_dispatch, null, "cleared with the heartbeat on stop");
+});
+
 test("runDriverLoop clears the heartbeat (and closes the driver) even if the loop throws", async () => {
   // Teardown is in finally, so a throw escaping the loop body must not leak the beat — an orphaned interval
   // would pin worker_draining true forever in the never-exiting extension host.

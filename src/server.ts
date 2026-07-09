@@ -619,7 +619,10 @@ server.registerTool(
       "status, whether a drainer is currently servicing the board " +
       "(`worker_draining` — a live heartbeat from either a 1.x worker process or the 2.0 in-process " +
       "loop, with `.tags` = the --tag each live worker drains, null = an unfiltered worker that drains " +
-      "all tags), `worker_leases` (which checkout each live worker owns), " +
+      "all tags, and `.last_dispatch` = the freshest dispatch outcome among live workers " +
+      "({status, detail, seconds_ago}, null if none yet) — a health signal beyond mere liveness: a " +
+      "logged-out/failing Bob keeps beating, so a `last_dispatch.status` of 'aborted' means the drainer " +
+      "is alive but not completing work (warn before dispatching)), `worker_leases` (which checkout each live worker owns), " +
       "and `open_tasks` — the non-terminal tasks (staged / " +
       "pending / in_progress / needs_input / blocked) as compact {id,title,status,mode,tags,priority} " +
       "rows for deduping before create_task (capped; see open_tasks_truncated). Check " +

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   getDb,
   recordWorkerHeartbeat,
+  recordDispatchOutcome,
   clearWorkerHeartbeat,
   getWorkerLiveness,
   hasLivePeer,
@@ -41,6 +42,7 @@ describe("worker heartbeat liveness", () => {
       workers: 0,
       last_beat_seconds_ago: null,
       tags: [],
+      last_dispatch: null,
     });
   });
 
@@ -109,5 +111,41 @@ describe("worker heartbeat liveness", () => {
     clearWorkerHeartbeat("peer");
     recordWorkerHeartbeat("reloaded", { assignee: "bob", pid: 999999 }); // fresh beat, but the process is gone
     assert.equal(hasLivePeer("bob", "me", onlyMe), false); // dead pid → the reload case still reclaims
+  });
+
+  it("records a dispatch outcome, surfacing status + a collapsed/fresh detail; no dispatch → null", () => {
+    getDb().exec("DELETE FROM worker_heartbeats");
+    recordWorkerHeartbeat("d1", { assignee: "bob" });
+    assert.equal(getWorkerLiveness(WIN, Date.now()).last_dispatch, null, "a beat with no dispatch yet → null");
+    recordDispatchOutcome("d1", "aborted", "bob2 status=error   error=ProviderError\nnetwork");
+    const live = getWorkerLiveness(WIN, Date.now());
+    assert.equal(live.last_dispatch?.status, "aborted");
+    assert.match(live.last_dispatch?.detail ?? "", /ProviderError network/); // whitespace collapsed
+    assert.ok((live.last_dispatch?.seconds_ago ?? 99) < 5);
+  });
+
+  it("a completed dispatch stores status but NO detail (task content must not leak into board_status)", () => {
+    getDb().exec("DELETE FROM worker_heartbeats");
+    recordWorkerHeartbeat("d2", { assignee: "bob" });
+    recordDispatchOutcome("d2", "completed", "Bob's final assistant prose — possibly sensitive");
+    const live = getWorkerLiveness(WIN, Date.now());
+    assert.equal(live.last_dispatch?.status, "completed");
+    assert.equal(live.last_dispatch?.detail, null, "detail is the error line; success stores none");
+  });
+
+  it("last_dispatch is the freshest among live workers, and a dead worker's outcome doesn't surface", () => {
+    getDb().exec("DELETE FROM worker_heartbeats");
+    recordWorkerHeartbeat("older", { assignee: "bob" });
+    recordWorkerHeartbeat("newer", { assignee: "bob" });
+    // Fixed timestamps so the "freshest wins" pick is deterministic (both rows stay live via their beats).
+    const set = (id: string, status: string, at: string) =>
+      getDb()
+        .prepare("UPDATE worker_heartbeats SET last_dispatch_status = ?, last_dispatch_at = ? WHERE worker_id = ?")
+        .run(status, at, id);
+    set("older", "completed", "2020-01-01T00:00:00.000Z");
+    set("newer", "aborted", "2020-01-01T00:00:01.000Z"); // one second later → wins
+    assert.equal(getWorkerLiveness(WIN, Date.now()).last_dispatch?.status, "aborted");
+    // Read past the freshness window: both workers go stale → no dispatch signal from dead rows.
+    assert.equal(getWorkerLiveness(WIN, Date.now() + WIN + 5_000).last_dispatch, null);
   });
 });

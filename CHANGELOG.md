@@ -3,20 +3,41 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`--webhook <url>` on the worker.** POSTs notable transitions (a task done / blocked / needs-input /
+  retrying, and the worker stopping / erroring) to a URL as `application/json`. One payload serves Slack
+  (`text`), Discord (`content`), and a generic receiver (`{ event, seq, data, worker, ts }`; `seq` is
+  monotonic within `worker.run`, a per-process id, so a restart reads as a new run, not data loss).
+  Best-effort: a POST never blocks or crashes the drain, an in-flight cap drops bursts to a slow endpoint
+  (re-warning on each new overload), and pending POSTs flush before every exit so the final event lands.
+  The URL is validated at startup (http/https only) and redacted in logs; `--webhook-secret <s>` HMAC-signs
+  the body (`X-Bob-Signature`) and fails loud when passed without `--webhook`.
+- **`board_status.worker_draining.last_dispatch`** — each live drainer's most recent dispatch outcome
+  (status, failure detail, freshness), stamped by both the 2.0 in-process loop and the standalone worker,
+  so a live-but-failing drainer (e.g. Bob logged out → every dispatch aborts) surfaces up front instead of
+  reading as a healthy heartbeat. Detail is stored only for failures — success text never reaches the board.
+- **Full review findings on the 2.0 in-process driver** — review-mode dispatches parse Bob's whole
+  transcript into the structured `bob-review` board note (parity with 1.x), not just the closing summary.
+
+### Fixed
+
+- **The review parser no longer invents findings from prose headings.** A `### ` section with no severity
+  and no `Location`/`Category` field (a reasoning turn's "Investigation plan") is skipped instead of
+  persisted as a phantom `info` finding.
+
 ## [2.1.0] — 2026-07-03 — npm distribution + untracked-aware verifier
+
+_Correction: `--webhook` was listed here but merged after the 2.1.0 npm publish; it ships in the next
+release (see Unreleased)._
 
 ### Added
 
 - **Published to npm as `@pounceai/bob-control`.** `npx -y @pounceai/bob-control` runs the MCP server
   standalone via a new `bob-control` bin. The `files` allowlist ships only runtime `dist` (no tests or
   fixtures), and a `check:shebang` publish gate guards both bin shebangs.
-- **`--webhook <url>` on the worker.** POSTs notable transitions (a task done / blocked / needs-input /
-  retrying, and the worker stopping / erroring) to a URL as `application/json`. One payload serves Slack
-  (`text`), Discord (`content`), and a generic receiver (`{ event, seq, data, worker, ts }`, `seq`
-  monotonic for reordering). Best-effort: a POST never blocks or crashes the drain, an in-flight cap drops
-  bursts to a slow endpoint, and pending POSTs flush before every exit so the final event lands. The URL
-  is validated at startup (http/https only) and redacted in logs; `--webhook-secret <s>` HMAC-signs the
-  body (`X-Bob-Signature`) for a generic receiver to verify.
 
 ### Fixed
 

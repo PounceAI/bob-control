@@ -143,6 +143,26 @@ test("formatReviewFindings preserves line 0 (round-trips, not dropped as falsy)"
   assert.equal(round[0].line, 0);
 });
 
+test("parseReviewFindings skips prose headings with no review marker (the 2.0 full-transcript feed)", () => {
+  // readReviewText hands the parser Bob's WHOLE transcript, where a reasoning turn may use headed markdown.
+  const md = [
+    "### Investigation plan",
+    "First I'll read the worker, then the driver loop.",
+    "",
+    "### HIGH: Race in claim",
+    "**Location:** src/worker.ts:42",
+    "**Category:** correctness",
+    "Two claimers can both win.",
+    "",
+    "### Summary of what I checked",
+    "worker.ts, db.ts — no other issues.",
+  ].join("\n");
+  const issues = parseReviewFindings(md);
+  assert.equal(issues.length, 1, "reasoning/narration headings must not become phantom findings");
+  assert.equal(issues[0].title, "Race in claim");
+  assert.equal(issues[0].severity, "high");
+});
+
 test("parseReviewFindings ignores a '### ' heading inside a fenced diff (no spurious finding, fix intact)", () => {
   const md = [
     "### HIGH: Refactor the header",
