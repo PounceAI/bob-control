@@ -610,6 +610,23 @@ server.registerTool(
   async ({ ids, tag }) => json({ released: repo.releaseTasks({ ids, tag }) }),
 );
 
+// Shared by the board_status tool and the bob://board/status resource.
+function boardStatusPayload(): Record<string, unknown> {
+  repo.expireOverdueQuestions(); // sweep so a stuck needs_input doesn't linger past its deadline
+  const tasks = repo.listTasks({});
+  // Reuse the tasks we just loaded for counts — no extra query.
+  const { open_tasks, truncated } = repo.selectOpenTasks(tasks, OPEN_TASKS_CAP);
+  return {
+    armed: repo.isBoardArmed(),
+    worker_draining: repo.getWorkerLiveness(),
+    worker_leases: repo.getWorkerLeases(), // T7: which worktree each live worker owns
+    counts: repo.countByStatus(tasks),
+    total: tasks.length,
+    open_tasks,
+    open_tasks_truncated: truncated,
+  };
+}
+
 server.registerTool(
   "board_status",
   {
@@ -633,21 +650,7 @@ server.registerTool(
       "Also check before a bulk-create.",
     inputSchema: {},
   },
-  async () => {
-    repo.expireOverdueQuestions(); // sweep so a stuck needs_input doesn't linger past its deadline
-    const tasks = repo.listTasks({});
-    // Reuse the tasks we just loaded for counts — no extra query.
-    const { open_tasks, truncated } = repo.selectOpenTasks(tasks, OPEN_TASKS_CAP);
-    return json({
-      armed: repo.isBoardArmed(),
-      worker_draining: repo.getWorkerLiveness(),
-      worker_leases: repo.getWorkerLeases(), // T7: which worktree each live worker owns
-      counts: repo.countByStatus(tasks),
-      total: tasks.length,
-      open_tasks,
-      open_tasks_truncated: truncated,
-    });
-  },
+  async () => json(boardStatusPayload()),
 );
 
 server.registerTool(
@@ -682,16 +685,17 @@ server.registerTool(
       status: z.enum(TASK_STATUSES).optional().describe("Restrict the report to a single status group"),
     },
   },
-  async ({ status }) => {
-    repo.expireOverdueQuestions();
-    const tasks = repo.listTasks({});
-    const notes = new Map(tasks.map((t) => [t.id, repo.getNotes(t.id)]));
-    const openQuestions = new Map(
-      repo.listOpenQuestions().map((q) => [q.task_id, { text: q.text, options: q.options }]),
-    );
-    return { content: [{ type: "text", text: buildReport(tasks, notes, Date.now(), { status, openQuestions }) }] };
-  },
+  async ({ status }) => ({ content: [{ type: "text", text: renderBoardReport(status) }] }),
 );
+
+// Shared by the board_report tool and the bob://board/report resource.
+function renderBoardReport(status?: TaskStatus): string {
+  repo.expireOverdueQuestions();
+  const tasks = repo.listTasks({});
+  const notes = new Map(tasks.map((t) => [t.id, repo.getNotes(t.id)]));
+  const openQuestions = new Map(repo.listOpenQuestions().map((q) => [q.task_id, { text: q.text, options: q.options }]));
+  return buildReport(tasks, notes, Date.now(), { status, openQuestions });
+}
 
 server.registerTool(
   "revert_task",
@@ -718,6 +722,91 @@ server.registerTool(
     if (!r.reverted) return fail(r.note);
     return json({ id, reverted: true, removed: r.removed, recoveryRef: r.recoveryRef ?? null, note: r.note });
   },
+);
+
+// ---------------------------------------------------------------------------
+// Prompts & resources (MCP surfaces beyond tools: templates a client can offer
+// its user, and board state it can attach as context without a tool round-trip)
+// ---------------------------------------------------------------------------
+
+server.registerResource(
+  "board-status",
+  "bob://board/status",
+  {
+    title: "Board Status",
+    description:
+      "Live dispatch state as JSON: armed flag, worker liveness/leases/last dispatch, counts by status, open tasks.",
+    mimeType: "application/json",
+  },
+  async (uri) => ({
+    contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(boardStatusPayload(), null, 2) }],
+  }),
+);
+
+server.registerResource(
+  "board-report",
+  "bob://board/report",
+  {
+    title: "Board Report",
+    description:
+      "The board as a markdown standup/audit: tasks grouped by status in pull order, with age, idle time, and stalled flags.",
+    mimeType: "text/markdown",
+  },
+  async (uri) => ({ contents: [{ uri: uri.href, mimeType: "text/markdown", text: renderBoardReport() }] }),
+);
+
+server.registerPrompt(
+  "new-task",
+  {
+    title: "New Task",
+    description: "Turn a rough request into one well-formed task on the board.",
+    argsSchema: { request: z.string().describe("The rough ask to turn into a task") },
+  },
+  ({ request }) => ({
+    messages: [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text:
+            "Provision this request as ONE well-formed task on the Bob board.\n\n" +
+            "1. board_status first: skip creation if an open task already covers it, and if a live drainer " +
+            "would pull the new task mid-curation, create it staged:true and release_tasks when ready.\n" +
+            "2. create_task with a short action-oriented title; a description carrying context and concrete " +
+            "acceptance criteria; priority (low|medium|high|urgent); tags for filtering. Leave mode unset " +
+            "unless the request clearly needs a specific one — predict_mode previews the routing.\n" +
+            "3. Report the created task id and how it routed.\n\n" +
+            `Request: ${request}`,
+        },
+      },
+    ],
+  }),
+);
+
+server.registerPrompt(
+  "triage-board",
+  {
+    title: "Triage Board",
+    description: "Audit the whole board and fix what's safe to fix.",
+  },
+  () => ({
+    messages: [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text:
+            "Triage the Bob board.\n\n" +
+            "Read board_report (all statuses), then look for: stalled in_progress work; needs_input tasks " +
+            "whose question you can answer (answer_task_question) or should escalate; pending tasks with a " +
+            "wrong or missing mode (set_task_mode) or missing depends_on ordering (set_task_dependencies); " +
+            "duplicates or stale tasks to cancel.\n" +
+            "Propose every fix with a one-line reason first, then apply the safe ones with the tools and " +
+            "list what you changed.",
+        },
+      },
+    ],
+  }),
 );
 
 async function main(): Promise<void> {
