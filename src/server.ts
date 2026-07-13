@@ -725,8 +725,7 @@ server.registerTool(
 );
 
 // ---------------------------------------------------------------------------
-// Prompts & resources (MCP surfaces beyond tools: templates a client can offer
-// its user, and board state it can attach as context without a tool round-trip)
+// Prompts & resources (attachable board context + canned board workflows)
 // ---------------------------------------------------------------------------
 
 server.registerResource(
@@ -734,8 +733,7 @@ server.registerResource(
   "bob://board/status",
   {
     title: "Board Status",
-    description:
-      "Live dispatch state as JSON: armed flag, worker liveness/leases/last dispatch, counts by status, open tasks.",
+    description: "Live dispatch state: armed flag, worker liveness/leases/last dispatch, counts by status, open tasks.",
     mimeType: "application/json",
   },
   async (uri) => ({
