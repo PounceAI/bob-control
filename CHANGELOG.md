@@ -22,6 +22,9 @@ pending-approval persistence below.
   approval older than `approvalWedgeMs` (default 5s) aborts the dispatch immediately with the tool named —
   e.g. `execute_command (execute)` — instead of burning the dispatch timeout (default 5 min). A finished
   turn still reports its true outcome past a stale approval row; a pre-2.0.2 store (no table) is a no-op.
+- **npm publish rides the release tag.** The same `v*` tag that ships the .vsix + GitHub release now also
+  publishes `@pounceai/bob-control` (tag↔manifest drift gated on both manifests, idempotent on re-runs;
+  needs the `NPM_TOKEN` repo secret). A manual workflow run does `npm publish --dry-run` instead.
 
 ## [2.2.0] — 2026-07-09 — worker webhook + drainer health signal
 
