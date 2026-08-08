@@ -456,10 +456,11 @@ test("pendingApprovals returns [] on a pre-2.0.2 store (no table) — probed, ne
 });
 
 test("pendingApprovals reads a task's rows oldest-first, scoped to that task", () => {
-  const { db, store } = makeStore();
+  const { db } = makeStore();
   db.exec(
     "CREATE TABLE task_pending_approvals (task_id TEXT NOT NULL, request_id TEXT NOT NULL, payload_json TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (task_id, request_id))",
   );
+  const store = new Bob2TaskStore(db); // built over the complete 2.0.2 schema, like a real 2.0.2 open
   const ins = db.prepare("INSERT INTO task_pending_approvals VALUES (?, ?, ?, ?)");
   ins.run("t1", "r2", '{"permission":"execute"}', 200);
   ins.run("t1", "r1", '{"permission":"ask"}', 100);

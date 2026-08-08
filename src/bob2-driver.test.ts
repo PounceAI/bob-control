@@ -464,6 +464,23 @@ test("dispatch aborts fast on a wedged approval prompt, naming the tool, instead
   assert.equal(res.taskId, id);
 });
 
+test("an approval row with a null created_at (schema drift) is skipped, not read as an instant wedge", async () => {
+  const { db, store, seedRoot, bump } = makeStore();
+  db.exec("DROP TABLE task_pending_approvals"); // recreate WITHOUT the NOT NULL, to simulate the drift
+  db.exec("CREATE TABLE task_pending_approvals (task_id TEXT, request_id TEXT, payload_json TEXT, created_at INTEGER)");
+  let id = "";
+  const driver = new InProcessDriver(makeHost({ startTask: () => void (id = seedRoot("running")) }), {
+    openStore: () => store,
+    ...fast,
+    approvalWedgeMs: 10,
+  });
+  setTimeout(() => {
+    db.prepare("INSERT INTO task_pending_approvals VALUES (?, 'r', '{}', NULL)").run(id);
+    bump(id, "active"); // the turn finishes — a null-aged row must not have aborted it meanwhile
+  }, 12);
+  assert.equal((await driver.dispatch({ text: "do it" })).status, "completed");
+});
+
 test("a fresh approval inside the wedge margin does not abort a turn that then completes", async () => {
   const { store, seedRoot, bump, seedApproval } = makeStore();
   let id = "";

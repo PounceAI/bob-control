@@ -297,15 +297,21 @@ export class InProcessDriver implements BobDriver {
       // Wedge probe (2.0.2): a persisted approval older than approvalWedgeMs means Bob is frozen on a
       // prompt auto-approve didn't cover (an unverifiable command, or the deliberately un-approved `ask`)
       // — abort with it named instead of burning the dispatch timeout. Real settle wins first, so a
-      // finished turn with a stale approval row behind it still reports its true outcome.
+      // finished turn with a stale approval row behind it still reports its true outcome. A row with no
+      // created_at (schema drift — the DDL says NOT NULL) is skipped: a false abort of a healthy turn is
+      // worse than falling back to the timeout.
       let wedge: string | null = null;
+      const liveStore = store; // narrowed for the closure — TS can't see the null guard through capture
+      const quietMs = this.quietMs; // one source for both settle paths (the option and the closure)
       const { settled, row, maxGapMs } = await awaitTurnSettled(store, id, {
         pollMs: this.pollMs,
-        quietMs: this.quietMs,
+        quietMs,
         timeoutMs: opts.timeoutMs ?? 300_000,
         isSettled: (r) => {
-          if (turnSettled(r, this.quietMs)) return true;
-          const p = store!.pendingApprovals(id).find((a) => Date.now() - (a.created_at ?? 0) >= this.approvalWedgeMs);
+          if (turnSettled(r, quietMs)) return true;
+          const p = liveStore
+            .pendingApprovals(id)
+            .find((a) => a.created_at != null && Date.now() - a.created_at >= this.approvalWedgeMs);
           if (!p) return false;
           wedge = describePendingApproval(p.payload_json) ?? "unknown tool request";
           return true;

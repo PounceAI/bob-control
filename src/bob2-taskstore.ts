@@ -137,7 +137,8 @@ export function firstMessageMatches(firstMessage: string | null | undefined, con
 }
 
 /** A row of 2.0.2's `task_pending_approvals`: a tool request auto-approve did NOT cover, persisted while
- *  the task sits frozen waiting for the user. Absent as a table on 2.0.0/2.0.1 stores. */
+ *  the task sits frozen waiting for the user. Absent as a table on 2.0.0/2.0.1 stores. created_at is
+ *  NOT NULL in the DDL but kept wide (Bob owns the column); the wedge probe skips a null rather than abort. */
 export interface Bob2PendingApproval {
   request_id: string;
   payload_json: string;
