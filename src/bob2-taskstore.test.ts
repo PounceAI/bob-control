@@ -8,6 +8,7 @@ import { join } from "node:path";
 import {
   Bob2TaskStore,
   awaitTurnSettled,
+  describePendingApproval,
   isTerminal,
   isActivelyRunning,
   taskError,
@@ -444,4 +445,39 @@ test("bob2DbExists reports whether the store file exists", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── 2.0.2: persisted pending approvals ────────────────────────────────────────────────────────────
+
+test("pendingApprovals returns [] on a pre-2.0.2 store (no table) — probed, never thrown", () => {
+  const { store } = makeStore(); // makeStore builds the 2.0.0/2.0.1 schema: no task_pending_approvals
+  assert.deepEqual(store.pendingApprovals("t1"), []);
+  assert.deepEqual(store.pendingApprovals("t1"), []); // second call hits the memoized probe
+});
+
+test("pendingApprovals reads a task's rows oldest-first, scoped to that task", () => {
+  const { db, store } = makeStore();
+  db.exec(
+    "CREATE TABLE task_pending_approvals (task_id TEXT NOT NULL, request_id TEXT NOT NULL, payload_json TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (task_id, request_id))",
+  );
+  const ins = db.prepare("INSERT INTO task_pending_approvals VALUES (?, ?, ?, ?)");
+  ins.run("t1", "r2", '{"permission":"execute"}', 200);
+  ins.run("t1", "r1", '{"permission":"ask"}', 100);
+  ins.run("t2", "r3", '{"permission":"edit"}', 50); // another task's prompt — not ours
+  assert.deepEqual(
+    store.pendingApprovals("t1").map((p) => p.request_id),
+    ["r1", "r2"],
+  );
+  assert.deepEqual(store.pendingApprovals("t3"), []);
+});
+
+test("describePendingApproval summarizes tool + permission; degrades on partial/garbage payloads", () => {
+  assert.equal(
+    describePendingApproval('{"requestId":"x","signature":{"name":"execute_command"},"permission":"execute"}'),
+    "execute_command (execute)",
+  );
+  assert.equal(describePendingApproval('{"signature":{"name":"ask_followup_question"}}'), "ask_followup_question");
+  assert.equal(describePendingApproval('{"permission":"ask"}'), "ask"); // no tool name → the permission alone
+  assert.equal(describePendingApproval('{"other":true}'), null);
+  assert.equal(describePendingApproval("{not json"), null);
 });

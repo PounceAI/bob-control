@@ -41,6 +41,12 @@ test("workspaceFolderObject() returns the first WorkspaceFolder object (for star
   assert.equal(createBob2Host(deps({ folder: null })).workspaceFolderObject(), null);
 });
 
+test("workspaceTrusted() reflects the isTrusted dep; null (unknown) when an older extension omits it", () => {
+  assert.equal(createBob2Host({ ...deps(), isTrusted: () => true }).workspaceTrusted?.(), true);
+  assert.equal(createBob2Host({ ...deps(), isTrusted: () => false }).workspaceTrusted?.(), false);
+  assert.equal(createBob2Host(deps()).workspaceTrusted?.(), null); // dep absent → unknown, NOT untrusted
+});
+
 test("uses the configured extension id", () => {
   const seen: string[] = [];
   const host = createBob2Host(

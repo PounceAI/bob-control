@@ -10,6 +10,8 @@ export interface VscodeBob2Deps {
   getExtension(id: string): { isActive?: boolean; exports?: unknown } | undefined;
   /** vscode.workspace.workspaceFolders — the open folders (first one is the dispatch target). */
   workspaceFolders(): readonly { uri: { fsPath: string } }[] | undefined;
+  /** vscode.workspace.isTrusted — optional so an older extension build keeps working (absent = unknown). */
+  isTrusted?(): boolean;
 }
 
 /** Bob 2.0's extension id — the sibling extension whose exported activate() API the driver calls. */
@@ -36,6 +38,10 @@ export function createBob2Host(deps: VscodeBob2Deps, extensionId = BOB2_EXTENSIO
     workspaceFolderObject(): unknown {
       // The genuine vscode.WorkspaceFolder, passed through verbatim to startTask (Bob reads `.uri.fsPath`).
       return deps.workspaceFolders()?.[0] ?? null;
+    },
+    workspaceTrusted(): boolean | null {
+      // null (unknown) when the extension build predates the dep — the driver only hard-fails on `false`.
+      return deps.isTrusted ? deps.isTrusted() : null;
     },
   };
 }

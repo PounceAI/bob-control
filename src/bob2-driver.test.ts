@@ -27,6 +27,10 @@ function makeStore() {
     "CREATE TABLE tasks (id TEXT PRIMARY KEY, parent_id TEXT, status TEXT, directory TEXT, created_at INTEGER, updated_at INTEGER, costs TEXT, last_error TEXT, first_message TEXT, env TEXT)",
   );
   db.exec("CREATE TABLE messages (id TEXT PRIMARY KEY, task_id TEXT, role TEXT, data TEXT, created_at INTEGER)");
+  // 2.0.2's persisted-approval table (the taskstore tests cover the pre-2.0.2 store without it).
+  db.exec(
+    "CREATE TABLE task_pending_approvals (task_id TEXT NOT NULL, request_id TEXT NOT NULL, payload_json TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (task_id, request_id))",
+  );
   const store = new Bob2TaskStore(db);
   store.close = () => {}; // keep the shared db alive across the driver's per-dispatch open/close
   const base = Date.now() - 100_000; // created_at values in the recent past, so updated_at can advance past them
@@ -74,7 +78,12 @@ function makeStore() {
         Date.now(),
       );
   };
-  return { db, store, seedRoot, seedForeign, bump, setLastError, seedSubtask, finishWith };
+  // Bob persisting a tool request the auto-approve config didn't cover (the task is now frozen on it).
+  const seedApproval = (taskId: string, payload: unknown, createdAt = Date.now()): void =>
+    void db
+      .prepare("INSERT INTO task_pending_approvals (task_id, request_id, payload_json, created_at) VALUES (?, ?, ?, ?)")
+      .run(taskId, `req-${++n}`, JSON.stringify(payload), createdAt);
+  return { db, store, seedRoot, seedForeign, bump, setLastError, seedSubtask, finishWith, seedApproval };
 }
 
 function makeHost(opts: {
@@ -409,6 +418,65 @@ test("externalActivity respects the idle-grace window for a just-finished foreig
 test("externalActivity is false on cold start (bob.db not created yet) — never wedges the loop", async () => {
   const driver = new InProcessDriver(makeHost({}), { openStore: () => null, ...fast });
   assert.equal(await driver.externalActivity(60_000), false);
+});
+
+// ── 2.0.2: trust preflight + approval-wedge fast-abort ───────────────────────────────────────────
+
+test("dispatch fails fast on an untrusted workspace — no settings write, no startTask", async () => {
+  let writes = 0;
+  let started = 0;
+  const host = { ...makeHost({ startTask: () => void started++ }), workspaceTrusted: () => false };
+  const res = await new InProcessDriver(host, { writeApproval: () => writes++ }).dispatch({ text: "hi" });
+  assert.equal(res.status, "aborted");
+  assert.match(res.lastText, /not trusted/);
+  assert.match(res.lastText, new RegExp(DIR)); // names the folder to trust
+  assert.equal(writes, 0); // preflight runs BEFORE connect — no settings.json side effect
+  assert.equal(started, 0);
+});
+
+test("dispatch proceeds when trust is explicit true or unknown (host without the seam)", async () => {
+  const { store, seedRoot, bump } = makeStore();
+  let id = "";
+  const host = { ...makeHost({ startTask: () => void (id = seedRoot("running")) }), workspaceTrusted: () => true };
+  const driver = new InProcessDriver(host, { openStore: () => store, ...fast });
+  setTimeout(() => bump(id, "active"), 15);
+  assert.equal((await driver.dispatch({ text: "do it" })).status, "completed");
+  // hosts with no workspaceTrusted at all (every other test in this file) are the unknown-trust path
+});
+
+test("dispatch aborts fast on a wedged approval prompt, naming the tool, instead of burning the timeout", async () => {
+  const { store, seedRoot, seedApproval } = makeStore();
+  let id = "";
+  const driver = new InProcessDriver(makeHost({ startTask: () => void (id = seedRoot("running")) }), {
+    openStore: () => store,
+    ...fast,
+    approvalWedgeMs: 10,
+  });
+  // The task stays 'running' (frozen on the prompt); the persisted approval is well past the wedge margin.
+  setTimeout(
+    () => seedApproval(id, { signature: { name: "execute_command" }, permission: "execute" }, Date.now() - 60_000),
+    12,
+  );
+  const res = await driver.dispatch({ text: "do it", timeoutMs: 5_000 });
+  assert.equal(res.status, "aborted"); // aborted long before the 5s timeout — the test would hang otherwise
+  assert.match(res.lastText, /approval/);
+  assert.match(res.lastText, /execute_command \(execute\)/);
+  assert.equal(res.taskId, id);
+});
+
+test("a fresh approval inside the wedge margin does not abort a turn that then completes", async () => {
+  const { store, seedRoot, bump, seedApproval } = makeStore();
+  let id = "";
+  const driver = new InProcessDriver(makeHost({ startTask: () => void (id = seedRoot("running")) }), {
+    openStore: () => store,
+    ...fast,
+    approvalWedgeMs: 60_000,
+  });
+  setTimeout(() => {
+    seedApproval(id, { signature: { name: "read_file" }, permission: "read" }); // just raised — inside the margin
+    bump(id, "active"); // ...and Bob resolves it and finishes the turn
+  }, 12);
+  assert.equal((await driver.dispatch({ text: "do it" })).status, "completed");
 });
 
 // ── never-throw contract + busy guard ─────────────────────────────────────────────────────────────
