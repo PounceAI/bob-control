@@ -3,6 +3,29 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
+## [2.3.0] — 2026-08-07 — Bob 2.0.2 awareness: trust preflight + approval-wedge fast-abort
+
+Bob 2.0.2 changes two things a headless dispatcher must know about: an **untrusted workspace** now runs
+on Bob's pristine defaults (auto-approve OFF, command security ON, workspace custom modes hidden) with
+`~/.bob/settings/settings.json` ignored, and a tool request auto-approve doesn't cover is now **persisted
+to bob.db** (`task_pending_approvals`) while the task sits frozen on it. Every other contract the driver
+relies on (startTask, tasks/messages schema, lifecycle, mode resolution, settings keys) is unchanged —
+verified against the 2.0.2 bundle.
+
+### Added
+
+- **Workspace-trust preflight.** The in-process driver fails a dispatch up front — before the settings.json
+  auto-approve write — when the window's workspace is untrusted, naming the folder to trust, instead of
+  wedging on the first tool prompt or throwing "Mode not found" on a workspace custom mode. Trust flows
+  live from `vscode.workspace.isTrusted` through a new optional host seam; an older extension build that
+  doesn't supply it reads as unknown and keeps the pre-2.0.2 behavior.
+- **Approval-wedge fast-abort.** The completion watch also polls the task's `task_pending_approvals` rows:
+  a persisted approval older than a small margin (`approvalWedgeMs`, default 5s) means Bob is frozen on a
+  prompt the auto-approve config didn't cover (an unverifiable command, or the deliberately un-approved
+  `ask`), so the dispatch aborts immediately with the tool named — e.g. `execute_command (execute)` —
+  instead of burning the full dispatch timeout (default 5 min). A finished turn still reports its true
+  outcome even with a stale approval row behind it, and a pre-2.0.2 store (no table) is a no-op.
+
 ## [2.2.0] — 2026-07-09 — worker webhook + drainer health signal
 
 ### Added
