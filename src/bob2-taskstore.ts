@@ -145,8 +145,8 @@ export interface Bob2PendingApproval {
 }
 
 /** Human summary of a pending approval's payload (live shape: {requestId, signature:{name,…}, permission,…})
- *  → "execute_command (execute)"; null when the JSON won't parse or names nothing. Best-effort — the payload
- *  is Bob's serialized UI request, so shape drift must degrade the message, not the abort. */
+ *  → "execute_command (execute)"; null when the JSON won't parse or names nothing. The payload is Bob's
+ *  serialized UI request, so shape drift degrades the message, never the abort. */
 export function describePendingApproval(payloadJson: string): string | null {
   try {
     const p = JSON.parse(payloadJson) as { signature?: { name?: unknown }; permission?: unknown };
@@ -293,10 +293,9 @@ export class Bob2TaskStore {
     return { running, activeRecently };
   }
 
-  /** The task's persisted pending approvals, oldest first (2.0.2+). A non-empty result means Bob is frozen
-   *  on a tool request the auto-approve config didn't cover — the wedge the driver aborts fast on instead
-   *  of burning its dispatch timeout. [] on a pre-2.0.2 store (no table, probed once) or any read fault:
-   *  the completion watch polls this, so a fault must degrade to "no wedge", never throw. */
+  /** The task's persisted pending approvals, oldest first (2.0.2+; the driver's wedge probe). [] on a
+   *  pre-2.0.2 store (no table, probed once) or any read fault — the completion watch polls this, so a
+   *  fault must degrade to "no wedge", never throw. */
   pendingApprovals(taskId: string): Bob2PendingApproval[] {
     try {
       this.hasPendingApprovals ??= !!this.q(

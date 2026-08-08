@@ -59,10 +59,8 @@ export interface Bob2Host {
   /** Bob's open folder as the genuine `vscode.WorkspaceFolder` to pass to startTask (Bob reads `.uri.fsPath`
    *  off it). Opaque so the driver carries no `vscode` type; null when none open. */
   workspaceFolderObject(): unknown;
-  /** `vscode.workspace.isTrusted`, or null when unknown (older extension build). Optional so existing host
-   *  implementations keep compiling; the dispatch preflight hard-fails only on an explicit `false` —
-   *  Bob 2.0.2 runs an untrusted folder on pristine defaults (auto-approve OFF, workspace modes hidden),
-   *  so a headless dispatch there would wedge on its first tool. */
+  /** `vscode.workspace.isTrusted`, or null when unknown (older extension build). Optional so existing
+   *  hosts keep compiling; the dispatch preflight hard-fails only on an explicit `false`. */
   workspaceTrusted?(): boolean | null;
 }
 
@@ -296,22 +294,18 @@ export class InProcessDriver implements BobDriver {
         return fail("dispatched task did not appear in bob.db (could not correlate)");
       }
       this.rememberOwn(id); // ours, not a user chat — so the defer signal won't pause on our own dispatch
-      // The watch extends the default settle rule with a wedge probe over 2.0.2's task_pending_approvals:
-      // a persisted approval older than approvalWedgeMs means Bob is frozen on a prompt auto-approve didn't
-      // cover (an unverifiable command, or the deliberately un-approved `ask`), so abort NOW with the prompt
-      // named instead of burning the dispatch timeout. Real settle is checked first: a finished turn with a
-      // stale leftover approval row still reports its true outcome. No-op on a pre-2.0.2 store ([] always).
+      // Wedge probe (2.0.2): a persisted approval older than approvalWedgeMs means Bob is frozen on a
+      // prompt auto-approve didn't cover (an unverifiable command, or the deliberately un-approved `ask`)
+      // — abort with it named instead of burning the dispatch timeout. Real settle wins first, so a
+      // finished turn with a stale approval row behind it still reports its true outcome.
       let wedge: string | null = null;
-      const boundStore = store;
       const { settled, row, maxGapMs } = await awaitTurnSettled(store, id, {
         pollMs: this.pollMs,
         quietMs: this.quietMs,
         timeoutMs: opts.timeoutMs ?? 300_000,
         isSettled: (r) => {
           if (turnSettled(r, this.quietMs)) return true;
-          const p = boundStore
-            .pendingApprovals(id)
-            .find((a) => Date.now() - (a.created_at ?? 0) >= this.approvalWedgeMs);
+          const p = store!.pendingApprovals(id).find((a) => Date.now() - (a.created_at ?? 0) >= this.approvalWedgeMs);
           if (!p) return false;
           wedge = describePendingApproval(p.payload_json) ?? "unknown tool request";
           return true;
