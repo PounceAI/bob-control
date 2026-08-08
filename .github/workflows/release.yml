@@ -1,8 +1,9 @@
 name: Release
 
-# Build the Bob Tasks VS Code extension into a .vsix and publish it as a GitHub
-# release asset. Triggered by pushing a tag like `v1.0.0`, or manually for a dry run
-# (manual runs only upload the artifact; they don't touch a release).
+# One `v*` tag ships the whole release: the extension .vsix onto a GitHub release AND
+# the npm package (@pounceai/bob-control) — same trigger, so the two can't drift apart.
+# Manual runs are dry runs: they upload the .vsix artifact and `npm publish --dry-run`,
+# touching neither the release nor the registry.
 on:
   push:
     tags: ["v*"]
@@ -75,3 +76,55 @@ jobs:
             gh release create "$GITHUB_REF_NAME" extension/*.vsix \
               --title "$GITHUB_REF_NAME" --generate-notes
           fi
+
+  publish-npm:
+    # Publishing is registry I/O; `prepublishOnly` (build + shebang gate) supplies the
+    # artifacts, so the cheap ubuntu runner is fine here too. Independent of
+    # package-extension: a VSIX hiccup must not strand the npm side, and vice versa.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22.x"
+          cache: npm
+          # Writes the .npmrc that reads NODE_AUTH_TOKEN — publish fails auth without it.
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        # Same drift gate as the extension job, for the ROOT manifest npm stamps.
+        run: |
+          pkg="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$pkg" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $pkg — bump the manifest or retag."
+            exit 1
+          fi
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Publish to npm
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # A version already on the registry means a re-run after a successful publish —
+        # skip idempotently (npm versions are immutable; republish would only error).
+        # A missing token fails HERE with the fix, not as an opaque 401 from npm.
+        run: |
+          ver="$(node -p "require('./package.json').version")"
+          if [ -n "$(npm view "@pounceai/bob-control@$ver" version 2>/dev/null)" ]; then
+            echo "@pounceai/bob-control@$ver is already on the registry — skipping."
+            exit 0
+          fi
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NPM_TOKEN secret is not set — add an npm automation token in repo Settings → Secrets and re-run."
+            exit 1
+          fi
+          npm publish
+
+      - name: Dry-run publish (manual run)
+        if: github.event_name == 'workflow_dispatch'
+        # Exercises prepublishOnly + the files allowlist against the registry, writes nothing.
+        run: npm publish --dry-run

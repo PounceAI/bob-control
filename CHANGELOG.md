@@ -3,6 +3,29 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
+## [2.3.0] — 2026-08-07 — Bob 2.0.2: trust preflight + approval-wedge fast-abort
+
+Verified against the 2.0.2 bundle: every contract the driver relies on (startTask, tasks/messages schema,
+lifecycle, mode resolution, settings keys) is unchanged; what 2.0.2 adds is the trust gate and the
+pending-approval persistence below.
+
+### Added
+
+- **Workspace-trust preflight.** Bob 2.0.2 runs an untrusted workspace on pristine defaults — auto-approve
+  OFF, workspace custom modes hidden, `~/.bob/settings/settings.json` ignored — so a headless dispatch
+  there wedges on its first tool prompt or throws "Mode not found". The driver now fails such a dispatch
+  up front (before the settings.json auto-approve write), naming the folder to trust. Trust flows live
+  from `vscode.workspace.isTrusted` through an optional host seam; an older extension build that doesn't
+  supply it reads as unknown and keeps the pre-2.0.2 behavior.
+- **Approval-wedge fast-abort.** 2.0.2 persists a tool request auto-approve didn't cover to bob.db
+  (`task_pending_approvals`) while the task sits frozen on it. The completion watch polls those rows: an
+  approval older than `approvalWedgeMs` (default 5s) aborts the dispatch immediately with the tool named —
+  e.g. `execute_command (execute)` — instead of burning the dispatch timeout (default 5 min). A finished
+  turn still reports its true outcome past a stale approval row; a pre-2.0.2 store (no table) is a no-op.
+- **npm publish rides the release tag.** The same `v*` tag that ships the .vsix + GitHub release now also
+  publishes `@pounceai/bob-control` (tag↔manifest drift gated on both manifests, idempotent on re-runs;
+  needs the `NPM_TOKEN` repo secret). A manual workflow run does `npm publish --dry-run` instead.
+
 ## [2.2.0] — 2026-07-09 — worker webhook + drainer health signal
 
 ### Added

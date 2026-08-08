@@ -2,13 +2,20 @@
   "name": "bob-tasks",
   "displayName": "Bob Tasks",
   "description": "Auto-dispatch queued tasks to IBM Bob, with mode routing, a safety gate, defer-while-chatting, and native notifications.",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "publisher": "local",
   "license": "Apache-2.0",
-  "engines": { "vscode": "^1.94.0" },
-  "categories": ["Other"],
+  "engines": {
+    "vscode": "^1.94.0"
+  },
+  "categories": [
+    "Other"
+  ],
   "icon": "icon.png",
-  "activationEvents": ["onStartupFinished", "onUri"],
+  "activationEvents": [
+    "onStartupFinished",
+    "onUri"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "configuration": {
@@ -45,24 +52,55 @@
         },
         "bobTasks.maxRisk": {
           "type": "string",
-          "enum": ["safe", "standard", "elevated"],
+          "enum": [
+            "safe",
+            "standard",
+            "elevated"
+          ],
           "default": "standard",
           "description": "Only auto-dispatch tasks whose mode risk is at or below this. 'advanced' (browser/commands) is elevated."
         },
-        "bobTasks.pollMs": { "type": "number", "default": 3000, "description": "Idle poll interval (ms)." },
-        "bobTasks.timeoutMs": { "type": "number", "default": 300000, "description": "Per-task dispatch timeout (ms)." },
-        "bobTasks.assignee": { "type": "string", "default": "bob", "description": "Assignee recorded when the worker claims a task." },
-        "bobTasks.tag": { "type": "string", "default": "", "description": "Only process tasks with this tag. Empty = all tasks." },
-        "bobTasks.autoStart": { "type": "boolean", "default": false, "description": "Start the worker automatically when Bob launches." },
+        "bobTasks.pollMs": {
+          "type": "number",
+          "default": 3000,
+          "description": "Idle poll interval (ms)."
+        },
+        "bobTasks.timeoutMs": {
+          "type": "number",
+          "default": 300000,
+          "description": "Per-task dispatch timeout (ms)."
+        },
+        "bobTasks.assignee": {
+          "type": "string",
+          "default": "bob",
+          "description": "Assignee recorded when the worker claims a task."
+        },
+        "bobTasks.tag": {
+          "type": "string",
+          "default": "",
+          "description": "Only process tasks with this tag. Empty = all tasks."
+        },
+        "bobTasks.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Start the worker automatically when Bob launches."
+        },
         "bobTasks.autoApproveGlobal": {
           "type": "boolean",
           "default": true,
           "description": "On the first 2.0 dispatch, write Bob's headless auto-approve into its GLOBAL settings (~/.bob/settings/settings.json) so queued tasks run unattended. This disables Bob's command security for every Bob window/project for your user and persists until changed (a one-time notice is shown the first time). Turn off to keep Bob's normal approval prompts — auto-dispatch will then stall on the first prompt."
         },
-        "bobTasks.notify.enabled": { "type": "boolean", "default": true, "description": "Show a notification when a task finishes." },
+        "bobTasks.notify.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a notification when a task finishes."
+        },
         "bobTasks.dispatch.surface": {
           "type": "string",
-          "enum": ["sidebar", "newTab"],
+          "enum": [
+            "sidebar",
+            "newTab"
+          ],
           "default": "sidebar",
           "description": "Where dispatched tasks render. 'sidebar' = quiet same-tab; 'newTab' = isolated editor tab (steals focus)."
         },
@@ -103,7 +141,10 @@
         },
         "bobTasks.classifierBackend": {
           "type": "string",
-          "enum": ["cli", "api"],
+          "enum": [
+            "cli",
+            "api"
+          ],
           "default": "cli",
           "enumDescriptions": [
             "Run the installed `claude` CLI headless — reuses your Claude login (no API key), Sonnet-grade judgment, but each call is heavier (~full-agent cost).",
@@ -159,9 +200,18 @@
       }
     },
     "commands": [
-      { "command": "bobTasks.startWorker", "title": "Bob Tasks: Start Worker" },
-      { "command": "bobTasks.stopWorker", "title": "Bob Tasks: Stop Worker" },
-      { "command": "bobTasks.toggleWorker", "title": "Bob Tasks: Toggle Worker" }
+      {
+        "command": "bobTasks.startWorker",
+        "title": "Bob Tasks: Start Worker"
+      },
+      {
+        "command": "bobTasks.stopWorker",
+        "title": "Bob Tasks: Stop Worker"
+      },
+      {
+        "command": "bobTasks.toggleWorker",
+        "title": "Bob Tasks: Toggle Worker"
+      }
     ]
   },
   "scripts": {

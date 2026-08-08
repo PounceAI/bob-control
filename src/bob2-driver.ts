@@ -4,9 +4,11 @@ import {
   Bob2TaskStore,
   awaitTurnSettled,
   bob2DbExists,
+  describePendingApproval,
   parseCosts,
   sleep,
   taskError,
+  turnSettled,
   DEFAULT_QUIET_MS,
   DEFAULT_POLL_MS,
   type Bob2TaskRow,
@@ -57,6 +59,9 @@ export interface Bob2Host {
   /** Bob's open folder as the genuine `vscode.WorkspaceFolder` to pass to startTask (Bob reads `.uri.fsPath`
    *  off it). Opaque so the driver carries no `vscode` type; null when none open. */
   workspaceFolderObject(): unknown;
+  /** `vscode.workspace.isTrusted`, or null when unknown (older extension build). Optional so existing
+   *  hosts keep compiling; the dispatch preflight hard-fails only on an explicit `false`. */
+  workspaceTrusted?(): boolean | null;
 }
 
 export interface InProcessDriverOptions {
@@ -71,6 +76,9 @@ export interface InProcessDriverOptions {
   quietMs?: number;
   /** How long to wait for our new task row to materialize after startTask returns no id (ms). */
   correlateTimeoutMs?: number;
+  /** How old a persisted pending approval must be before the watch reads it as a wedge (ms). The margin
+   *  keeps a just-raised request that Bob is still resolving from aborting a healthy turn. */
+  approvalWedgeMs?: number;
 }
 
 /**
@@ -133,6 +141,7 @@ export class InProcessDriver implements BobDriver {
   private readonly pollMs: number;
   private readonly quietMs: number;
   private readonly correlateTimeoutMs: number;
+  private readonly approvalWedgeMs: number;
 
   constructor(
     private readonly host: Bob2Host,
@@ -141,6 +150,7 @@ export class InProcessDriver implements BobDriver {
     this.pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
     this.quietMs = opts.quietMs ?? DEFAULT_QUIET_MS;
     this.correlateTimeoutMs = opts.correlateTimeoutMs ?? 15_000;
+    this.approvalWedgeMs = opts.approvalWedgeMs ?? 5_000;
   }
 
   /** Resolve the in-process handle and apply auto-approve once. Throws when startTask isn't reachable
@@ -232,6 +242,14 @@ export class InProcessDriver implements BobDriver {
     // mutate the user's global config as a side effect.
     const dir = this.host.workspaceFolder();
     if (!dir) return fail("no open workspace folder to dispatch into");
+    // Trust preflight (2.0.2): an untrusted folder runs on Bob's pristine defaults — auto-approve OFF and
+    // workspace custom modes hidden — so the dispatch would wedge on its first tool or throw "Mode not
+    // found". Fail fast with the fix instead. Only an explicit `false` fails; null/absent = unknown → proceed.
+    if (this.host.workspaceTrusted?.() === false) {
+      return fail(
+        `workspace is not trusted — Bob ignores the auto-approve config and workspace modes in an untrusted folder; trust ${dir} in the Bob window, then re-dispatch`,
+      );
+    }
     if (!this.handle) {
       try {
         await this.connect();
@@ -276,15 +294,44 @@ export class InProcessDriver implements BobDriver {
         return fail("dispatched task did not appear in bob.db (could not correlate)");
       }
       this.rememberOwn(id); // ours, not a user chat — so the defer signal won't pause on our own dispatch
+      // Wedge probe (2.0.2): a persisted approval older than approvalWedgeMs means Bob is frozen on a
+      // prompt auto-approve didn't cover (an unverifiable command, or the deliberately un-approved `ask`)
+      // — abort with it named instead of burning the dispatch timeout. Real settle wins first, so a
+      // finished turn with a stale approval row behind it still reports its true outcome. A row with no
+      // created_at (schema drift — the DDL says NOT NULL) is skipped: a false abort of a healthy turn is
+      // worse than falling back to the timeout.
+      let wedge: string | null = null;
+      const liveStore = store; // narrowed for the closure — TS can't see the null guard through capture
+      const quietMs = this.quietMs; // one source for both settle paths (the option and the closure)
       const { settled, row, maxGapMs } = await awaitTurnSettled(store, id, {
         pollMs: this.pollMs,
-        quietMs: this.quietMs,
+        quietMs,
         timeoutMs: opts.timeoutMs ?? 300_000,
+        isSettled: (r) => {
+          if (turnSettled(r, quietMs)) return true;
+          const p = liveStore
+            .pendingApprovals(id)
+            .find((a) => a.created_at != null && Date.now() - a.created_at >= this.approvalWedgeMs);
+          if (!p) return false;
+          wedge = describePendingApproval(p.payload_json) ?? "unknown tool request";
+          return true;
+        },
       });
       // Enrich the outcome from bob.db — output tokens (any outcome) + Bob's summary text (only on a
       // clean completion; a timeout/error row's last message would be partial/misleading). maxGapMs is
       // stall-watchdog telemetry (see DispatchResult.maxIdleMs).
       const tokensUsed = parseCosts(row?.costs ?? null)?.output ?? 0;
+      if (wedge) {
+        return {
+          taskId: id,
+          result: "",
+          lastText: `bob2 status=${row?.status ?? "?"} wedged on an approval prompt (${wedge}) — auto-approve does not cover it; resolve it in the Bob window`,
+          status: "aborted",
+          tokensUsed,
+          turns: 0,
+          maxIdleMs: maxGapMs,
+        };
+      }
       const done = settled && !!row && !taskError(row);
       const result = done ? (store.readResultText(id) ?? "") : "";
       // Review mode: findings span the task's assistant messages and readResultText returns only the last

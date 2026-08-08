@@ -1,0 +1,712 @@
+{
+  "identifier": "pounceai-bob-control",
+  "name": "Bob Control",
+  "version": "2.3.0",
+  "description": "Bob Control: MCP server + CLI + worker that runs IBM Bob (and any MCP-capable agent) unattended against a SQLite task board. The board path can be configured via environment variables such as BOB_TASKS_DB, BOB_TASKS_PORTABLE, or BOB_TASKS_WORKTREE_SHARED.",
+  "author": "PounceAI",
+  "authorUrl": "https://github.com/PounceAI",
+  "homepage": "https://github.com/PounceAI/bob-control",
+  "category": "developer",
+  "tags": [
+    "mcp",
+    "task-board",
+    "agent-orchestration",
+    "ibm-bob",
+    "sqlite",
+    "worker",
+    "cli",
+    "automation"
+  ],
+  "tools": [
+    {
+      "name": "create_task",
+      "title": "Create Task",
+      "description": "Provision a new task for Bob to work on. Returns the created task including its id.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Short, action-oriented task title"
+          },
+          "description": {
+            "type": "string",
+            "description": "Detailed instructions, context, and acceptance criteria"
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "urgent"
+            ],
+            "description": "Priority bucket (default: medium)"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Labels for filtering, e.g. ['rpg','refactor']"
+          },
+          "mode": {
+            "type": "string",
+            "description": "Bob mode to run this task in: 'code' | 'advanced' (adds MCP/Browser) | 'ask' (read-only) | 'orchestrator', or a custom mode slug. Omit to let the dispatcher auto-route from the task content."
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "Task IDs this task depends on (all must be 'done' before this task is eligible)"
+          },
+          "staged": {
+            "type": "boolean",
+            "description": "Create the task non-pullable ('staged') so a running worker can't grab it mid-curation. Release later with release_tasks. Use for bulk-create + triage."
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "list_tasks",
+      "title": "List Tasks",
+      "description": "List tasks, optionally filtered by status and/or tag. Ordered by priority, then oldest first.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "staged",
+              "pending",
+              "in_progress",
+              "needs_input",
+              "blocked",
+              "analysis_done",
+              "done",
+              "cancelled"
+            ]
+          },
+          "tag": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "get_task",
+      "title": "Get Task",
+      "description": "Get full details of a single task, including its notes / work log.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Task id"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "get_next_task",
+      "title": "Get Next Task",
+      "description": "Fetch the highest-priority pending task. Optionally filter by tag, and optionally claim it (mark in_progress + assign) in the same call.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tag": {
+            "type": "string"
+          },
+          "claim": {
+            "type": "boolean",
+            "description": "If true, immediately mark the task in_progress and assign it"
+          },
+          "assignee": {
+            "type": "string",
+            "description": "Who is taking the task (default: 'bob')"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "predict_mode",
+      "title": "Predict Mode",
+      "description": "Preview which Bob mode a task dispatches in, computed from the connector's router (modes.ts) \u2014 the single source of truth, so callers never re-encode the keyword table. Pass `id` to route an existing task, or `text` to route a hypothetical task (the text is treated as the title). Resolution order (first match wins): an explicit `mode` \u203a a tag naming a mode \u203a the keyword auto-router \u203a `code`. Returns {mode, source: explicit|tag|auto-router|default, risk: safe|standard|elevated}. Risk gates dispatch \u2014 the worker auto-runs only at/below its --max-risk (default standard), so an `advanced` (elevated) task waits for manual dispatch.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Route an existing task by id"
+          },
+          "text": {
+            "type": "string",
+            "description": "Route hypothetical task text (treated as the task title) instead of an id"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "claim_task",
+      "title": "Claim Task",
+      "description": "Mark a task as in_progress and assign it to an owner.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "assignee": {
+            "type": "string",
+            "description": "Owner (default: 'bob')"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "update_task_status",
+      "title": "Update Task Status",
+      "description": "Change a task's status (pending | in_progress | blocked | done | cancelled).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "staged",
+              "pending",
+              "in_progress",
+              "needs_input",
+              "blocked",
+              "analysis_done",
+              "done",
+              "cancelled"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "status"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "add_task_note",
+      "title": "Add Task Note",
+      "description": "Append a progress note / work-log entry to a task.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1
+          },
+          "author": {
+            "type": "string",
+            "description": "Note author (default: 'bob')"
+          }
+        },
+        "required": [
+          "id",
+          "note"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "submit_result",
+      "title": "Submit Result",
+      "description": "Attach a result to a task and complete it. A read-only run (ask/plan/review mode) terminates as 'analysis_done', not 'done'. To reach 'done' on an implementation task, pass `evidence` (files changed / commit / test result); without evidence it lands in 'analysis_done'. Pass mark_done:false to just attach the result without completing.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "result": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mark_done": {
+            "type": "boolean",
+            "description": "Complete the task (default: true). false = attach result only."
+          },
+          "evidence": {
+            "type": "object",
+            "properties": {
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Paths created/changed (recorded as artifacts)"
+              },
+              "files_changed": {
+                "type": "integer"
+              },
+              "commit": {
+                "type": "string",
+                "description": "Commit sha produced"
+              },
+              "test": {
+                "type": "string",
+                "description": "Verification result, e.g. 'npm test: 42 passed'"
+              },
+              "diffstat": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "description": "Proof of execution required for an implementation task to reach 'done'."
+          }
+        },
+        "required": [
+          "id",
+          "result"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "ask_question",
+      "title": "Ask a Question (needs human input)",
+      "description": "Raise a question for a human when you lack a value you need \u2014 NEVER guess or fabricate. Parks the task as 'needs_input' and writes the question to the board (visible via get_task and board_report). Returns a question_id; then call await_answer to wait for the reply.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "integer"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The question to ask the human"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional multiple-choice answers"
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 86400000,
+            "description": "How long to wait before the question times out and the task parks blocked (default 30m, max 24h)"
+          }
+        },
+        "required": [
+          "task_id",
+          "text"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "answer_task_question",
+      "title": "Answer a Task's Question",
+      "description": "Answer a question a worker raised (see needs_input tasks / board_report). Matched by question_id so a stale answer can't apply to a new question. Records the answer and resumes the waiting worker (task returns to in_progress).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "integer"
+          },
+          "question_id": {
+            "type": "string",
+            "description": "The question_id from get_task.pending_question / board_report"
+          },
+          "answer": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "task_id",
+          "question_id",
+          "answer"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "await_answer",
+      "title": "Await an Answer (worker blocks here)",
+      "description": "Block until the question is answered, or report back so you can call again. Returns {status:'answered', answer} when answered, {status:'timed_out'} once past the deadline (the task is then parked blocked \u2014 do NOT proceed or guess), or {status:'waiting'} after the poll window (call await_answer again). The worker's wait loop after ask_question.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "integer"
+          },
+          "question_id": {
+            "type": "string"
+          },
+          "wait_ms": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "description": "Per-call poll window (default 25000ms, capped 55000ms)"
+          }
+        },
+        "required": [
+          "task_id",
+          "question_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "await_task",
+      "title": "Await Task Completion (blocks here)",
+      "description": "Block until task #task_id settles, then return it \u2014 the way to 'hook' back into your turn the moment Bob finishes. Returns {status:'done'|'analysis_done', result} on success, {status:'blocked'|'cancelled', result} when Bob stopped without completing, {status:'needs_input', question} when Bob is waiting on a board question (answer it with answer_task_question, then call await_task again), or {status:'waiting', current} after the poll window (call await_task again). Polls the shared board; the result is written by Bob's worker. Use after dispatching a task you want to act on as soon as it's done. PREFER this over looping on list_tasks/board_status/get_task to watch a task \u2014 it blocks server-side until the settling write lands and hands back needs_input questions to answer, so you should NOT poll the board by hand. Requires something draining the board \u2014 a 1.x worker process or the 2.0 in-process loop; check board_status.worker_draining first (it reflects both).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "integer"
+          },
+          "wait_ms": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "description": "Per-call poll window (default 25000ms, capped 55000ms)"
+          }
+        },
+        "required": [
+          "task_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "set_task_mode",
+      "title": "Set Task Mode",
+      "description": "Set or clear a task's Bob mode slug. Pass an empty string to clear it and let the dispatcher auto-route.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "mode": {
+            "type": "string",
+            "description": "Mode slug ('code' | 'advanced' | 'ask' | 'orchestrator' | custom), or '' to clear"
+          }
+        },
+        "required": [
+          "id",
+          "mode"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "set_task_dependencies",
+      "title": "Set Task Dependencies",
+      "description": "Set or clear a task's dependencies. All dependencies must be 'done' before the task is eligible. Pass an empty array to clear dependencies.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Task id"
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "Task IDs this task depends on (empty array clears dependencies)"
+          }
+        },
+        "required": [
+          "id",
+          "depends_on"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "delete_task",
+      "title": "Delete Task",
+      "description": "Delete a task and its notes. DELETE IS NOT UNDO: if the task already ran and recorded artifacts (files written, commits), this refuses and lists the orphaned paths unless force:true (delete the record anyway) or cleanup:true (also remove the files). Prefer update_task_status 'cancelled' to keep a record.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Task id"
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Delete the record even if it has recorded artifacts"
+          },
+          "cleanup": {
+            "type": "boolean",
+            "description": "Also unlink the files the task wrote, then delete"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "disarm_board",
+      "title": "Disarm Board (pause dispatch)",
+      "description": "Pause all dispatch: while disarmed, no worker can pull or claim any task. Use before a bulk-create/triage so nothing is grabbed mid-curation, then arm_board when ready.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "Why dispatch is paused (shown in board_status)"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "arm_board",
+      "title": "Arm Board (resume dispatch)",
+      "description": "Resume dispatch: workers may pull/claim pending tasks again.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {}
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "release_tasks",
+      "title": "Release Staged Tasks",
+      "description": "Move staged tasks to pending so workers can pull them. Optionally filter by ids and/or tag. With no filter, releases every staged task. The deliberate 'arm' step after curation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "Only release these task ids"
+          },
+          "tag": {
+            "type": "string",
+            "description": "Only release staged tasks carrying this tag"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "board_status",
+      "title": "Board Status",
+      "description": "Dispatch state, counts, and the live task list: whether the board is `armed`, task `counts` by status, whether a drainer is currently servicing the board (`worker_draining` \u2014 a live heartbeat from either a 1.x worker process or the 2.0 in-process loop, with `.tags` = the --tag each live worker drains, null = an unfiltered worker that drains all tags, and `.last_dispatch` = the freshest dispatch outcome among live workers ({status, detail, seconds_ago}, null if none yet) \u2014 a health signal beyond mere liveness: a logged-out/failing Bob keeps beating, so a `last_dispatch.status` of 'aborted' means the drainer is alive but not completing work (warn before dispatching)), `worker_leases` (which checkout each live worker owns), and `open_tasks` \u2014 the non-terminal tasks (staged / pending / in_progress / needs_input / blocked) as compact {id,title,status,mode,tags,priority} rows for deduping before create_task (capped; see open_tasks_truncated). Check `worker_draining.draining` before await_task: if false, nothing is draining the board, so don't block \u2014 start a drainer first (open the repo in a Bob 2.0 window, or run a 1.x worker). And if draining is true but no entry in `worker_draining.tags` is null or matches your task's tags, a tag-pinned worker still won't pull it. Also check before a bulk-create.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {}
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "record_artifact",
+      "title": "Record Artifact",
+      "description": "Record a side effect a worker produced for a task: a file written (kind 'file' + path), a commit (kind 'commit' + detail=sha), or a test result (kind 'test' + detail). Artifacts make delete safe and let an implementation task reach 'done' with evidence.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Task id"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "file",
+              "commit",
+              "test"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "description": "Filesystem path for kind 'file' (absolute is best, for cleanup)"
+          },
+          "detail": {
+            "type": "string",
+            "description": "Commit sha, test summary, or diffstat"
+          }
+        },
+        "required": [
+          "id",
+          "kind"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "board_report",
+      "title": "Board Report",
+      "description": "Render the board as a markdown standup/audit: tasks grouped by status in pull order, each with age, idle time, latest note, and a stalled flag for long-running in_progress work. Optionally filter to one status.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "staged",
+              "pending",
+              "in_progress",
+              "needs_input",
+              "blocked",
+              "analysis_done",
+              "done",
+              "cancelled"
+            ],
+            "description": "Restrict the report to a single status group"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "revert_task",
+      "title": "Revert a Task (roll back to its checkpoint)",
+      "description": "Restore the working tree to the task's pre-task checkpoint \u2014 undo what the task changed. Requires a checkpoint, which the worker captures by default but CONSUMES on completion (a failed dispatch preserves its WIP to branch bob/task-<id> instead), so this works only while one still exists. REFUSES if this server's repo isn't the one the task edited, or if HEAD moved since capture (pass force to override). The pre-revert state is pinned to a recovery ref. Restores tracked files (HEAD untouched) and removes files the task created.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Revert even if HEAD moved since the checkpoint"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    }
+  ]
+}

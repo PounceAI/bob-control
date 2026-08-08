@@ -136,6 +136,29 @@ export function firstMessageMatches(firstMessage: string | null | undefined, con
   return a.includes(b); // full-content containment (a === b is subsumed)
 }
 
+/** A row of 2.0.2's `task_pending_approvals`: a tool request auto-approve did NOT cover, persisted while
+ *  the task sits frozen waiting for the user. Absent as a table on 2.0.0/2.0.1 stores. created_at is
+ *  NOT NULL in the DDL but kept wide (Bob owns the column); the wedge probe skips a null rather than abort. */
+export interface Bob2PendingApproval {
+  request_id: string;
+  payload_json: string;
+  created_at: number | null;
+}
+
+/** Human summary of a pending approval's payload (live shape: {requestId, signature:{name,…}, permission,…})
+ *  → "execute_command (execute)"; null when the JSON won't parse or names nothing. The payload is Bob's
+ *  serialized UI request, so shape drift degrades the message, never the abort. */
+export function describePendingApproval(payloadJson: string): string | null {
+  try {
+    const p = JSON.parse(payloadJson) as { signature?: { name?: unknown }; permission?: unknown };
+    const name = typeof p.signature?.name === "string" ? p.signature.name : null;
+    const perm = typeof p.permission === "string" ? p.permission : null;
+    return name ? (perm ? `${name} (${perm})` : name) : perm;
+  } catch {
+    return null;
+  }
+}
+
 /** The `workspace` fsPath out of a task's `env` JSON (live shape: {id,workspace,scheme,…}), or null. */
 function envWorkspace(env: string | null): string | null {
   if (!env) return null;
@@ -172,6 +195,8 @@ export class Bob2TaskStore {
   // Prepared statements are memoized: the completion watch reads the same row once per poll (hundreds of
   // times over a long dispatch), so re-preparing each call would re-parse the SQL every poll.
   private readonly stmts = new Map<string, StatementSync>();
+  // Does this store have 2.0.2's task_pending_approvals table? Probed once per open (null = not yet).
+  private hasPendingApprovals: boolean | null = null;
 
   constructor(private readonly db: DatabaseSync) {}
 
@@ -269,6 +294,23 @@ export class Bob2TaskStore {
     return { running, activeRecently };
   }
 
+  /** The task's persisted pending approvals, oldest first (2.0.2+; the driver's wedge probe). [] on a
+   *  pre-2.0.2 store (no table, probed once) or any read fault — the completion watch polls this, so a
+   *  fault must degrade to "no wedge", never throw. */
+  pendingApprovals(taskId: string): Bob2PendingApproval[] {
+    try {
+      this.hasPendingApprovals ??= !!this.q(
+        "SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'task_pending_approvals'",
+      ).get();
+      if (!this.hasPendingApprovals) return [];
+      return this.q(
+        "SELECT request_id, payload_json, created_at FROM task_pending_approvals WHERE task_id = ? ORDER BY created_at ASC",
+      ).all(taskId) as unknown as Bob2PendingApproval[];
+    } catch {
+      return [];
+    }
+  }
+
   /** Bob's completion summary for the task: the latest `assistant` message's `content` (the result text
    *  2.0 doesn't return from startTask). Read from the `messages` table (id/task_id/role/data JSON).
    *  Best-effort — null when no assistant message exists or the row won't parse (never throws). */
@@ -314,14 +356,27 @@ export class Bob2TaskStore {
 }
 
 /**
- * Poll a task row until the dispatched turn settles, or the wall-clock elapses (`settled:false` → the
- * driver maps that to a 'timeout'). Polling, not events (2.0 exposes none); pollMs trades latency for DB
- * load. Settle rule (live-validated against the active→running→active lifecycle):
+ * The default settle rule (live-validated against the active→running→active lifecycle):
  *   - a real `last_error`, or a terminal status, settles immediately;
  *   - otherwise the turn is done once it is NOT running, HAS run (updated_at advanced past created_at, so
  *     we don't settle a created-but-unstarted row), AND has been quiet for `quietMs` (updated_at still).
- * Gating on 'running' is what makes the multi-second updated_at gaps *within* a turn safe; `quietMs` only
- * governs the not-running tail (post-turn, or a fast turn we never caught 'running'). Override via opts.isSettled.
+ * Exported so a custom opts.isSettled (e.g. the driver's approval-wedge probe) can EXTEND the rule
+ * rather than re-encode it.
+ */
+export function turnSettled(row: Bob2TaskRow, quietMs: number): boolean {
+  return (
+    taskError(row) != null ||
+    isTerminal(row.status) ||
+    (!isActivelyRunning(row.status) && hasRun(row) && Date.now() - (row.updated_at ?? 0) >= quietMs)
+  );
+}
+
+/**
+ * Poll a task row until the dispatched turn settles, or the wall-clock elapses (`settled:false` → the
+ * driver maps that to a 'timeout'). Polling, not events (2.0 exposes none); pollMs trades latency for DB
+ * load. Settle rule: `turnSettled` — gating on 'running' is what makes the multi-second updated_at gaps
+ * *within* a turn safe; `quietMs` only governs the not-running tail (post-turn, or a fast turn we never
+ * caught 'running'). Override via opts.isSettled.
  */
 export async function awaitTurnSettled(
   store: Bob2TaskStore,
@@ -346,11 +401,7 @@ export async function awaitTurnSettled(
         maxGapMs = Math.max(maxGapMs, u - prevUpdated);
       if (u != null) prevUpdated = u;
       prevRunning = isActivelyRunning(row.status);
-      const settled = opts.isSettled
-        ? opts.isSettled(row)
-        : taskError(row) != null ||
-          isTerminal(row.status) ||
-          (!isActivelyRunning(row.status) && hasRun(row) && Date.now() - (row.updated_at ?? 0) >= quietMs);
+      const settled = opts.isSettled ? opts.isSettled(row) : turnSettled(row, quietMs);
       if (settled) return { settled: true, row, maxGapMs };
     }
     if (Date.now() >= deadline) return { settled: false, row, maxGapMs };

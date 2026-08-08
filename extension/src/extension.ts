@@ -155,6 +155,8 @@ async function detectAndStart(connector: string, force: boolean): Promise<void> 
   const host = mods.createBob2Host({
     getExtension: (id: string) => vscode.extensions.getExtension(id),
     workspaceFolders: () => vscode.workspace.workspaceFolders,
+    // Live, not captured: trust can be granted mid-session and dispatches must see it (2.0.2 trust gate).
+    isTrusted: () => vscode.workspace.isTrusted,
   });
   if (mods.isBob2Window(host)) {
     out.appendLine("[start] Bob 2.0 detected — running the board loop in-process (no IPC child).");
@@ -348,6 +350,8 @@ interface ConnectorModules {
   createBob2Host: (deps: {
     getExtension: (id: string) => unknown;
     workspaceFolders: () => readonly { uri: { fsPath: string } }[] | undefined;
+    /** Optional in the connector (older builds ignore it): vscode.workspace.isTrusted for the 2.0.2 trust gate. */
+    isTrusted?: () => boolean;
   }) => unknown;
   isBob2Window: (host: unknown) => boolean;
   InProcessDriver: new (host: unknown, opts?: unknown) => unknown;
