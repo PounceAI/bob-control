@@ -89,7 +89,7 @@ server.registerTool(
         .string()
         .optional()
         .describe(
-          "Bob mode to run this task in: 'code' | 'advanced' (adds MCP/Browser) | 'ask' (read-only) | 'orchestrator', or a custom mode slug. Omit to let the dispatcher auto-route from the task content.",
+          "Bob mode to run this task in: 'code' (default) | 'advanced' (adds MCP/Browser) | 'orchestrator' | 'ask' | 'plan' | 'review' | 'refactor' | 'devsecops', or a custom slug. 'ask'/'plan'/'review' are read-only. On Bob 2.0 'code'/'advanced'/'orchestrator' all run as 'agent', and 'review'/'refactor'/'devsecops' come from the workspace's .bob/custom_modes.yaml — without it they run in a fallback mode and warn. Omit to auto-route from the task content (preview with predict_mode).",
         ),
       depends_on: z
         .array(z.number().int())
@@ -513,7 +513,11 @@ server.registerTool(
       "Set or clear a task's Bob mode slug. Pass an empty string to clear it and let the dispatcher auto-route.",
     inputSchema: {
       id: z.number().int(),
-      mode: z.string().describe("Mode slug ('code' | 'advanced' | 'ask' | 'orchestrator' | custom), or '' to clear"),
+      mode: z
+        .string()
+        .describe(
+          "Mode slug ('code' | 'advanced' | 'orchestrator' | 'ask' | 'plan' | 'review' | 'refactor' | 'devsecops' | custom), or '' to clear and restore auto-routing",
+        ),
     },
   },
   async ({ id, mode }) => {
