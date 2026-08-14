@@ -3,6 +3,28 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
+## [2.3.1] — 2026-08-14 — Bob 2.0.3: mode preflight
+
+Verified against the 2.0.3 bundle and a live store: `startTask`, the tasks/messages/`task_pending_approvals`
+schema (newest migration is still 2.0.2's `010_pending_approvals`), the active→running→active lifecycle, and
+the `settings.json` auto-approve keys are all unchanged, so 2.0.3 needs no driver changes. The `costs` JSON
+gained a `contextTokens` field, which the existing parser ignores. The fix below is a pre-existing gap 2.0.3
+did not cause.
+
+### Fixed
+
+- **A mode the workspace can't load no longer hangs the dispatch.** `review`/`refactor`/`devsecops` are not
+  Bob built-ins — 2.0.3 ships `agent`/`plan`/`ask` — they come from the workspace's `.bob/custom_modes.yaml`
+  that `init-project-board.mjs` installs. In a project without that file the slug doesn't resolve, and Bob
+  reports it by doing nothing: `startTask` → `handleInputMessage` posts "Invalid mode used." to the webview
+  and returns, after `openTask` has already created the task row. The driver correlated a row that never ran,
+  so `updated_at` never passed `created_at`, the completion watch never settled, and the dispatch burned its
+  full wall clock to report a bare `timeout`. It now resolves the slug against the workspace's modes first,
+  names the file to add, and runs the turn in a fallback mode rather than stalling. The fallback preserves
+  the mode's safety profile: a read-only slug lands on `ask` — the only built-in with no `edit` group — not
+  on write-capable `agent`, so a review that lost its custom mode still cannot rewrite the code it was sent
+  to inspect.
+
 ## [2.3.0] — 2026-08-07 — Bob 2.0.2: trust preflight + approval-wedge fast-abort
 
 Verified against the 2.0.2 bundle: every contract the driver relies on (startTask, tasks/messages schema,
