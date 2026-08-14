@@ -14,6 +14,7 @@ import {
   type Bob2TaskRow,
 } from "./bob2-taskstore.js";
 import { writeAutoApprove } from "./bob2-config.js";
+import { resolveAvailableMode } from "./bob2-modes.js";
 import { producesReviewFindings } from "./modes.js";
 import { parseReviewFindings, type ReviewIssue } from "./review-findings.js";
 
@@ -79,6 +80,8 @@ export interface InProcessDriverOptions {
   /** How old a persisted pending approval must be before the watch reads it as a wedge (ms). The margin
    *  keeps a just-raised request that Bob is still resolving from aborting a healthy turn. */
   approvalWedgeMs?: number;
+  /** Where the mode-preflight notice goes. Default: `console.warn`. Injected by tests to assert on it. */
+  warn?: (message: string) => void;
 }
 
 /**
@@ -110,14 +113,16 @@ export function mapOutcome(
   return { ...base, status: "timeout" };
 }
 
-// Removed 1.x built-ins our auto-router still emits; Bob 2.0 throws `Mode with id "<x>" not found` on them
-// (built-ins are agent/ask/plan/review, coding = agent).
+// Removed 1.x built-ins our auto-router still emits. Bob 2.0's built-ins are agent/plan/ask (DEFAULT_MODES),
+// coding = agent, so these three have nothing to resolve to.
 const BOB2_REMOVED_BUILTIN_MODES: Record<string, string> = { code: "agent", advanced: "agent", orchestrator: "agent" };
 
 /**
- * Board slug → a mode Bob 2.0 resolves. Only the removed 1.x built-ins are rewritten; the 2.0 built-ins
- * and every custom mode pass through, since Bob 2.0 loads custom_modes.yaml (so review/refactor/devsecops
- * dispatch as themselves; an unregistered slug then surfaces Bob's clean "Mode not found"). No mode → agent.
+ * Board slug → the slug we ask Bob for. Only the removed 1.x built-ins are rewritten; everything else passes
+ * through, including review/refactor/devsecops — those are OURS, defined in the workspace's
+ * .bob/custom_modes.yaml, not Bob built-ins. Whether the open workspace actually loads them is a separate
+ * question, answered by resolveAvailableMode at dispatch (an unloaded slug does NOT error — Bob just never
+ * runs the turn), so this map stays a pure rename. No mode → agent.
  */
 export function toBob2Mode(mode: string | undefined | null): string {
   if (!mode) return "agent";
@@ -268,12 +273,15 @@ export class InProcessDriver implements BobDriver {
       return fail(`task store: ${(e as Error).message}`);
     }
     const snapshot = store ? store.snapshotRoots() : { ids: new Set<string>(), sinceMs: 0 };
+    // Mode preflight (see bob2-modes): an unloaded slug would hang the dispatch, so warn and downgrade.
+    const picked = resolveAvailableMode(toBob2Mode(opts.mode), dir);
+    if (picked.warning) (this.opts.warn ?? console.warn)(picked.warning);
     try {
       try {
         // workspaceFolder = the WorkspaceFolder object; mode a slug Bob resolves (see Bob2StartTask / toBob2Mode).
         await this.handle!.startTask({
           content: opts.text,
-          mode: toBob2Mode(opts.mode),
+          mode: picked.mode,
           workspaceFolder: this.host.workspaceFolderObject() ?? undefined,
         });
       } catch (e) {

@@ -353,10 +353,11 @@ test("dispatch surfaces a post-start store-open fault (cold start, then the db w
 test("toBob2Mode remaps removed 1.x built-ins to agent; passes through 2.0 built-ins and custom modes", () => {
   // removed 1.x built-ins our router still emits → agent (Bob 2.0 throws "Mode not found" on these)
   for (const m of ["code", "advanced", "orchestrator"]) assert.equal(toBob2Mode(m), "agent");
-  // 2.0 built-ins pass through
-  for (const m of ["agent", "ask", "plan", "review"]) assert.equal(toBob2Mode(m), m);
-  // CUSTOM modes pass through unchanged — Bob 2.0 loads custom_modes.yaml and resolves them
-  for (const m of ["refactor", "devsecops", "my-custom-mode"]) assert.equal(toBob2Mode(m), m);
+  // 2.0 built-ins pass through (agent/plan/ask are Bob 2.0.3's DEFAULT_MODES)
+  for (const m of ["agent", "ask", "plan"]) assert.equal(toBob2Mode(m), m);
+  // CUSTOM modes pass through unchanged — incl. review, which is OURS (workspace .bob/custom_modes.yaml),
+  // not a Bob built-in. Whether the workspace actually loads them is the preflight's job, not this map's.
+  for (const m of ["review", "refactor", "devsecops", "my-custom-mode"]) assert.equal(toBob2Mode(m), m);
   // no mode → Bob's default coding mode
   assert.equal(toBob2Mode(undefined), "agent");
   assert.equal(toBob2Mode(null), "agent");
@@ -382,6 +383,47 @@ test("dispatch forwards the WorkspaceFolder OBJECT (not the string) and the tran
   assert.equal(seenWs, host.workspaceFolderObject());
   assert.notEqual(typeof seenWs, "string");
   assert.equal(seenMode, "agent"); // board "code" → Bob 2.0 "agent"
+});
+
+test("a mode the workspace can't load warns and downgrades — the dispatch still runs, it does not fail", async () => {
+  const { store, seedRoot, bump } = makeStore();
+  let seenMode: unknown = "UNSET";
+  let id = "";
+  const warnings: string[] = [];
+  const host = makeHost({
+    folder: DIR, // no .bob/custom_modes.yaml under it, so `review` is not loaded
+    startTask: (o) => {
+      seenMode = o.mode;
+      id = seedRoot("running");
+    },
+  });
+  const driver = new InProcessDriver(host, { openStore: () => store, warn: (m) => warnings.push(m), ...fast });
+  setTimeout(() => bump(id, "active"), 15);
+  const res = await driver.dispatch({ text: "review the diff", mode: "review" });
+  assert.equal(res.status, "completed"); // the point: a missing mode must not fail the dispatch
+  assert.equal(seenMode, "ask"); // read-only stays read-only — never the write-capable agent
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /mode 'review' is not loaded/);
+  assert.match(warnings[0], /custom_modes\.yaml/);
+});
+
+test("a mode Bob can load dispatches as itself and prints nothing", async () => {
+  const { store, seedRoot, bump } = makeStore();
+  let seenMode: unknown = "UNSET";
+  let id = "";
+  const warnings: string[] = [];
+  const host = makeHost({
+    folder: DIR,
+    startTask: (o) => {
+      seenMode = o.mode;
+      id = seedRoot("running");
+    },
+  });
+  const driver = new InProcessDriver(host, { openStore: () => store, warn: (m) => warnings.push(m), ...fast });
+  setTimeout(() => bump(id, "active"), 15);
+  await driver.dispatch({ text: "explain this", mode: "ask" }); // a 2.0 built-in — always loadable
+  assert.equal(seenMode, "ask");
+  assert.deepEqual(warnings, []);
 });
 
 // ── defer-while-chatting: externalActivity (driver wiring over foreignActivity) ─────────────────────
