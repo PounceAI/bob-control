@@ -26,6 +26,7 @@ class FakeAgent {
   readonly transport: AcpTransport;
   readonly received: any[] = [];
   readonly setModes: string[] = [];
+  readonly deleted: string[] = [];
   cancelled = false;
   private cancelWaiters: (() => void)[] = [];
   private toClient = new PassThrough();
@@ -110,6 +111,10 @@ class FakeAgent {
         return;
       case "session/set_mode":
         this.setModes.push(msg.params.modeId);
+        reply({});
+        return;
+      case "session/delete":
+        this.deleted.push(msg.params.sessionId);
         reply({});
         return;
       case "session/prompt":
@@ -562,4 +567,12 @@ test("a mode switch carried only by mode_id goes to the gate even when the polic
   });
   assert.deepEqual(asks, ["tool"]);
   assert.equal(outcome.outcome.optionId, "reject");
+});
+
+test("connect() proves auth with a throwaway session and deletes it, leaving no task row behind", async () => {
+  const agent = new FakeAgent({ onPrompt: async () => ({ stopReason: "end_turn" }) });
+  await driverFor(agent).connect();
+  assert.deepEqual(agent.deleted, ["s1"]);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(agent.killed, true);
 });
