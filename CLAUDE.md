@@ -54,3 +54,6 @@ per checkout. Full runbook (and the Bob-1.x-only caveat): [README → Worktrees]
 
 - The board is a pull queue: creating a task does not start Bob. Bob runs it when its
   worker pulls, or when you dispatch via the worker above.
+- Bob Shell 2.x over ACP: `node dist/worker.js --acp` drives `bob acp` headless (no window, no pipe;
+  works from WSL with a Linux Bob Shell). Needs Bob Shell installed + logged in (`bob` once, or
+  `BOB_API_KEY`); a new Shell version wants `--acp-args --accept-license` after `bob --show-license acp`.

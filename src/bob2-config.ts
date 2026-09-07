@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { mergeHooks, type HookCommands } from "./hooks.js";
 
 // Bob 2.0's auto-approve config. Replaces the 1.x set-bob-autoapprove.mjs (which wrote state.vscdb
 // globalState keys that no longer exist). 2.0's source of truth is ~/.bob/settings/settings.json
@@ -75,6 +76,20 @@ export function mergeAutoApprove(current: Record<string, unknown>): Record<strin
  *  reverts it (unlike the 1.x window-scoped globalState). The extension gates this behind the
  *  `bobTasks.autoApproveGlobal` setting and shows a one-time notice on the first write. */
 export function writeAutoApprove(path = bob2SettingsPath()): { path: string; created: boolean } {
+  return updateSettings(path, mergeAutoApprove);
+}
+
+/** Install (or remove, per null) our lifecycle hooks in settings.json — same file, same atomic write and
+ *  same refuse-to-clobber rules as the auto-approve config. See hooks.ts. */
+export function writeHooks(cmds: HookCommands, path = bob2SettingsPath()): { path: string; created: boolean } {
+  return updateSettings(path, (current) => mergeHooks(current, cmds));
+}
+
+/** Read settings.json (or start empty), apply `mutate`, write back atomically. */
+function updateSettings(
+  path: string,
+  mutate: (current: Record<string, unknown>) => Record<string, unknown>,
+): { path: string; created: boolean } {
   const existed = existsSync(path);
   let current: Record<string, unknown> = {};
   if (existed) {
@@ -106,7 +121,7 @@ export function writeAutoApprove(path = bob2SettingsPath()): { path: string; cre
   // Random suffix (not a fixed `.tmp`): a local attacker can't pre-place a symlink at a predictable temp
   // path to redirect this write to an arbitrary file (TOCTOU on the temp name — CWE-377).
   const tmp = `${path}.${randomBytes(6).toString("hex")}.tmp`;
-  writeFileSync(tmp, JSON.stringify(mergeAutoApprove(current), null, 2) + "\n");
+  writeFileSync(tmp, JSON.stringify(mutate(current), null, 2) + "\n");
   try {
     renameSync(tmp, path);
   } catch (e) {

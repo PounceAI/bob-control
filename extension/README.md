@@ -8,6 +8,7 @@ The Bob Tasks extension claims and dispatches queued board tasks to IBM Bob from
 
 - **Bob 2.0** (current) — runs the dispatch loop **in-process**, calling Bob's exported `startTask` API; no child process, no pipe. Completion is read from Bob's task store (`~/.bob/db/bob.db`), and headless auto-approve is written to Bob's global settings (gated by `bobTasks.autoApproveGlobal`).
 - **Bob 1.x** (legacy) — spawns the project's `dist/worker.js`, which dispatches over the `node-ipc` pipe (`ROO_CODE_IPC_SOCKET_PATH`).
+- **Bob Shell 2.x over ACP** (`bobTasks.transport: "acp"`) — spawns `dist/worker.js --acp`, which drives `bob acp` as its own child process: every gate active (command / permission / followup / mode-switch), no window detection, no pipe. Tasks run in Bob Shell, not this window's task history.
 
 Either way it:
 
@@ -29,6 +30,9 @@ All settings are under the `bobTasks.*` namespace:
 - **`bobTasks.dbPath`** — SQLite task DB (`BOB_TASKS_DB`). Empty = the project's `data/tasks.db`. Must match the MCP server's DB.
 - **`bobTasks.worktreeShared`** — Share ONE board across all linked git worktrees of a repo: this worktree's worker drains the **main** worktree's `data/tasks.db`. Governs the worker only — to also make a Claude session running *inside* a linked worktree file to the shared board, set `BOB_TASKS_WORKTREE_SHARED=1` in the environment (every consumer reads it). Ignored when `bobTasks.dbPath` is set; a no-op for non-worktree projects.
 - **`bobTasks.pipe`** *(Bob 1.x only — no effect on Bob 2.0, which has no IPC pipe)* — Bob IPC named pipe. Blank = auto-detect this instance's own pipe from `ROO_CODE_IPC_SOCKET_PATH` (needed when multiple Bob instances run at once); set only to override. Fallback: `\\.\pipe\pipe\bob-ipc`.
+- **`bobTasks.transport`** — `auto` (default: the in-process loop in a Bob 2.0 window, else the 1.x IPC worker) or `acp` (drive Bob Shell 2.x over the Agent Client Protocol as a child process — headless; needs Bob Shell installed and logged in).
+- **`bobTasks.bobShellPath`** *(transport=acp)* — Bob Shell launcher: blank = `bob` on PATH, or a path to it / to its `bob.js` bundle.
+- **`bobTasks.acpArgs`** *(transport=acp)* — Extra `bob acp` flags, comma-separated (e.g. `--accept-license,--disable-mcp`).
 - **`bobTasks.maxRisk`** — Only auto-dispatch tasks whose mode risk is at or below this. Options: `safe`, `standard`, `elevated`. Default: `standard`. (`advanced` mode is elevated.)
 - **`bobTasks.pollMs`** — Idle poll interval (ms). Default: `3000`.
 - **`bobTasks.timeoutMs`** — Per-task dispatch timeout (ms). Default: `300000` (5 minutes).
@@ -39,6 +43,12 @@ All settings are under the `bobTasks.*` namespace:
 ### Auto-Approve (Bob 2.0)
 
 - **`bobTasks.autoApproveGlobal`** — On the first Bob 2.0 dispatch, write Bob's headless auto-approve into its **global** settings (`~/.bob/settings/settings.json`) so queued tasks run unattended. This disables Bob's command security for **every** Bob window/project for your user and **persists** until you change it; a **one-time notice** (with an *Open Setting* button) fires on the first write. Default: `true`. Turn it off to keep Bob's normal approval prompts — auto-dispatch then stalls on the first prompt. *(Bob 1.x ignores this — 1.x auto-approve is seeded by `launch-bob-ipc.cmd`/`set-bob-autoapprove.mjs` while Bob is closed.)*
+
+### Lifecycle Hooks (Bob 2.1+, in-process)
+
+- **`bobTasks.hooks.stopSignal`** — Install a `Stop` lifecycle hook in Bob's global `settings.json` (`dist/hook-stop.js`) so the loop learns a task finished the moment Bob's agent loop stops, instead of waiting for the task store to go quiet. Default: `true`. Off removes it; the quiescence watch remains.
+- **`bobTasks.hooks.commandGate`** — Install a `PreToolUse` hook on `execute_command` (`dist/hook-pretool.js`) that blocks commands the connector's command policy denies (git push, network installs, sudo, `rm -rf` outside the repo, `bobTasks.denyCommands`). Global — it applies to **every** Bob task on this machine — so it is off by default.
+- **`bobTasks.denyCommands`** — Extra command prefixes/substrings to deny, comma-separated (the worker's `--deny-commands`; the PreToolUse hook when the command gate is on).
 
 ### UI Settings
 

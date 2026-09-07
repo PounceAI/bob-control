@@ -3,6 +3,50 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
+## [2.4.0] — 2026-09-07 — Bob Shell over ACP + Bob 2.1 lifecycle hooks
+
+IBM's August 2026 release made Bob Shell an [Agent Client Protocol](https://agentclientprotocol.com) agent
+(`bob acp`: JSON-RPC over stdio with sessions, modes, streamed updates, per-tool-call permission requests
+and cancel) and gave Bob IDE 2.1 lifecycle hooks. Together they restore what 2.0 removed with the IPC pipe:
+an out-of-process control channel with an event stream and a reply channel. Bob IDE 2.1.0 itself needs no
+driver changes — `startTask`, the bob.db schema (still migration 010) and the auto-approve keys are unchanged.
+
+### Added
+
+- **Bob Shell (ACP) transport — `node dist/worker.js --acp`.** One `bob acp --trust` process per task: a
+  session in the project folder, the board's mode (1.x slugs mapped as on 2.0, an unoffered mode downgraded
+  with a warning), the task as the prompt. The 1.x gate layer runs unchanged over it: a permission request is
+  an `ask` the gates answer per call (`command` for a shell command, `tool` for `switch_mode` and anything the
+  mode profile doesn't auto-allow) — nothing is written into Bob's settings; a turn ending on
+  `ask_followup_question` is the `followup` ask, answered as the next prompt on the same session;
+  `session/update` drives the idle watchdog, `usage_update` the token budget, `session/cancel` the kills, and
+  `stopReason` is the completion signal. No IDE window, no pipe; N worktrees are N workers. `--bob-shell`
+  names the launcher or the `bobshell/dist/bob.js` bundle (preferred when found beside the PATH shim);
+  `--acp-args` passes extra `bob acp` flags. Extension: `bobTasks.transport: "acp"`, `bobShellPath`, `acpArgs`.
+  Needs Bob Shell 2.x (`bob.ibm.com/download`, not npm) logged in once or `BOB_API_KEY`, and the license
+  accepted once per Shell version (`--acp-args --accept-license`). Tasks live in Bob Shell's session store,
+  not the IDE's history; review findings are parsed from the result text (no `submit_review_findings`).
+  On Bob Shell 2.0.2 there is no `usage_update` (the token budget is inert; turns = prompt turns) and no
+  `ask_followup_question` tool over ACP (a question comes back as the turn's text, never a wedge).
+- **Stop-hook completion signal (Bob 2.1+, in-process driver).** A `Stop` lifecycle hook in Bob's global
+  settings (`dist/hook-stop.js`, `bobTasks.hooks.stopSignal`, default on) writes a marker per task; the
+  completion watch settles on it once the task row has left `running`, instead of waiting for bob.db to go
+  quiet, and the marker's `last_assistant_message` backs up the result read. The hook's `session_id` is the
+  bob.db task id; Bob applies a settings change without a restart. The quiescence watch remains the fallback.
+  The hooks are removed when the loop stops.
+- **PreToolUse command gate (Bob 2.1+, opt-in).** `bobTasks.hooks.commandGate` installs a `PreToolUse` hook
+  on `execute_command` (`dist/hook-pretool.js`) that exits 2 for a command the command policy denies — the
+  first command gate the 2.x IDE path has had, since auto-approve otherwise runs anything. Off by default:
+  a global hook applies to every Bob task on the machine. `bobTasks.denyCommands` feeds it and the worker.
+
+### Changed
+
+- The worker's client is typed on a `WorkerClient` interface (the driver core plus the gate surface), so the
+  pipe client and the ACP driver are interchangeable; `permissionPolicy` on the dispatch options carries the
+  mode profile's auto-approve flags to the ACP driver (the pipe client ignores it).
+- Hook command parts carrying shell-active characters are refused, and the ACP and hook settings are
+  machine-scoped: they feed a command Bob runs on every task, so a workspace must not be able to set them.
+
 ## [2.3.1] — 2026-08-14 — Bob 2.0.3: mode preflight
 
 Verified against the 2.0.3 bundle and a live store: `startTask`, the tasks/messages/`task_pending_approvals`

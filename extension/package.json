@@ -2,7 +2,7 @@
   "name": "bob-tasks",
   "displayName": "Bob Tasks",
   "description": "Auto-dispatch queued tasks to IBM Bob, with mode routing, a safety gate, defer-while-chatting, and native notifications.",
-  "version": "2.3.1",
+  "version": "2.4.0",
   "publisher": "local",
   "license": "Apache-2.0",
   "engines": {
@@ -49,6 +49,45 @@
         "bobTasks.pipe": {
           "type": "string",
           "description": "[Bob 1.x only — no effect on Bob 2.0, which has no IPC pipe] Bob IPC named pipe. Blank = auto-detect this instance's own pipe from ROO_CODE_IPC_SOCKET_PATH (needed when multiple Bob instances run at once). Set only to override."
+        },
+        "bobTasks.transport": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "acp"
+          ],
+          "default": "auto",
+          "description": "auto = the in-process loop in a Bob 2.0 window, else the 1.x IPC worker. acp = drive Bob Shell 2.x over the Agent Client Protocol (`bob acp`) as a child process: headless, every gate active (command/permission/followup/mode-switch), tasks run in Bob Shell rather than this window's task history. Needs Bob Shell 2.x installed and logged in."
+        },
+        "bobTasks.bobShellPath": {
+          "scope": "machine",
+          "type": "string",
+          "default": "",
+          "description": "[transport=acp] Bob Shell launcher. Blank = `bob` on PATH; or a path to it, or to its bob.js bundle."
+        },
+        "bobTasks.acpArgs": {
+          "scope": "machine",
+          "type": "string",
+          "default": "",
+          "description": "[transport=acp] Extra `bob acp` flags, comma-separated (e.g. --accept-license,--disable-mcp)."
+        },
+        "bobTasks.hooks.stopSignal": {
+          "scope": "machine",
+          "type": "boolean",
+          "default": true,
+          "description": "[Bob 2.1+ in-process] Install a Stop lifecycle hook (global settings.json) so the loop learns a task finished the moment Bob's agent loop stops, instead of waiting for the task store to go quiet. Off = remove it and use the quiescence watch only."
+        },
+        "bobTasks.hooks.commandGate": {
+          "scope": "machine",
+          "type": "boolean",
+          "default": false,
+          "description": "[Bob 2.1+ in-process] Install a PreToolUse lifecycle hook on execute_command (global settings.json, so it applies to EVERY Bob task on this machine) that blocks commands the connector's command policy denies (git push, network installs, sudo, rm -rf outside the repo, bobTasks.denyCommands). Auto-approve otherwise runs any command on the 2.x IDE path."
+        },
+        "bobTasks.denyCommands": {
+          "scope": "machine",
+          "type": "string",
+          "default": "",
+          "description": "Extra command prefixes/substrings to deny, comma-separated (the worker's --deny-commands; the PreToolUse hook when bobTasks.hooks.commandGate is on)."
         },
         "bobTasks.maxRisk": {
           "type": "string",

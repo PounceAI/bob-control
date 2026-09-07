@@ -14,9 +14,10 @@ each does the work it's best at.
 Concretely: an MCP **server** + **CLI** + auto-dispatch **worker** over a SQLite task board.
 The worker pulls each task in dependency and priority order and dispatches it to
 [IBM Bob](https://www.ibm.com/products/ai-coding-agent) (IBM's AI coding agent for IBM i), then
-watches it run to completion. On **Bob 2.0** that dispatch is **in-process** (the companion
-extension calls Bob's exported `startTask` API); on **Bob 1.x** it's **live over the `node-ipc`
-pipe** — auto-detected, one build. Bob is the MCP client; this is the server it connects to — and
+watches it run to completion. On **Bob Shell 2.x** that dispatch is **headless over ACP** (`bob acp` as a
+child process — [below](#driving-bob-shell-over-acp-bob-2x--headless)); on **Bob 2.0 IDE** it's
+**in-process** (the companion extension calls Bob's exported `startTask` API); on **Bob 1.x** it's **live
+over the `node-ipc` pipe** — one build. Bob is the MCP client; this is the server it connects to — and
 Claude Code speaks the same MCP, so it can work the **same board** as foreman (provision / route /
 triage) or worker.
 
@@ -558,6 +559,19 @@ never aborts a live Bob conversation.
   [extension/README.md](extension/README.md)).
 - **Bob 1.x** (legacy) — spawns `dist/worker.js`, which dispatches over the `node-ipc` pipe; needs
   Bob launched with `ROO_CODE_IPC_SOCKET_PATH` (`launch-bob-ipc.cmd`).
+- **Bob Shell 2.x over ACP** (`bobTasks.transport: "acp"`) — spawns `dist/worker.js --acp`, which drives
+  `bob acp` as its own child: every gate active, no window detection, no pipe. See
+  [Driving Bob Shell over ACP](#driving-bob-shell-over-acp-bob-2x--headless).
+
+On **Bob 2.1+** the in-process loop also installs two lifecycle hooks in Bob's global settings: a **Stop**
+hook (`bobTasks.hooks.stopSignal`, default on) that tells the loop a task finished the moment Bob's agent
+loop ends — no more waiting for the task store to go quiet — and an opt-in **PreToolUse** command gate
+(`bobTasks.hooks.commandGate`) that blocks commands the connector's policy denies (git push, network
+installs, sudo, `rm -rf` outside the repo, `bobTasks.denyCommands`) on a path where auto-approve
+otherwise runs anything. The hooks are removed again when the loop stops; if the extension is
+uninstalled while a loop is running, delete the `hooks` entries naming `hook-stop.js` / `hook-pretool.js`
+from `~/.bob/settings/settings.json` by hand. These settings are machine-scoped (a workspace's
+`.vscode/settings.json` cannot set them), since they feed a command Bob runs on every task.
 
 A URI handler (`ibm-bob://local.bob-tasks/start`) lets a process outside the editor — e.g. Claude
 Code in WSL — start or stop the loop without a Command Palette click. It's independent of the MCP
@@ -597,12 +611,52 @@ a question unanswered past its deadline times out and the task parks `blocked` (
 sweep fires this even if the asking worker died) — never a fabricated answer, never a silent
 `done`. The `bob-work` skill follows this path instead of inventing a value.
 
+## Driving Bob Shell over ACP (Bob 2.x — headless)
+
+Bob Shell 2.x speaks the [Agent Client Protocol](https://agentclientprotocol.com) (`bob acp`: JSON-RPC
+over stdio — sessions, modes, streamed updates, per-tool-call permission requests, cancel). That is the
+out-of-process control channel Bob 2.0 removed with the pipe, so the worker can drive Bob **without an IDE
+window**, with the whole gate layer intact:
+
+```powershell
+node dist/worker.js --acp                                   # Bob Shell from PATH (`bob`), one process per task
+node dist/worker.js --acp --bob-shell C:\path\to\bobshell\dist\bob.js   # or name the bundle / launcher
+node dist/worker.js --acp --acp-args --accept-license,--disable-mcp        # extra `bob acp` flags
+```
+
+Per task the worker spawns `bob acp --trust` in the project folder, opens a session, sets the board's mode
+(the same 1.x→2.x slug mapping and unloaded-mode downgrade as the in-process driver) and sends the task as
+the prompt. Then:
+
+| Bob asks / reports | Over ACP | Answered by |
+|---|---|---|
+| a shell command (`session/request_permission`, `execute_command`) | ask `command` | permission gate → classifier (`--command-classifier`); approve/reject per call |
+| an edit / MCP tool | settled from the mode profile (`alwaysAllowWrite`/`Mcp`), else ask `tool` | watchdog short grace → needs_input |
+| `switch_mode` | ask `tool` | mode-switch gate (risk + command reach) |
+| a followup question (turn ends on `ask_followup_question`) | ask `followup` | followup gate (`--answer-followups`) → the next prompt on the **same session** |
+| progress / `usage_update` | idle watchdog / token budget | `session/cancel` on a trip |
+| `stopReason` | `end_turn` completed · `max_turn_requests` budget · `refusal`/`max_tokens` aborted | — |
+
+Compared with the in-process IDE path this restores per-call approval (nothing is written into Bob's
+settings), followup answering, cancel and usage accounting, and it runs anywhere Bob Shell runs — CI, a
+container, WSL with a Linux Bob Shell. Worktrees are just N workers (`--tag worktree:<name>`), no extra
+Bob windows. Prerequisites: Bob Shell 2.x installed
+(`irm https://bob.ibm.com/download/bobshell.ps1 | iex`, or the `.sh` — it is not on npm), logged in once
+(run `bob` → SSO) or `BOB_API_KEY` in the worker's environment, and the license accepted for a new Shell
+version (`bob --show-license acp`, then `--acp-args --accept-license`). Caveats: tasks run in Bob Shell's
+own session store, not the IDE's task history; Bob Shell has no `submit_review_findings`, so review findings
+are parsed from the result text; the `bob-companion` MCP server must be in Bob Shell's own MCP config
+(`~/.bob/settings/mcp.json`) for Bob to reach the board mid-task. Observed on Bob Shell 2.0.2: it sends no
+`usage_update`, so the token budget is inert over ACP (`--max-turns` counts prompt turns), and
+`ask_followup_question` is not in its ACP tool set — a question Bob would have asked comes back as the turn's
+text, so the followup path never wedges (the judge / verify-and-continue catch a question-shaped result).
+
 ## Driving Bob over IPC (Bob 1.x — legacy)
 
-> **Bob 1.x only.** IBM Bob 2.0 removed the `node-ipc` server, so there's no pipe to drive — on 2.0
-> the companion extension drives Bob **in-process** (see [the extension](#vs-code--bob-extension)),
+> **Bob 1.x only.** IBM Bob 2.0 removed the `node-ipc` server, so there's no pipe to drive — on the 2.0
+> IDE the companion extension drives Bob **in-process** (see [the extension](#vs-code--bob-extension)),
 > and the outside-process commands here (`--cancel`, `--list-pipes`, a direct `StartNewTask`) have no
-> 2.0 analog: 2.0 exposes no external control channel.
+> IDE analog. The out-of-process channel on 2.x is Bob Shell's ACP — [see above](#driving-bob-shell-over-acp-bob-2x--headless).
 
 Bob starts a `node-ipc` server when launched with `ROO_CODE_IPC_SOCKET_PATH`
 set. [bob-control.mjs](bob-control.mjs) connects to it, sends `StartNewTask`,

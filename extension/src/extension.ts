@@ -141,6 +141,13 @@ function startWorker(force = false): void {
  * exports are reachable, else the 1.x IPC child. The 2.0 path needs no ROO_CODE_IPC_SOCKET_PATH (no pipe).
  */
 async function detectAndStart(connector: string, force: boolean): Promise<void> {
+  // Explicit ACP transport: Bob Shell as a child of the worker — no window detection, no pipe env needed.
+  if (cfg().get<string>("transport") === "acp") {
+    starting = false;
+    out.appendLine("[start] transport=acp — spawning the worker over Bob Shell (bob acp).");
+    spawnWorker(connector, "acp");
+    return;
+  }
   // bob-code's exports are only populated once it has activated. At autostart it may not have yet, which
   // would misdetect a 2.0 window as 1.x — so activate it first (no-op if absent or already active).
   const bobExt = vscode.extensions.getExtension("IBM.bob-code");
@@ -217,7 +224,7 @@ function classifierBackendArgs(c: vscode.WorkspaceConfiguration): string[] {
   return args;
 }
 
-function spawnWorker(connector: string): void {
+function spawnWorker(connector: string, transport: "ipc" | "acp" = "ipc"): void {
   if (worker || starting || loop) return; // re-entrancy guard (detection already passed)
   const c = cfg();
   const workerJs = path.join(connector, "dist", "worker.js");
@@ -236,14 +243,25 @@ function spawnWorker(connector: string): void {
     "--emit-json",
     "--no-notify", // extension shows native notifications instead
     ...commonWorkerArgs(c),
-    // Default to this host Bob's own socket so the worker targets the instance it runs in, not
-    // whichever Bob owns the shared global pipe; an explicit bobTasks.pipe still overrides.
-    "--pipe", c.get<string>("pipe") || process.env.ROO_CODE_IPC_SOCKET_PATH || "\\\\.\\pipe\\pipe\\bob-ipc",
-    "--surface", c.get<string>("dispatch.surface") ?? "sidebar",
   ];
-  // 1.x-only gates (they need the IPC channel Bob 2.0 removed): the command classifier (approve/deny
-  // gray-zone commands, needs the Bob button patch) and the followup answerer (answer Bob's questions),
-  // off by default. classifier/followups/judge share one Claude backend, so push it when any is on.
+  if (transport === "acp") {
+    args.push("--acp");
+    const bobShell = c.get<string>("bobShellPath");
+    if (bobShell && bobShell.trim()) args.push("--bob-shell", bobShell.trim());
+    const acpArgs = c.get<string>("acpArgs");
+    if (acpArgs && acpArgs.trim()) args.push("--acp-args", acpArgs.trim());
+  } else {
+    args.push(
+      // Default to this host Bob's own socket so the worker targets the instance it runs in, not
+      // whichever Bob owns the shared global pipe; an explicit bobTasks.pipe still overrides.
+      "--pipe", c.get<string>("pipe") || process.env.ROO_CODE_IPC_SOCKET_PATH || "\\\\.\\pipe\\pipe\\bob-ipc",
+      "--surface", c.get<string>("dispatch.surface") ?? "sidebar",
+    );
+  }
+  // Child-transport gates (the 1.x pipe and ACP both carry the event stream the in-process 2.0 loop lacks):
+  // the command classifier (approve/deny gray-zone commands; 1.x needs the Bob button patch) and the
+  // followup answerer (answer Bob's questions), off by default. classifier/followups/judge share one
+  // Claude backend, so push it when any is on.
   const wantClassifier = c.get<boolean>("commandClassifier");
   const wantFollowups = c.get<boolean>("answerFollowups");
   const wantJudge = c.get<boolean>("verifyAndContinue") && c.get<boolean>("verifyJudge");
@@ -252,8 +270,10 @@ function spawnWorker(connector: string): void {
   if (c.get<boolean>("escalateAll")) args.push("--escalate-all");
   if (c.get<boolean>("reviewPlans")) args.push("--review-plans");
   if (wantClassifier || wantFollowups || wantJudge) args.push(...classifierBackendArgs(c));
-  const allowCommands = c.get<string>("allowCommands"); // extend advanced mode's command allowlist (1.x-only)
+  const allowCommands = c.get<string>("allowCommands"); // extend the command allowlist the permission gate auto-approves
   if (allowCommands && allowCommands.trim()) args.push("--allow-commands", allowCommands.trim());
+  const denyCommands = c.get<string>("denyCommands"); // extra prefixes/substrings the permission gate refuses
+  if (denyCommands && denyCommands.trim()) args.push("--deny-commands", denyCommands.trim());
 
   const env = { ...process.env };
   applyBoardEnv(cwd, env); // board selection (dbPath > worktree-shared > per-project) — see applyBoardEnv
@@ -360,6 +380,10 @@ interface ConnectorModules {
   /** Writes Bob's headless auto-approve into global settings.json; we inject a gated wrapper (the setting +
    *  one-time notice live in the extension, keeping the driver vscode-free). Returns the path written. */
   writeAutoApprove: (path?: string) => { path: string; created: boolean };
+  /** Installs/removes our Bob 2.1 lifecycle hooks in global settings.json (absent in an older connector). */
+  writeHooks?: (cmds: { stop?: string | null; preToolUse?: string | null }, path?: string) => unknown;
+  /** Builds a hook command line (`<node> <script> [args]`) with the quoting Bob's exec needs. */
+  hookCommand?: (node: string, script: string, args?: string[]) => string;
 }
 
 async function loadConnector(connector: string): Promise<ConnectorModules> {
@@ -367,12 +391,13 @@ async function loadConnector(connector: string): Promise<ConnectorModules> {
   // mode preserves the dynamic import. file:// URL so Windows paths resolve.
   const load = (f: string): Promise<Record<string, unknown>> =>
     import(pathToFileURL(path.join(connector, "dist", f)).href) as Promise<Record<string, unknown>>;
-  const [host, driver, loopMod, workerMod, configMod] = await Promise.all([
+  const [host, driver, loopMod, workerMod, configMod, hooksMod] = await Promise.all([
     load("bob2-host.js"),
     load("bob2-driver.js"),
     load("driver-loop.js"),
     load("worker.js"),
     load("bob2-config.js"),
+    load("hooks.js").catch(() => ({}) as Record<string, unknown>), // absent in a pre-2.4 connector
   ]);
   return {
     createBob2Host: host.createBob2Host as ConnectorModules["createBob2Host"],
@@ -381,6 +406,37 @@ async function loadConnector(connector: string): Promise<ConnectorModules> {
     runDriverLoop: loopMod.runDriverLoop as ConnectorModules["runDriverLoop"],
     parseOpts: workerMod.parseOpts as ConnectorModules["parseOpts"],
     writeAutoApprove: configMod.writeAutoApprove as ConnectorModules["writeAutoApprove"],
+    writeHooks: configMod.writeHooks as ConnectorModules["writeHooks"],
+    hookCommand: hooksMod.hookCommand as ConnectorModules["hookCommand"],
+  };
+}
+
+/** The hook install the driver runs on connect() (Bob 2.1+): the Stop hook (default on) and the PreToolUse
+ *  command gate (default off — it applies to every Bob task on the machine). No-op on an older connector. */
+function makeWriteHooks(connector: string, mods: ConnectorModules): () => void {
+  return () => {
+    if (!mods.writeHooks || !mods.hookCommand) return;
+    const c = cfg();
+    const node = c.get<string>("nodePath") || "node";
+    const stopOn = c.get<boolean>("hooks.stopSignal") !== false;
+    const gateOn = c.get<boolean>("hooks.commandGate") === true;
+    const script = (f: string) => path.join(connector, "dist", f);
+    const gateArgs: string[] = [];
+    const deny = c.get<string>("denyCommands");
+    if (deny && deny.trim()) gateArgs.push("--deny", deny.trim());
+    const allow = c.get<string>("allowCommands");
+    if (allow && allow.trim()) gateArgs.push("--allow", allow.trim());
+    try {
+      const r = mods.writeHooks(
+        {
+          stop: stopOn ? mods.hookCommand(node, script("hook-stop.js")) : null,
+          preToolUse: gateOn ? mods.hookCommand(node, script("hook-pretool.js"), gateArgs) : null,
+        },
+      ) as { path: string };
+      out.appendLine(`[hooks] Stop=${stopOn ? "on" : "off"}, PreToolUse command gate=${gateOn ? "on" : "off"} → ${r.path}`);
+    } catch (e) {
+      out.appendLine(`[hooks] not installed: ${(e as Error).message}`);
+    }
   };
 }
 
@@ -456,7 +512,16 @@ function startInProcessLoop(connector: string, mods: ConnectorModules, host: unk
   // The judge needs a Claude backend (cli default, or api with ANTHROPIC_API_KEY in the host env).
   if (c.get<boolean>("verifyAndContinue") && c.get<boolean>("verifyJudge")) args.push(...classifierBackendArgs(c));
   const opts = mods.parseOpts(args);
-  const driver = new mods.InProcessDriver(host, { writeApproval: makeWriteApproval(mods.writeAutoApprove) });
+  const driver = new mods.InProcessDriver(host, {
+    writeApproval: makeWriteApproval(mods.writeAutoApprove),
+    writeHooks: makeWriteHooks(connector, mods),
+    // Rollback: a stopped loop leaves nothing of ours in Bob's global settings (see makeWriteHooks).
+    removeHooks: () => {
+      if (!mods.writeHooks) return;
+      mods.writeHooks({ stop: null, preToolUse: null });
+      out.appendLine("[hooks] removed (loop stopped)");
+    },
+  });
 
   let stopped = false;
   loop = { stop: () => void (stopped = true) };

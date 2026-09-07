@@ -82,7 +82,24 @@ export interface DispatchOptions extends DispatchCore {
   tokenCeiling?: number;
   /** Hard turn (api-request) cap; the dispatch ends as 'budget' once exceeded. <= 0 disables. */
   turnCap?: number;
+  /**
+   * ACP only: settle a tool's permission prompt without a gate ("allow"/"reject"), or park it as an `ask`
+   * on onEvent ("ask") for the gates. The pipe driver never consults it (1.x auto-approve is config-driven).
+   */
+  permissionPolicy?: PermissionPolicy;
 }
+
+/** A tool call awaiting permission, as the ACP driver sees it (`session/request_permission`'s toolCall). */
+export interface ToolPermissionRequest {
+  toolCallId: string;
+  title?: string;
+  /** ACP tool category: read | edit | delete | move | search | execute | think | fetch | switch_mode | other. */
+  kind?: string;
+  /** Bob's tool arguments (e.g. `{command}` for execute_command, `{path, content}` for a write). */
+  rawInput?: Record<string, unknown>;
+}
+export type PermissionDecision = "allow" | "reject" | "ask";
+export type PermissionPolicy = (toolCall: ToolPermissionRequest) => PermissionDecision;
 
 export interface ReviewIssue {
   title: string;
