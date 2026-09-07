@@ -3,6 +3,17 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
+## [2.4.1] — 2026-09-07 — ACP: no stray task per worker start
+
+### Fixed
+
+- **The ACP worker's startup probe no longer leaves an empty task in Bob's history.** `connect()` opens a
+  throwaway session to surface auth and license problems before the first dispatch; Bob Shell writes that
+  session into the same `~/.bob/db/bob.db` the IDE reads, so every worker start added a blank task to the
+  IDE's task list. The probe now deletes its session (`session/delete`, which Bob Shell advertises).
+- **Docs: ACP tasks do appear in the IDE's task history.** 2.4.0 said Bob Shell kept its own session store;
+  it shares the IDE's, so tasks dispatched over ACP show up in the Bob window like any other.
+
 ## [2.4.0] — 2026-09-07 — Bob Shell over ACP + Bob 2.1 lifecycle hooks
 
 IBM's August 2026 release made Bob Shell an [Agent Client Protocol](https://agentclientprotocol.com) agent
@@ -24,8 +35,8 @@ driver changes — `startTask`, the bob.db schema (still migration 010) and the 
   names the launcher or the `bobshell/dist/bob.js` bundle (preferred when found beside the PATH shim);
   `--acp-args` passes extra `bob acp` flags. Extension: `bobTasks.transport: "acp"`, `bobShellPath`, `acpArgs`.
   Needs Bob Shell 2.x (`bob.ibm.com/download`, not npm) logged in once or `BOB_API_KEY`, and the license
-  accepted once per Shell version (`--acp-args --accept-license`). Tasks live in Bob Shell's session store,
-  not the IDE's history; review findings are parsed from the result text (no `submit_review_findings`).
+  accepted once per Shell version (`--acp-args --accept-license`). Review findings are parsed from the result
+  text (no `submit_review_findings`).
   On Bob Shell 2.0.2 there is no `usage_update` (the token budget is inert; turns = prompt turns) and no
   `ask_followup_question` tool over ACP (a question comes back as the turn's text, never a wedge).
 - **Stop-hook completion signal (Bob 2.1+, in-process driver).** A `Stop` lifecycle hook in Bob's global

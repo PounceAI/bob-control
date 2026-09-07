@@ -299,13 +299,19 @@ export class AcpDriver implements WorkerClient {
     }
   }
 
-  /** Prove Bob Shell launches, speaks ACP and is authenticated: one throwaway session, then close. */
+  /** Prove Bob Shell launches, speaks ACP and is authenticated: one throwaway session, deleted again so it
+   *  leaves no empty task in the shared ~/.bob/db/bob.db history, then close. */
   async connect(): Promise<void> {
     const conn = new AcpConnection(this.spawnTransport(), this.log);
     try {
       const init = await conn.request("initialize", INIT_PARAMS, this.setupTimeoutMs);
       this.agentInfo = init?.agentInfo ?? null;
-      await this.newSession(conn);
+      const { sessionId } = await this.newSession(conn);
+      try {
+        await conn.request("session/delete", { sessionId }, this.setupTimeoutMs);
+      } catch {
+        /* an agent without session/delete just keeps the probe row */
+      }
     } finally {
       conn.close();
     }

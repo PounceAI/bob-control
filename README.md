@@ -560,7 +560,8 @@ never aborts a live Bob conversation.
 - **Bob 1.x** (legacy) — spawns `dist/worker.js`, which dispatches over the `node-ipc` pipe; needs
   Bob launched with `ROO_CODE_IPC_SOCKET_PATH` (`launch-bob-ipc.cmd`).
 - **Bob Shell 2.x over ACP** (`bobTasks.transport: "acp"`) — spawns `dist/worker.js --acp`, which drives
-  `bob acp` as its own child: every gate active, no window detection, no pipe. See
+  `bob acp` as its own child: every gate active, no window detection, no pipe; tasks still appear in the
+  IDE's task history (Bob Shell shares its task store). See
   [Driving Bob Shell over ACP](#driving-bob-shell-over-acp-bob-2x--headless).
 
 On **Bob 2.1+** the in-process loop also installs two lifecycle hooks in Bob's global settings: a **Stop**
@@ -643,9 +644,9 @@ container, WSL with a Linux Bob Shell. Worktrees are just N workers (`--tag work
 Bob windows. Prerequisites: Bob Shell 2.x installed
 (`irm https://bob.ibm.com/download/bobshell.ps1 | iex`, or the `.sh` — it is not on npm), logged in once
 (run `bob` → SSO) or `BOB_API_KEY` in the worker's environment, and the license accepted for a new Shell
-version (`bob --show-license acp`, then `--acp-args --accept-license`). Caveats: tasks run in Bob Shell's
-own session store, not the IDE's task history; Bob Shell has no `submit_review_findings`, so review findings
-are parsed from the result text; the `bob-companion` MCP server must be in Bob Shell's own MCP config
+version (`bob --show-license acp`, then `--acp-args --accept-license`). Caveats: Bob Shell has no `submit_review_findings`, so review findings
+are parsed from the result text (its sessions land in the same `~/.bob/db/bob.db` as the IDE's, so ACP tasks
+do show in the IDE's task history); the `bob-companion` MCP server must be in Bob Shell's own MCP config
 (`~/.bob/settings/mcp.json`) for Bob to reach the board mid-task. Observed on Bob Shell 2.0.2: it sends no
 `usage_update`, so the token budget is inert over ACP (`--max-turns` counts prompt turns), and
 `ask_followup_question` is not in its ACP tool set — a question Bob would have asked comes back as the turn's

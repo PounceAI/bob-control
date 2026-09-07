@@ -2,7 +2,7 @@
   "name": "bob-tasks",
   "displayName": "Bob Tasks",
   "description": "Auto-dispatch queued tasks to IBM Bob, with mode routing, a safety gate, defer-while-chatting, and native notifications.",
-  "version": "2.4.0",
+  "version": "2.4.1",
   "publisher": "local",
   "license": "Apache-2.0",
   "engines": {
@@ -57,7 +57,7 @@
             "acp"
           ],
           "default": "auto",
-          "description": "auto = the in-process loop in a Bob 2.0 window, else the 1.x IPC worker. acp = drive Bob Shell 2.x over the Agent Client Protocol (`bob acp`) as a child process: headless, every gate active (command/permission/followup/mode-switch), tasks run in Bob Shell rather than this window's task history. Needs Bob Shell 2.x installed and logged in."
+          "description": "auto = the in-process loop in a Bob 2.0 window, else the 1.x IPC worker. acp = drive Bob Shell 2.x over the Agent Client Protocol (`bob acp`) as a child process: headless, every gate active (command/permission/followup/mode-switch); Bob Shell shares the IDE's task store, so tasks still appear in this window's history. Needs Bob Shell 2.x installed and logged in."
         },
         "bobTasks.bobShellPath": {
           "scope": "machine",

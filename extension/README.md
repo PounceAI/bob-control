@@ -8,7 +8,7 @@ The Bob Tasks extension claims and dispatches queued board tasks to IBM Bob from
 
 - **Bob 2.0** (current) — runs the dispatch loop **in-process**, calling Bob's exported `startTask` API; no child process, no pipe. Completion is read from Bob's task store (`~/.bob/db/bob.db`), and headless auto-approve is written to Bob's global settings (gated by `bobTasks.autoApproveGlobal`).
 - **Bob 1.x** (legacy) — spawns the project's `dist/worker.js`, which dispatches over the `node-ipc` pipe (`ROO_CODE_IPC_SOCKET_PATH`).
-- **Bob Shell 2.x over ACP** (`bobTasks.transport: "acp"`) — spawns `dist/worker.js --acp`, which drives `bob acp` as its own child process: every gate active (command / permission / followup / mode-switch), no window detection, no pipe. Tasks run in Bob Shell, not this window's task history.
+- **Bob Shell 2.x over ACP** (`bobTasks.transport: "acp"`) — spawns `dist/worker.js --acp`, which drives `bob acp` as its own child process: every gate active (command / permission / followup / mode-switch), no window detection, no pipe. Bob Shell shares the IDE's task store, so the tasks still appear in this window's history.
 
 Either way it:
 
