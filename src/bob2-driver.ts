@@ -5,6 +5,7 @@ import {
   awaitTurnSettled,
   bob2DbExists,
   describePendingApproval,
+  isActivelyRunning,
   parseCosts,
   sleep,
   taskError,
@@ -14,6 +15,7 @@ import {
   type Bob2TaskRow,
 } from "./bob2-taskstore.js";
 import { writeAutoApprove } from "./bob2-config.js";
+import { pruneStopMarkers, readStopMarker, removeStopMarker, stopMarkerDir, type StopMarker } from "./hooks.js";
 import { resolveAvailableMode } from "./bob2-modes.js";
 import { producesReviewFindings } from "./modes.js";
 import { parseReviewFindings, type ReviewIssue } from "./review-findings.js";
@@ -71,6 +73,13 @@ export interface InProcessDriverOptions {
   openStore?: () => Bob2TaskStore | null;
   /** Apply the 2.0 auto-approve config once on connect. Default: `writeAutoApprove` to settings.json. */
   writeApproval?: () => void;
+  /** Install the lifecycle hooks once on connect, after the approval write. Default: none. */
+  writeHooks?: () => void;
+  /** Uninstall them on close (the loop stopped, nothing reads the markers). Default: none. */
+  removeHooks?: () => void;
+  /** The Stop marker for a task written at/after `sinceMs`, or null. Default: `stopMarkerDir()`; the
+   *  quiescence watch remains the fallback. */
+  stopSignal?: (taskId: string, sinceMs: number) => StopMarker | null;
   /** Completion-watch poll cadence (ms). */
   pollMs?: number;
   /** Quiescence window (ms): how long `updated_at` must be still before a turn reads as done. */
@@ -172,6 +181,7 @@ export class InProcessDriver implements BobDriver {
     // front; a dispatch with the gate still armed would wedge on the first permission prompt.
     if (!this.approvalWritten) {
       (this.opts.writeApproval ?? (() => void writeAutoApprove()))();
+      this.opts.writeHooks?.();
       this.approvalWritten = true;
     }
     this.handle = ex;
@@ -197,8 +207,16 @@ export class InProcessDriver implements BobDriver {
     }
   }
 
-  /** No persistent watcher between dispatches (the store is opened per-dispatch), so close is a no-op. */
-  close(): void {}
+  /** Nothing persists between dispatches; close only takes our hooks back out of Bob's settings (best-effort). */
+  close(): void {
+    if (!this.approvalWritten) return;
+    try {
+      this.opts.removeHooks?.();
+    } catch {
+      /* best-effort */
+    }
+    this.approvalWritten = false; // a later connect() re-installs
+  }
 
   /** Remember a root we dispatched so externalActivity won't read it as a user chat, bounded so a long-lived
    *  loop's Set can't grow without limit (Set keeps insertion order → evict the oldest). NOTE: a dispatch
@@ -276,6 +294,9 @@ export class InProcessDriver implements BobDriver {
     // Mode preflight (see bob2-modes): an unloaded slug would hang the dispatch, so warn and downgrade.
     const picked = resolveAvailableMode(toBob2Mode(opts.mode), dir);
     if (picked.warning) (this.opts.warn ?? console.warn)(picked.warning);
+    const startedAt = Date.now(); // a Stop marker must postdate the dispatch to count
+    const stopSignal =
+      this.opts.stopSignal ?? ((id: string, since: number) => readStopMarker(stopMarkerDir(), id, since));
     try {
       try {
         // workspaceFolder = the WorkspaceFolder object; mode a slug Bob resolves (see Bob2StartTask / toBob2Mode).
@@ -309,6 +330,7 @@ export class InProcessDriver implements BobDriver {
       // created_at (schema drift — the DDL says NOT NULL) is skipped: a false abort of a healthy turn is
       // worse than falling back to the timeout.
       let wedge: string | null = null;
+      let stopped: StopMarker | null = null;
       const liveStore = store; // narrowed for the closure — TS can't see the null guard through capture
       const quietMs = this.quietMs; // one source for both settle paths (the option and the closure)
       const { settled, row, maxGapMs } = await awaitTurnSettled(store, id, {
@@ -316,6 +338,10 @@ export class InProcessDriver implements BobDriver {
         quietMs,
         timeoutMs: opts.timeoutMs ?? 300_000,
         isSettled: (r) => {
+          // Stop hook first (no quiet window), but only once the row has left 'running' so its final
+          // status / last_error, written a beat after the hook, are what gets mapped.
+          stopped = isActivelyRunning(r.status) ? null : stopSignal(id, startedAt);
+          if (stopped) return true;
           if (turnSettled(r, quietMs)) return true;
           const p = liveStore
             .pendingApprovals(id)
@@ -341,7 +367,18 @@ export class InProcessDriver implements BobDriver {
         };
       }
       const done = settled && !!row && !taskError(row);
-      const result = done ? (store.readResultText(id) ?? "") : "";
+      // The hook's last_assistant_message backs up the bob.db read (the message row can land a beat later).
+      const hookText = (stopped as StopMarker | null)?.last_assistant_message ?? "";
+      const result = done ? (store.readResultText(id) ?? hookText) : "";
+      if (!this.opts.stopSignal) {
+        // The global hook fires for every Bob task, so bound the marker dir each dispatch; ours is consumed.
+        if (stopped) removeStopMarker(stopMarkerDir(), id);
+        try {
+          pruneStopMarkers(stopMarkerDir(), 24 * 3600_000);
+        } catch {
+          /* best-effort */
+        }
+      }
       // Review mode: findings span the task's assistant messages and readResultText returns only the last
       // (a summary), so parse the full transcript into structured findings for the board's bob-review note.
       const reviewFindings =

@@ -595,3 +595,78 @@ test("dispatch writes auto-approve only once across multiple tasks", async () =>
   await driver.dispatch({ text: "two" });
   assert.equal(writes, 1);
 });
+
+// ── Stop-hook completion signal (Bob 2.1 lifecycle hooks) ─────────────────────────────────────
+
+test("a Stop marker settles the dispatch at once — no quiet window — and backs up the result text", async () => {
+  const { store, seedRoot, bump } = makeStore();
+  let id = "";
+  setTimeout(() => bump(id, "active"), 15); // the row leaves 'running' a beat after the hook fires
+  const seen: [string, number][] = [];
+  const t0 = Date.now();
+  const driver = new InProcessDriver(makeHost({ startTask: () => void (id = seedRoot("running")) }), {
+    openStore: () => store,
+    writeApproval: () => {},
+    pollMs: 5,
+    quietMs: 10_000, // quiescence alone would need 10s; the marker must win
+    correlateTimeoutMs: 1000,
+    stopSignal: (taskId, since) => {
+      seen.push([taskId, since]);
+      return seen.length >= 3 ? { session_id: taskId, at: since + 1, last_assistant_message: "Hook says done." } : null;
+    },
+  });
+  const res = await driver.dispatch({ text: "do it", mode: "code", timeoutMs: 2000 });
+  assert.equal(res.status, "completed");
+  assert.equal(res.taskId, id);
+  assert.equal(res.result, "Hook says done."); // no assistant message in bob.db → the hook's text
+  assert.equal(seen[0][0], id);
+  assert.ok(seen[0][1] >= t0, "sinceMs is the dispatch start");
+});
+
+test("bob.db's own result text wins over the Stop marker's when both exist; a null marker falls back to quiet", async () => {
+  const { store, seedRoot, bump, finishWith } = makeStore();
+  let id = "";
+  const driver = new InProcessDriver(
+    makeHost({
+      startTask: () => {
+        id = seedRoot("running");
+        finishWith(id, { result: "From bob.db" });
+      },
+    }),
+    {
+      openStore: () => store,
+      ...fast,
+      stopSignal: (taskId) => ({ session_id: taskId, at: Date.now(), last_assistant_message: "hook" }),
+    },
+  );
+  setTimeout(() => bump(id, "active"), 15); // a marker only counts once the row has left 'running'
+  const res = await driver.dispatch({ text: "do it", mode: "code" });
+  assert.equal(res.result, "From bob.db");
+
+  const { store: s2, seedRoot: seed2, bump: bump2 } = makeStore();
+  let id2 = "";
+  const d2 = new InProcessDriver(makeHost({ startTask: () => void (id2 = seed2("running")) }), {
+    openStore: () => s2,
+    ...fast,
+    stopSignal: () => null,
+  });
+  setTimeout(() => bump2(id2, "active"), 15);
+  assert.equal((await d2.dispatch({ text: "x", mode: "code" })).status, "completed");
+});
+
+test("connect installs the hooks once after the approval write; close removes them and a reconnect re-installs", async () => {
+  const order: string[] = [];
+  const driver = new InProcessDriver(makeHost({}), {
+    writeApproval: () => order.push("approval"),
+    writeHooks: () => order.push("hooks"),
+    removeHooks: () => order.push("remove"),
+    stopSignal: () => null,
+  });
+  driver.close(); // never connected → nothing to remove
+  await driver.connect();
+  await driver.connect();
+  driver.close();
+  driver.close();
+  await driver.connect();
+  assert.deepEqual(order, ["approval", "hooks", "remove", "approval", "hooks"]);
+});

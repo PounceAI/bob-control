@@ -17,6 +17,8 @@ import {
   type Risk,
 } from "./modes.js";
 import { createCommandGate } from "./command-gate.js";
+import { AcpDriver, permissionPolicyFor } from "./acp-driver.js";
+import type { WorkerClient } from "./bob-driver.js";
 import { createPermissionGate, type PermissionVerdict } from "./permission-gate.js";
 import { createModeSwitchGate, isModeSwitchAsk } from "./mode-switch-gate.js";
 import { isCommandAsk } from "./command-policy.js";
@@ -91,6 +93,9 @@ function buttonPatchPresent(): boolean | null {
  *   node dist/worker.js --no-budget         disable the per-task token/turn budget backstop
  *   node dist/worker.js --deny-commands a,b  extra command prefixes/substrings to default-deny
  *   node dist/worker.js --no-command-gate   disable the deterministic permission gate (idle-watchdog backstop only)
+ *   node dist/worker.js --acp               drive Bob Shell over ACP (`bob acp`) — headless, no IDE window (Bob 2.x)
+ *   node dist/worker.js --acp --bob-shell <path>  Bob Shell launcher / bob.js bundle (default: `bob` on PATH)
+ *   node dist/worker.js --acp --acp-args "--accept-license,--disable-mcp"  extra `bob acp` flags
  *   node dist/worker.js --allow-all-commands  SANDBOX ONLY: auto-run every command (Bob policy 'auto', gate off)
  *
  * Resilience guards (on by default): a deterministic permission gate (command-policy.ts) resolves
@@ -178,6 +183,12 @@ export interface Opts {
   webhookUrl?: string;
   /** Shared secret to HMAC-sign the webhook body (X-Bob-Signature). Off when unset. */
   webhookSecret?: string;
+  /** Drive Bob Shell over ACP (`bob acp`) instead of the 1.x IPC pipe (--acp). */
+  acp: boolean;
+  /** Bob Shell launcher for --acp: `bob` on PATH, or a path to it / to its bob.js bundle (--bob-shell). */
+  bobShell?: string;
+  /** Extra `bob acp` flags (--acp-args "--accept-license,--disable-mcp"). */
+  acpArgs: string[];
 }
 
 // Watchdog / budget defaults. The blocked-ask grace is the high-value, low-false-positive guard
@@ -285,6 +296,9 @@ export function parseOpts(argv: string[]): Opts {
     allowAllCommands: has("--allow-all-commands"),
     webhookUrl,
     webhookSecret,
+    acp: has("--acp"),
+    bobShell: val("--bob-shell"),
+    acpArgs: csv(val("--acp-args")),
   };
 }
 
@@ -406,7 +420,7 @@ async function parkWorkspaceMismatch(task: Task, opts: Opts, m: WorkspaceMismatc
 }
 
 async function runOne(
-  client: BobClient,
+  client: WorkerClient,
   task: Task,
   opts: Opts,
   patchPresent: boolean | null,
@@ -482,7 +496,7 @@ interface DispatchSession {
  * stdin answer can reach it; the caller's finally unregisters it.
  */
 function createDispatchSession(
-  client: BobClient,
+  client: WorkerClient,
   task: Task,
   opts: Opts,
   routing: Pick<Routing, "mode" | "profile" | "pressesLand">,
@@ -661,6 +675,12 @@ function createDispatchSession(
         isAnswerableAsk,
         tokenCeiling,
         turnCap,
+        // ACP only: the profile's auto-approve flags settle non-command tools in the driver; commands come
+        // back as asks for the gates unless the sandbox escape hatch / an 'auto' policy allows them all.
+        permissionPolicy: permissionPolicyFor(
+          profile.autoApprove,
+          opts.allowAllCommands || profile.commandPolicy === "auto",
+        ),
         onEvent: (name, { say, ask, text, partial, ts, taskId, isRoot }) => {
           // Capture the ask for the root's idle-recovery needs_input — ROOT-only, so a routed subtask
           // command ask (the gates handle it) isn't mis-surfaced as the root's blocker. Clear only on a
@@ -828,7 +848,7 @@ export function persistReviewFindings(task: Task, mode: string, res: DispatchRes
  * any terminal failure (never leaves WIP on main).
  */
 async function finalizeDispatch(
-  client: BobClient,
+  client: WorkerClient,
   task: Task,
   opts: Opts,
   mode: string,
@@ -1082,31 +1102,65 @@ export async function main(): Promise<void> {
     if (reclaimed) console.log(`bob-worker: re-queued ${reclaimed} stale in_progress task(s) from a prior run.`);
   }
 
-  const client = new BobClient(opts.pipe);
+  // Transport: the 1.x IPC pipe (default) or Bob Shell over ACP (--acp). Both expose the WorkerClient
+  // gate surface, so everything below runs unchanged; only setup and the workspace handshake differ.
+  const client: WorkerClient = opts.acp
+    ? new AcpDriver({
+        cwd: process.cwd(),
+        bobCommand: opts.bobShell,
+        extraArgs: opts.acpArgs,
+        log: (m) => console.log(m),
+        warn: (m) => console.log(`  ⚠ ${m}`),
+      })
+    : new BobClient(opts.pipe);
   const external = new ExternalActivity(Date.now, opts.deferStaleMs);
   client.onTaskEvent((ev) => external.handle(ev));
+  // Every exit path releases the transport; for --acp that closes the child's stdin, on which Bob Shell exits.
+  process.on("exit", () => {
+    try {
+      client.close();
+    } catch {
+      /* best-effort on the way out */
+    }
+  });
 
-  console.log(`bob-worker: connecting to ${resolvePipe(opts.pipe)} …`);
+  const where = opts.acp ? `Bob Shell (${opts.bobShell ?? "bob"} acp) in ${process.cwd()}` : resolvePipe(opts.pipe);
+  console.log(`bob-worker: connecting to ${where} …`);
   if (!opts.dryRun) {
     try {
       await client.connect();
-      console.log("bob-worker: connected.");
+      const agent =
+        client instanceof AcpDriver && client.agentInfo
+          ? ` (${client.agentInfo.name} ${client.agentInfo.version ?? ""})`
+          : "";
+      console.log(`bob-worker: connected${agent}.`);
     } catch (err) {
       console.error(`bob-worker: could not connect — ${(err as Error).message}`);
-      console.error("Is Bob running, launched WITH ROO_CODE_IPC_SOCKET_PATH set? Try bob-control.mjs --list-pipes");
+      if (opts.acp) {
+        console.error(
+          "Is Bob Shell 2.x installed (`bob acp --help`) and logged in (run `bob` once, or set BOB_API_KEY)? " +
+            "A license prompt needs `--acp-args --accept-license` after reviewing `bob --show-license acp`.",
+        );
+      } else {
+        console.error("Is Bob running, launched WITH ROO_CODE_IPC_SOCKET_PATH set? Try bob-control.mjs --list-pipes");
+      }
       emit(opts, "error", { message: (err as Error).message });
       await webhookSink?.flush();
       process.exit(1);
     }
   }
-  emit(opts, "connected", { pipe: resolvePipe(opts.pipe), maxRisk: opts.maxRisk });
+  emit(opts, "connected", {
+    pipe: opts.acp ? undefined : resolvePipe(opts.pipe),
+    transport: opts.acp ? "acp" : "ipc",
+    maxRisk: opts.maxRisk,
+  });
 
   // Layer-2 workspace handshake: ask the Bob we just connected to which folder it has open and confirm
   // it's ours, so a misconfigured pipe pairing surfaces as a refusal instead of silently editing the
   // wrong tree. Verdict applied per dispatch below (parking needs_input). Bob's reported folder can't
   // change without a window reload, which drops the pipe — so a one-shot check at connect is enough.
   let workspaceMismatch: WorkspaceMismatch | null = null;
-  if (!opts.dryRun) {
+  if (!opts.dryRun && !opts.acp) {
     const reported = await client.queryWorkspace();
     workspaceMismatch = workspaceVerdict(reported, process.cwd());
     if (!reported) {
@@ -1165,7 +1219,7 @@ export async function main(): Promise<void> {
   );
   // Probe the button patch once and thread it into runOne (both the always-on mode-switch gate and the
   // command gate press over IPC, which only lands with the patch). null = couldn't probe; assume present.
-  const patchPresent = buttonPatchPresent();
+  const patchPresent = opts.acp ? true : buttonPatchPresent();
   if (opts.commandClassifier) {
     const be = opts.classifierBackend;
     const dflt = be === "cli" ? "claude-sonnet-4-6" : "claude-haiku-4-5";
