@@ -2,11 +2,13 @@
 // construction: the checkpoint is BOUND to a repo (refuses a revert in any other tree),
 // PINNED behind a real ref (gc can't drop the snapshot), VERIFIED before anything is touched
 // (missing snapshot / moved HEAD → refuse, not silent half-revert), RECOVERABLE (the
-// about-to-be-discarded state is pinned too), and restored WITHOUT moving HEAD (read-tree,
-// so a task's commit is never orphaned).
+// about-to-be-discarded state is pinned too, and a pin that can't be built refuses the revert),
+// restored WITHOUT moving HEAD (read-tree, so a task's commit is never orphaned), and BOUNDED
+// (one deadline per operation: a wedged git here would orphan the task in_progress behind a live
+// heartbeat).
 import { unlinkSync, rmdirSync } from "node:fs";
 import { resolve, dirname, sep } from "node:path";
-import { runGit, gitOut, repoRoot, headSha, refExists, listUntracked, snapshotWorktreeTree } from "./git.js";
+import { runGit, repoRoot, headSha, refExists, listUntracked, snapshotWorktreeTree, gitFailure } from "./git.js";
 import * as repo from "./db.js";
 import type { TaskCheckpoint } from "./types.js";
 
@@ -15,28 +17,50 @@ const RECOVERY_REF = (sha: string) => `refs/bob/recovery/${sha}`;
 /** Discoverable branch a task's preserved partial work is saved to on a terminal failure. */
 export const TASK_BRANCH = (taskId: number) => `bob/task-${taskId}`;
 
+/** One deadline per public operation. Post-restore bookkeeping (task branch, pin release) gets its
+ *  own, so an exhausted one can't skip it. */
+const DEADLINE_MS = 120_000;
+const deadline = (signal?: AbortSignal) => signal ?? AbortSignal.timeout(DEADLINE_MS);
+const git = (args: string[], cwd: string, signal: AbortSignal, env?: NodeJS.ProcessEnv) =>
+  runGit(args, cwd, undefined, env, signal);
+const TIMED_OUT = "git timed out — refusing to revert";
+
+export interface CheckpointOpts {
+  /** Deadline for every git call in the operation (default: a fresh DEADLINE_MS timeout). */
+  signal?: AbortSignal;
+}
+
 /**
  * Capture a rollback checkpoint for `cwd` (a git work tree). Snapshots the tracked tree as a
  * commit and PINS it behind refs/bob/checkpoint/<taskId> so git gc can't reclaim it. Reuses
  * `snapshotRef` (e.g. the worker's evidence stash) when given to avoid a second stash. Returns
- * null when cwd isn't a git work tree (nothing to checkpoint).
+ * null when cwd isn't a git work tree or git failed/timed out (restore trusts every field, so no
+ * checkpoint beats a wrong one).
  */
 export async function captureCheckpoint(
   cwd: string,
   taskId: number,
   snapshotRef?: string,
+  opts: CheckpointOpts = {},
 ): Promise<TaskCheckpoint | null> {
-  const root = await repoRoot(cwd);
+  const signal = deadline(opts.signal);
+  const root = await repoRoot(cwd, signal);
   if (!root) return null;
-  const head = await headSha(cwd);
+  const head = await headSha(cwd, signal);
   // A commit of the current tracked tree: reuse the caller's stash-create sha if it's a real
-  // object, else make one; fall back to HEAD when the tree is clean (nothing to stash).
-  let snapshot = snapshotRef && snapshotRef !== "HEAD" ? snapshotRef : (await gitOut(["stash", "create"], cwd)).trim();
+  // object, else make one; fall back to HEAD when the tree is clean (nothing to stash). A failed
+  // stash create is not "clean": a HEAD baseline would let a revert discard pre-task edits.
+  let snapshot = snapshotRef && snapshotRef !== "HEAD" ? snapshotRef : "";
+  if (!snapshot && head) {
+    const stash = await git(["stash", "create"], cwd, signal);
+    if (!stash.ok) return null;
+    snapshot = stash.stdout.trim();
+  }
   if (!snapshot) snapshot = head ?? "";
   let ref = "";
   if (snapshot) {
     const pin = CHECKPOINT_REF(taskId);
-    if ((await runGit(["update-ref", pin, snapshot], cwd)).ok) {
+    if ((await git(["update-ref", pin, snapshot], cwd, signal)).ok) {
       ref = pin;
     } else if (snapshot === head) {
       ref = snapshot; // no pin, but HEAD's branch ref keeps it gc-safe
@@ -44,7 +68,10 @@ export async function captureCheckpoint(
       return null; // can't pin a dangling stash sha → gc-prunable; don't promise gc-safety
     }
   }
-  return { root, head, ref, untracked: await listUntracked(cwd) };
+  // Restore deletes whatever is untracked and NOT in this list, so a failed listing can't be "none".
+  const untracked = await listUntracked(cwd, signal);
+  if (!untracked) return null;
+  return { root, head, ref, untracked };
 }
 
 export interface RestoreOutcome {
@@ -59,61 +86,73 @@ export interface RestoreOutcome {
 
 /**
  * Restore `cwd` to a checkpoint. Refuses (reverted:false, no mutation) when: cwd isn't a git
- * tree, it's a DIFFERENT repo than the checkpoint, HEAD moved since capture (unless force), or
- * the snapshot object is gone. Otherwise pins the current state for recovery, restores tracked
- * files via `read-tree` (HEAD untouched), and removes only files the task created.
+ * tree, it's a DIFFERENT repo than the checkpoint, HEAD moved since capture (unless force), the
+ * snapshot object is gone, git timed out, or the current state can't be pinned for recovery.
+ * Otherwise pins the current state, restores tracked files via `read-tree` (HEAD untouched), and
+ * removes only files the task created.
  */
 export async function restoreCheckpoint(
   cwd: string,
   cp: TaskCheckpoint,
-  opts: { force?: boolean } = {},
+  opts: { force?: boolean } & CheckpointOpts = {},
 ): Promise<RestoreOutcome> {
-  const root = await repoRoot(cwd);
-  if (!root) return { reverted: false, removed: [], note: "not a git work tree — refusing to revert" };
-  if (cp.root && root !== cp.root) {
-    return {
-      reverted: false,
-      removed: [],
-      note: `checkpoint belongs to ${cp.root}, not ${root} — refusing (wrong repo)`,
-    };
-  }
-  const head = await headSha(cwd);
+  const signal = deadline(opts.signal);
+  const refuse = (note: string): RestoreOutcome => ({ reverted: false, removed: [], note });
+  const root = await repoRoot(cwd, signal);
+  if (!root) return refuse(signal.aborted ? TIMED_OUT : "not a git work tree — refusing to revert");
+  if (cp.root && root !== cp.root)
+    return refuse(`checkpoint belongs to ${cp.root}, not ${root} — refusing (wrong repo)`);
+  const head = await headSha(cwd, signal);
+  if (signal.aborted) return refuse(TIMED_OUT);
   if (!opts.force && (head ?? null) !== (cp.head ?? null)) {
-    return {
-      reverted: false,
-      removed: [],
-      note: `HEAD moved since checkpoint (was ${cp.head?.slice(0, 8) ?? "none"}, now ${head?.slice(0, 8) ?? "none"}) — refusing; pass force to override`,
-    };
+    return refuse(
+      `HEAD moved since checkpoint (was ${cp.head?.slice(0, 8) ?? "none"}, now ${head?.slice(0, 8) ?? "none"}) — refusing; pass force to override`,
+    );
   }
-  if (cp.ref && !(await refExists(cp.ref, cwd))) {
-    return {
-      reverted: false,
-      removed: [],
-      note: `checkpoint snapshot is missing (gc'd or wrong repo) — refusing to revert`,
-    };
+  if (cp.ref && !(await refExists(cp.ref, cwd, signal))) {
+    return refuse(
+      signal.aborted ? TIMED_OUT : "checkpoint snapshot is missing (gc'd or wrong repo) — refusing to revert",
+    );
   }
 
   // Pin the current state (tracked changes AND untracked files) BEFORE we destroy it, so the
-  // discarded work is recoverable — including a task whose only change is a brand-new file.
-  const recoveryRef = await pinRecoverySnapshot(cwd, head);
+  // discarded work is recoverable — including a task whose only change is a brand-new file. A pin
+  // that can't be built refuses the revert: never destroy unrecoverably.
+  const pin = await pinRecoverySnapshot(cwd, head, signal);
+  if (!pin.ok) return refuse(`could not pin the current state for recovery (${pin.reason}) — refusing to revert`);
+  const recoveryRef = pin.ref;
+  const recoveryNote = recoveryRef ? `; recovery ${recoveryRef}` : "";
 
   // Restore tracked files to the snapshot tree WITHOUT moving HEAD (read-tree, not reset --hard,
   // so a commit the task made is never orphaned). Then unstage so the diff reads as pre-task.
   if (cp.ref) {
-    const rt = await runGit(["read-tree", "-u", "--reset", `${cp.ref}^{tree}`], cwd);
+    const rt = await git(["read-tree", "-u", "--reset", `${cp.ref}^{tree}`], cwd, signal);
     if (!rt.ok) {
-      return { reverted: false, removed: [], note: "git read-tree failed — tree not restored", recoveryRef };
+      return {
+        reverted: false,
+        removed: [],
+        note: `${gitFailure("read-tree", rt, signal)} — tree not restored`,
+        recoveryRef,
+      };
     }
-    await runGit(["reset", "-q"], cwd);
+    await git(["reset", "-q"], cwd, signal);
   }
 
   // Remove files the task created (only now that the tracked restore succeeded), and prune
-  // directories left empty.
+  // directories left empty. Without a listing, remove nothing: "not in the list" would be everything.
   const prior = new Set(cp.untracked);
-  const created = (await listUntracked(cwd)).filter((f) => !prior.has(f));
+  const now = await listUntracked(cwd, signal);
+  if (!now) {
+    return {
+      reverted: true,
+      removed: [],
+      note: `restored tracked files; task-created files NOT removed (git ls-files failed)${recoveryNote}`,
+      recoveryRef,
+    };
+  }
   const removed: string[] = [];
   const cwdAbs = resolve(cwd);
-  for (const f of created) {
+  for (const f of now.filter((f) => !prior.has(f))) {
     const abs = resolve(cwd, f);
     // Defense-in-depth: listUntracked returns repo-relative paths so `abs` is already under the work
     // tree — still refuse to unlink anything that resolves outside it.
@@ -127,7 +166,6 @@ export async function restoreCheckpoint(
     }
   }
   const removedNote = removed.length ? `; removed ${removed.length} created file(s)` : "";
-  const recoveryNote = recoveryRef ? `; recovery ${recoveryRef}` : "";
   return {
     reverted: true,
     removed,
@@ -140,14 +178,15 @@ export async function restoreCheckpoint(
  * Drop a task's checkpoint record AND delete its pin ref (best-effort), so a consumed or obsolete
  * checkpoint can't leak a gc-immune snapshot. Shared consume step for revert, preserve-to-branch, and
  * a successful completion (otherwise a default-on checkpoint would pin one commit per task forever).
- * No-op when the task has no checkpoint. Never throws.
+ * No-op when the task has no checkpoint. Never throws. Own deadline: the record is cleared before
+ * the ref delete, so a skipped update-ref would leak the pin ref for good.
  */
 export async function releaseCheckpoint(taskId: number, fallbackCwd?: string): Promise<void> {
   const cp = repo.getCheckpoint(taskId);
   if (!cp) return;
   repo.clearCheckpoint(taskId);
   if (cp.ref.startsWith("refs/bob/checkpoint/")) {
-    await runGit(["update-ref", "-d", cp.ref], cp.root || fallbackCwd || process.cwd());
+    await git(["update-ref", "-d", cp.ref], cp.root || fallbackCwd || process.cwd(), deadline());
   }
 }
 
@@ -164,10 +203,11 @@ export async function revertTaskToCheckpoint(
 ): Promise<RestoreOutcome | null> {
   const cp = repo.getCheckpoint(taskId);
   if (!cp) return null;
+  const signal = deadline();
   // Revert the repo the checkpoint came from, not the caller's cwd (a long-lived MCP server's
   // process.cwd() isn't necessarily the task's repo). restoreCheckpoint still verifies cp.root.
   const repoCwd = cp.root || cwd;
-  const r = await restoreCheckpoint(repoCwd, cp, opts);
+  const r = await restoreCheckpoint(repoCwd, cp, { ...opts, signal });
   if (r.reverted) {
     repo.addNote(taskId, `↩ Checkpoint rollback: ${r.note}.`, actor);
     await releaseCheckpoint(taskId, repoCwd);
@@ -194,13 +234,14 @@ export interface PreserveOutcome {
  * is never clobbered. Returns the branch name, or undefined if the ref couldn't be resolved/written.
  */
 async function createTaskBranch(cwd: string, taskId: number, commitish: string): Promise<string | undefined> {
-  const sha = (await gitOut(["rev-parse", commitish], cwd)).trim();
+  const signal = deadline();
+  const sha = (await git(["rev-parse", commitish], cwd, signal)).stdout.trim();
   if (!sha) return undefined;
   let name = TASK_BRANCH(taskId);
-  for (let n = 2; await refExists(`refs/heads/${name}`, cwd); n++) {
+  for (let n = 2; await refExists(`refs/heads/${name}`, cwd, signal); n++) {
     name = `${TASK_BRANCH(taskId)}-${n}`;
   }
-  return (await runGit(["update-ref", `refs/heads/${name}`, sha], cwd)).ok ? name : undefined;
+  return (await git(["update-ref", `refs/heads/${name}`, sha], cwd, signal)).ok ? name : undefined;
 }
 
 /**
@@ -216,14 +257,15 @@ export async function preserveWipToBranch(
   cwd: string,
   taskId: number,
   actor: string,
-  opts: { force?: boolean } = {},
+  opts: { force?: boolean } & CheckpointOpts = {},
 ): Promise<PreserveOutcome> {
   const cp = repo.getCheckpoint(taskId);
   if (!cp) return { preserved: false, note: "no pre-task checkpoint (not a git repo, or checkpoints off)" };
+  const signal = deadline(opts.signal);
   // Restore the repo the checkpoint came from (a long-lived server's cwd may differ); restoreCheckpoint
   // still verifies cp.root, refuses a moved HEAD, and pins the discarded state to a recovery ref.
   const repoCwd = cp.root || cwd;
-  const r = await restoreCheckpoint(repoCwd, cp, opts);
+  const r = await restoreCheckpoint(repoCwd, cp, { force: opts.force, signal });
   if (!r.reverted) {
     repo.addNote(taskId, `WIP not preserved: ${r.note}.`, actor);
     return { preserved: false, note: r.note, outcome: r };
@@ -260,43 +302,49 @@ export async function deleteTaskAndCheckpoint(
   const cp = repo.getCheckpoint(taskId);
   const r = repo.deleteTaskSafe(taskId, opts);
   if (r.deleted && cp?.ref.startsWith("refs/bob/checkpoint/") && cp.root) {
-    await runGit(["update-ref", "-d", cp.ref], cp.root);
+    await git(["update-ref", "-d", cp.ref], cp.root, deadline());
   }
   return r;
 }
+
+type RecoveryPin = { ok: true; ref?: string } | { ok: false; reason: string };
 
 /**
  * Pin the full current worktree state — tracked changes AND untracked (non-ignored) files — behind
  * a recovery ref so a revert is reversible. `git stash create` captures tracked changes only and
  * silently drops untracked files, so a task whose only change is a NEW file would be unrecoverable
- * after revert; snapshotWorktreeTree() builds an untracked-aware tree instead. Returns the ref, or
- * undefined when there's nothing to recover (worktree == HEAD's tree) or the snapshot can't be
- * built. Best-effort: never throws.
+ * after revert; snapshotWorktreeTree() builds an untracked-aware tree instead. ok without a ref when
+ * there's nothing to recover (worktree == HEAD's tree); not ok, with git's reason, when the snapshot
+ * can't be built or pinned — the caller must then refuse to revert.
  */
-async function pinRecoverySnapshot(cwd: string, head: string | null): Promise<string | undefined> {
-  try {
-    const tree = await snapshotWorktreeTree(cwd);
-    if (!tree) return undefined;
-    // Nothing to recover if the snapshot matches HEAD's tree (no tracked or untracked change).
-    if (head && tree === (await gitOut(["rev-parse", `${head}^{tree}`], cwd)).trim()) return undefined;
-    // Commit the snapshot with a fixed identity so it works regardless of repo config, parented on
-    // HEAD (none on an unborn branch), and pin it so gc can't reclaim the discarded work.
-    const ident = {
-      GIT_AUTHOR_NAME: "bob-recovery",
-      GIT_AUTHOR_EMAIL: "bob@localhost",
-      GIT_COMMITTER_NAME: "bob-recovery",
-      GIT_COMMITTER_EMAIL: "bob@localhost",
-    };
-    const parent = head ? ["-p", head] : [];
-    const commit = (
-      await gitOut(["commit-tree", tree, ...parent, "-m", "bob pre-revert recovery snapshot"], cwd, undefined, ident)
-    ).trim();
-    if (!commit) return undefined;
-    const ref = RECOVERY_REF(commit);
-    return (await runGit(["update-ref", ref, commit], cwd)).ok ? ref : undefined;
-  } catch {
-    return undefined;
-  }
+async function pinRecoverySnapshot(cwd: string, head: string | null, signal: AbortSignal): Promise<RecoveryPin> {
+  const snap = await snapshotWorktreeTree(cwd, signal);
+  if (!snap.tree) return { ok: false, reason: snap.error ?? "worktree snapshot failed" };
+  if (signal.aborted) return { ok: false, reason: "git timed out after the snapshot" };
+  // Nothing to recover if the snapshot matches HEAD's tree (no tracked or untracked change).
+  if (head && snap.tree === (await git(["rev-parse", `${head}^{tree}`], cwd, signal)).stdout.trim())
+    return { ok: true };
+  // Commit the snapshot with a fixed identity so it works regardless of repo config, parented on
+  // HEAD (none on an unborn branch), and pin it so gc can't reclaim the discarded work.
+  const ident = {
+    GIT_AUTHOR_NAME: "bob-recovery",
+    GIT_AUTHOR_EMAIL: "bob@localhost",
+    GIT_COMMITTER_NAME: "bob-recovery",
+    GIT_COMMITTER_EMAIL: "bob@localhost",
+  };
+  const parent = head ? ["-p", head] : [];
+  const ct = await git(
+    ["commit-tree", snap.tree, ...parent, "-m", "bob pre-revert recovery snapshot"],
+    cwd,
+    signal,
+    ident,
+  );
+  const commit = ct.stdout.trim();
+  if (!ct.ok || !commit) return { ok: false, reason: gitFailure("commit-tree", ct, signal) };
+  const ref = RECOVERY_REF(commit);
+  const pinned = await git(["update-ref", ref, commit], cwd, signal);
+  if (!pinned.ok) return { ok: false, reason: gitFailure("update-ref", pinned, signal) };
+  return { ok: true, ref };
 }
 
 /** Remove now-empty directories upward from a removed file, stopping at the repo cwd. */

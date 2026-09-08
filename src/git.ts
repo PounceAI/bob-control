@@ -12,7 +12,12 @@ export interface GitResult {
   /** Hit maxChars and killed the process; `stdout` is partial, the exit code unknown. */
   truncated: boolean;
   stdout: string;
+  /** Tail of stderr (STDERR_TAIL chars); the stream is always fully drained. */
+  stderr: string;
 }
+
+/** How much stderr to keep; the rest is drained and dropped. */
+const STDERR_TAIL = 4096;
 
 /**
  * Run a git command. Resolves { ok, truncated, stdout } — never rejects, so callers stay total,
@@ -34,9 +39,10 @@ export function runGit(
       // and emits 'error', so a bounded caller can unwedge a hung git and let cleanup run.
       proc = spawn("git", args, { cwd, stdio: "pipe", env: env ? { ...process.env, ...env } : undefined, signal });
     } catch {
-      return resolve({ ok: false, truncated: false, stdout: "" });
+      return resolve({ ok: false, truncated: false, stdout: "", stderr: "" });
     }
     let out = "";
+    let err = "";
     let truncated = false;
     proc.stdout?.on("data", (chunk: Buffer) => {
       if (truncated) return;
@@ -51,8 +57,12 @@ export function runGit(
         }
       }
     });
-    proc.on("close", (code) => resolve({ ok: truncated || code === 0, truncated, stdout: out }));
-    proc.on("error", () => resolve({ ok: false, truncated, stdout: out }));
+    // Drain stderr or a chatty git blocks on the full pipe and 'close' never fires; keep only a tail.
+    proc.stderr?.on("data", (chunk: Buffer) => {
+      err = (err + chunk.toString()).slice(-STDERR_TAIL);
+    });
+    proc.on("close", (code) => resolve({ ok: truncated || code === 0, truncated, stdout: out, stderr: err }));
+    proc.on("error", () => resolve({ ok: false, truncated, stdout: out, stderr: err }));
   });
 }
 
@@ -74,35 +84,50 @@ export function splitLines(s: string): string[] {
     .filter(Boolean);
 }
 
-export async function isInsideWorkTree(cwd: string): Promise<boolean> {
-  return (await gitOut(["rev-parse", "--is-inside-work-tree"], cwd)).trim() === "true";
+export async function isInsideWorkTree(cwd: string, signal?: AbortSignal): Promise<boolean> {
+  return (await gitOut(["rev-parse", "--is-inside-work-tree"], cwd, undefined, undefined, signal)).trim() === "true";
+}
+
+/** Collapse to one line, keeping the tail (git puts the fatal line last). */
+export function oneLine(s: string, max = 200): string {
+  const t = s.trim().replace(/\s+/g, " ");
+  return t.length > max ? `…${t.slice(-max)}` : t;
+}
+
+/** A note-sized reason for a failed git call: "aborted" when the signal fired, else git's stderr tail. */
+export function gitFailure(what: string, r: GitResult, signal?: AbortSignal): string {
+  if (signal?.aborted) return `git ${what} aborted (timed out)`;
+  const tail = oneLine(r.stderr);
+  return tail ? `git ${what}: ${tail}` : `git ${what} failed`;
 }
 
 /** Absolute repo top-level, or null if cwd isn't a git work tree. Repo identity for a checkpoint. */
-export async function repoRoot(cwd: string): Promise<string | null> {
-  const r = await runGit(["rev-parse", "--show-toplevel"], cwd);
+export async function repoRoot(cwd: string, signal?: AbortSignal): Promise<string | null> {
+  const r = await runGit(["rev-parse", "--show-toplevel"], cwd, undefined, undefined, signal);
   const top = r.stdout.trim();
   return r.ok && top ? top : null;
 }
 
 /** HEAD sha, or null on an unborn branch (no commits). */
-export async function headSha(cwd: string): Promise<string | null> {
-  const r = await runGit(["rev-parse", "HEAD"], cwd);
+export async function headSha(cwd: string, signal?: AbortSignal): Promise<string | null> {
+  const r = await runGit(["rev-parse", "HEAD"], cwd, undefined, undefined, signal);
   const sha = r.stdout.trim();
   return r.ok && sha ? sha : null;
 }
 
 /** True if a ref/sha resolves to an existing object in this repo. */
-export async function refExists(ref: string, cwd: string): Promise<boolean> {
-  return (await runGit(["cat-file", "-e", `${ref}^{commit}`], cwd)).ok;
+export async function refExists(ref: string, cwd: string, signal?: AbortSignal): Promise<boolean> {
+  return (await runGit(["cat-file", "-e", `${ref}^{commit}`], cwd, undefined, undefined, signal)).ok;
 }
 
 /**
  * Untracked files (NUL-separated, no C-quoting, so non-ASCII names survive), excluding
- * gitignored by default. Paths are relative to `cwd`.
+ * gitignored by default. Paths are relative to `cwd`. null (not []) when git failed or was aborted:
+ * restore deletes whatever is untracked and absent from a prior listing.
  */
-export async function listUntracked(cwd: string): Promise<string[]> {
-  const r = await runGit(["ls-files", "--others", "--exclude-standard", "-z"], cwd);
+export async function listUntracked(cwd: string, signal?: AbortSignal): Promise<string[] | null> {
+  const r = await runGit(["ls-files", "--others", "--exclude-standard", "-z"], cwd, undefined, undefined, signal);
+  if (!r.ok) return null;
   return r.stdout
     .split("\0")
     .map((s) => s.trim())
@@ -113,29 +138,40 @@ export async function listUntracked(cwd: string): Promise<string[]> {
 // collide when calls fire within the same millisecond).
 let tmpIndexSeq = 0;
 
+export interface WorktreeSnapshot {
+  /** Tree sha, or null when the snapshot couldn't be built. */
+  tree: string | null;
+  /** Why `tree` is null: git's stderr tail, or "aborted" when the signal fired. */
+  error?: string;
+}
+
 /**
  * Snapshot the worktree — tracked changes AND untracked (non-ignored) files — as a git tree sha,
  * WITHOUT touching the real index: stages into a throwaway TEMP index (`add -A` → `write-tree`), so
  * unlike `git stash create` (which drops untracked files) the snapshot is untracked-aware. The sha
- * outlives the temp index (write-tree persists it). null on non-git / failure; temp index + lock are
- * always cleaned up; never throws. `signal` lets a bounded caller abort a wedged add/write-tree.
+ * outlives the temp index (write-tree persists it). tree:null (with the reason) on non-git / failure;
+ * temp index + lock are always cleaned up; never throws. `signal` aborts a wedged add/write-tree.
  */
-export async function snapshotWorktreeTree(cwd: string, signal?: AbortSignal): Promise<string | null> {
+export async function snapshotWorktreeTree(cwd: string, signal?: AbortSignal): Promise<WorktreeSnapshot> {
   // --absolute-git-dir needs git ≥2.13; fall back to the always-present --git-dir (possibly
   // relative) so an older git still produces a snapshot instead of silently giving up.
-  let gitDir = (await gitOut(["rev-parse", "--absolute-git-dir"], cwd)).trim();
+  let gitDir = (await gitOut(["rev-parse", "--absolute-git-dir"], cwd, undefined, undefined, signal)).trim();
   if (!gitDir) {
-    const rel = (await gitOut(["rev-parse", "--git-dir"], cwd)).trim();
+    const rel = (await gitOut(["rev-parse", "--git-dir"], cwd, undefined, undefined, signal)).trim();
     if (rel) gitDir = resolve(cwd, rel);
   }
-  if (!gitDir) return null;
+  if (!gitDir) return { tree: null, error: signal?.aborted ? "aborted" : "not a git work tree" };
   const tmpIndex = resolve(gitDir, `bob-tmp-index-${process.pid}-${Date.now()}-${tmpIndexSeq++}`);
   const env = { GIT_INDEX_FILE: tmpIndex };
   try {
     // add -A stages adds + mods + deletions into the empty temp index → a faithful on-disk snapshot
     // (honoring .gitignore); signal kills a wedged child so a hang doesn't orphan a process + index.
-    if (!(await runGit(["add", "-A"], cwd, undefined, env, signal)).ok) return null;
-    return (await gitOut(["write-tree"], cwd, undefined, env, signal)).trim() || null;
+    const add = await runGit(["add", "-A"], cwd, undefined, env, signal);
+    if (!add.ok) return { tree: null, error: gitFailure("add -A", add, signal) };
+    const wt = await runGit(["write-tree"], cwd, undefined, env, signal);
+    const tree = wt.stdout.trim();
+    if (!wt.ok || !tree) return { tree: null, error: gitFailure("write-tree", wt, signal) };
+    return { tree };
   } finally {
     for (const f of [tmpIndex, `${tmpIndex}.lock`]) {
       try {
@@ -165,7 +201,10 @@ export async function snapshotWorktreeTreeBounded(cwd: string, timeoutMs = 30_00
     timer.unref?.();
   });
   try {
-    return await Promise.race([snapshotWorktreeTree(cwd, controller.signal), timeout]);
+    const r = await Promise.race([snapshotWorktreeTree(cwd, controller.signal), timeout]);
+    if (r === null) return null;
+    if (!r.tree) console.error(`[bob-control] git worktree snapshot failed in ${cwd}: ${r.error}`);
+    return r.tree;
   } finally {
     clearTimeout(timer);
   }

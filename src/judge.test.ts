@@ -289,7 +289,7 @@ test("captureGitDiff: surfaces edits to a file that was already untracked at bas
     writeFileSync(join(dir, "foo.py"), "original = 1\n");
     const baseline = await captureGitBaseline(dir);
     assert.ok(baseline.tree, "baseline should capture an untracked-aware tree");
-    assert.ok(baseline.untracked.includes("foo.py"), "foo.py predates the task → priorUntracked");
+    assert.ok(baseline.untracked?.includes("foo.py"), "foo.py predates the task → priorUntracked");
 
     // The task edits the still-untracked file.
     writeFileSync(join(dir, "foo.py"), "original = 1\nadded_by_task = 2\n");

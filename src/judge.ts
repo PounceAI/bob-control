@@ -3,7 +3,15 @@
 // Designed to be testable: the LLM call is injected, and the verdict parsing is pure.
 import { callModel, type LlmDeps } from "./llm.js";
 import { resolve as resolvePath } from "node:path";
-import { gitOut, runGit, splitLines, isInsideWorkTree, listUntracked, snapshotWorktreeTreeBounded } from "./git.js";
+import {
+  gitOut,
+  runGit,
+  gitFailure,
+  splitLines,
+  isInsideWorkTree,
+  listUntracked,
+  snapshotWorktreeTreeBounded,
+} from "./git.js";
 import { extractJsonObjects } from "./json-extract.js";
 import { defaultVerify, type VerifyResult } from "./bob-polls.js";
 import { judgeAppliesToMode } from "./modes.js";
@@ -28,12 +36,16 @@ export interface JudgeContext {
 export interface GitBaseline {
   /** A real git ref/SHA capturing the tracked tree state before the task ran (stash-create). */
   ref: string;
-  /** Untracked files that already existed before the task (so new files can be told apart). */
-  untracked: string[];
+  /** Untracked files that already existed before the task (so new files can be told apart). null when
+   *  the listing failed: unknown, so no file is later claimed as task-created (and cleanup-removable). */
+  untracked: string[] | null;
   /** Untracked-aware tree sha of the pre-task worktree, so the diff can see content edits to files
    *  that stay untracked (plain `git diff` omits untracked content). Undefined when not a git tree. */
   tree?: string;
 }
+
+/** Deadline shared by the git calls of one capture: these run on every dispatch, inside the claim. */
+const GIT_DEADLINE_MS = 60_000;
 
 /** Backend + model + transport overrides (see llm.ts). */
 export type JudgeDeps = LlmDeps;
@@ -134,8 +146,14 @@ export function parseVerdict(text: string): JudgeVerdict {
  * so new-file deliverables can be told apart from pre-existing artifacts.
  */
 export async function captureGitBaseline(cwd: string): Promise<GitBaseline> {
-  const ref = (await gitOut(["stash", "create"], cwd)).trim() || "HEAD";
-  const untracked = await listUntracked(cwd);
+  const signal = AbortSignal.timeout(GIT_DEADLINE_MS);
+  const stash = await runGit(["stash", "create"], cwd, undefined, undefined, signal);
+  // Clean tree = exit 0 with empty stdout → HEAD. A FAILED stash create also lands on HEAD (the judge
+  // then sees pre-task dirt as task work), so leave a trail rather than fail the dispatch.
+  if (!stash.ok)
+    console.error(`[bob-control] captureGitBaseline: ${gitFailure("stash create", stash, signal)} in ${cwd}`);
+  const ref = stash.stdout.trim() || "HEAD";
+  const untracked = await listUntracked(cwd, signal);
   // Untracked-aware tree so captureGitDiff diffs untracked CONTENT, not just presence; bounded
   // against a wedged git.
   const tree = (await snapshotWorktreeTreeBounded(cwd)) ?? undefined;
@@ -155,29 +173,40 @@ export async function captureGitDiff(
   cwd: string,
   maxChars = 4000,
   baselineRef = "HEAD",
-  priorUntracked: string[] = [],
+  priorUntracked: string[] | null = [],
   baselineTree?: string,
 ): Promise<string> {
+  const signal = AbortSignal.timeout(GIT_DEADLINE_MS);
   if (baselineTree) {
     const currTree = await snapshotWorktreeTreeBounded(cwd);
     if (currTree) {
       // Gate on `ok`: a failed diff (unresolvable baselineTree) has empty stdout that gitOut can't
       // tell from a clean tree. Truncation counts as ok (deliberate stop, valid partial diff).
-      const res = await runGit(["diff", baselineTree, currTree], cwd, maxChars);
+      const res = await runGit(["diff", baselineTree, currTree], cwd, maxChars, undefined, signal);
       if (res.ok) return res.stdout || "(no changes detected)";
     }
     // Tree path failed (snapshot or diff) — degrade to the ref diff, and leave a trail: the two paths
     // differ exactly on untracked-content edits, so a silent fallback hides why the judge saw less.
     console.error(`[bob-control] captureGitDiff: tree path unavailable in ${cwd}, using ref-based diff`);
   }
-  const prior = new Set(priorUntracked);
-  const newFiles = (await listUntracked(cwd)).filter((f) => !prior.has(f));
-  if (newFiles.length) await gitOut(["add", "--intent-to-add", "--", ...newFiles], cwd);
+  const prior = new Set(priorUntracked ?? []);
+  const newFiles = ((await listUntracked(cwd, signal)) ?? []).filter((f) => !prior.has(f));
+  if (newFiles.length) await gitOut(["add", "--intent-to-add", "--", ...newFiles], cwd, undefined, undefined, signal);
   try {
-    const diff = await gitOut(["diff", baselineRef], cwd, maxChars);
+    const diff = await gitOut(["diff", baselineRef], cwd, maxChars, undefined, signal);
     return diff || "(no changes detected)";
   } finally {
-    if (newFiles.length) await gitOut(["reset", "--quiet", "--", ...newFiles], cwd);
+    // Cleanup gets its own deadline: sharing an exhausted one would skip the reset and leave the
+    // intent-to-add marks in the real index for every later diff.
+    if (newFiles.length) {
+      await gitOut(
+        ["reset", "--quiet", "--", ...newFiles],
+        cwd,
+        undefined,
+        undefined,
+        AbortSignal.timeout(GIT_DEADLINE_MS),
+      );
+    }
   }
 }
 
@@ -203,17 +232,22 @@ export interface ChangedFiles {
  */
 export async function captureChangedFiles(cwd: string, baseline?: GitBaseline): Promise<ChangedFiles> {
   const empty: ChangedFiles = { files: [], created: [], modified: [], diffstat: "", count: 0, gitAvailable: false };
-  if (!(await isInsideWorkTree(cwd))) return empty;
+  const signal = AbortSignal.timeout(GIT_DEADLINE_MS);
+  if (!(await isInsideWorkTree(cwd, signal))) return empty;
 
   const ref = baseline?.ref ?? "HEAD";
-  const prior = new Set(baseline?.untracked ?? []);
   const [trackedRaw, untracked, diffstatRaw] = await Promise.all([
-    gitOut(["diff", "--name-only", ref], cwd),
-    listUntracked(cwd),
-    gitOut(["diff", "--stat", ref], cwd, 2000),
+    gitOut(["diff", "--name-only", ref], cwd, undefined, undefined, signal),
+    listUntracked(cwd, signal),
+    gitOut(["diff", "--stat", ref], cwd, 2000, undefined, signal),
   ]);
   const modified = splitLines(trackedRaw).map((f) => resolvePath(cwd, f));
-  const created = untracked.filter((f) => !prior.has(f)).map((f) => resolvePath(cwd, f));
+  // Created = untracked now and not before. If either listing failed, claim nothing: a "created"
+  // artifact is cleanup-removable, so a pre-existing file must never be mislabeled as one.
+  const prior =
+    baseline === undefined ? new Set<string>() : baseline.untracked === null ? null : new Set(baseline.untracked);
+  const created =
+    prior !== null && untracked !== null ? untracked.filter((f) => !prior.has(f)).map((f) => resolvePath(cwd, f)) : [];
   const files = Array.from(new Set([...created, ...modified]));
   return { files, created, modified, diffstat: diffstatRaw.trim(), count: files.length, gitAvailable: true };
 }
