@@ -36,6 +36,7 @@ import { createWebhookSink, validateWebhookUrl, redactUrl, type WebhookSink, typ
 import { shouldRetry, executeRetry } from "./retry-policy.js";
 import { buildJudgeVerifier, captureGitBaseline, captureChangedFiles, type GitBaseline } from "./judge.js";
 import { captureCheckpoint, preserveWipToBranch, releaseCheckpoint } from "./checkpoint.js";
+import { isInsideWorkTree } from "./git.js";
 import { computeCeiling } from "./budget.js";
 import type { Task } from "./types.js";
 import { isCompleted } from "./types.js";
@@ -314,6 +315,7 @@ async function checkpointBeforeDeath(opts: Opts, taskId: number): Promise<string
   try {
     const r = await preserveWipToBranch(process.cwd(), taskId, "worker");
     if (r.branch) console.log(`  ✓ #${taskId} partial work preserved to ${r.branch}; main restored clean`);
+    else if (r.outcome && !r.outcome.reverted) console.log(`  ⚠ #${taskId} working tree NOT restored: ${r.note}`);
     else if (r.note) console.log(`  ↩ #${taskId} ${r.note}`);
     return r.branch;
   } catch (err) {
@@ -818,6 +820,15 @@ async function prepareDispatch(
   if (opts.checkpoint && !repo.getCheckpoint(task.id)) {
     const cp = await captureCheckpoint(process.cwd(), task.id, evidenceBaseline.ref);
     if (cp) repo.setCheckpoint(task.id, cp);
+    else if (await isInsideWorkTree(process.cwd())) {
+      // In a git repo a missing checkpoint means git failed or timed out; say so, not "checkpoints off".
+      repo.addNote(
+        task.id,
+        "Pre-task checkpoint NOT captured (git failed or timed out): rollback and preserve-WIP are off for this dispatch.",
+        "worker",
+      );
+      console.log(`  ⚠ #${task.id} pre-task checkpoint not captured — no rollback net for this dispatch`);
+    }
   }
   return { planStopBaseline, evidenceBaseline };
 }

@@ -12,7 +12,7 @@ import {
   preserveWipToBranch,
   releaseCheckpoint,
 } from "./checkpoint.js";
-import { snapshotWorktreeTree, snapshotWorktreeTreeBounded } from "./git.js";
+import { runGit, repoRoot, listUntracked, snapshotWorktreeTree, snapshotWorktreeTreeBounded } from "./git.js";
 import { getDb, createTask, setCheckpoint, getCheckpoint, clearCheckpoint, getNotes, recordArtifact } from "./db.js";
 
 function git(dir: string, ...args: string[]): string {
@@ -188,7 +188,7 @@ describe("checkpoint capture + restore (real git)", () => {
     writeFileSync(join(dir, "tracked.txt"), "v2"); // tracked modification (unstaged)
     writeFileSync(join(dir, "untracked.txt"), "new"); // untracked addition
 
-    const tree = await snapshotWorktreeTree(dir);
+    const { tree } = await snapshotWorktreeTree(dir);
     assert.ok(tree && /^[0-9a-f]{40}$/.test(tree), "returns a tree sha");
     assert.equal(git(dir, "show", `${tree}:tracked.txt`), "v2", "tracked modification captured");
     assert.equal(git(dir, "show", `${tree}:untracked.txt`), "new", "untracked file captured");
@@ -212,7 +212,7 @@ describe("checkpoint capture + restore (real git)", () => {
       snapshotWorktreeTree(dir),
     ]);
     assert.ok(bounded && /^[0-9a-f]{40}$/.test(bounded));
-    assert.equal(bounded, unbounded, "bounded wrapper yields the identical snapshot when git is fast");
+    assert.equal(bounded, unbounded.tree, "bounded wrapper yields the identical snapshot when git is fast");
     rm(dir);
   });
 
@@ -227,9 +227,80 @@ describe("checkpoint capture + restore (real git)", () => {
     commit(dir, "tracked.txt", "v1");
     const ac = new AbortController();
     ac.abort(); // stand in for a bounded-caller timeout: the git children must be killed, not orphaned
-    assert.equal(await snapshotWorktreeTree(dir, ac.signal), null);
+    assert.equal((await snapshotWorktreeTree(dir, ac.signal)).tree, null);
     const leftovers = readdirSync(join(dir, ".git")).filter((f) => f.startsWith("bob-tmp-index-"));
     assert.deepEqual(leftovers, [], "the temp index must be cleaned up even when git is aborted");
+    rm(dir);
+  });
+
+  it("runGit drains stderr: a git that floods stderr still resolves (regression: wedged finalize)", async () => {
+    const dir = makeRepo();
+    // A clean filter that writes far more than a pipe buffer (~64 KB) to stderr before echoing stdin.
+    // With stderr unread, git blocked on its first full write and runGit never resolved.
+    const node = process.execPath.replace(/\\/g, "/");
+    git(
+      dir,
+      "config",
+      "filter.noisy.clean",
+      `'${node}' -e "process.stderr.write('x'.repeat(300000));process.stdin.pipe(process.stdout)"`,
+    );
+    writeFileSync(join(dir, ".gitattributes"), "*.txt filter=noisy\n");
+    writeFileSync(join(dir, "a.txt"), "hello\n");
+    let timer: NodeJS.Timeout | undefined;
+    const bail = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("runGit hung: stderr not drained")), 20_000);
+    });
+    try {
+      const env = { GIT_INDEX_FILE: join(dir, ".git", "tmp-idx") };
+      const r = await Promise.race([runGit(["add", "-A"], dir, undefined, env), bail]);
+      assert.equal(r.ok, true);
+      assert.ok(r.stderr.length > 0 && r.stderr.length <= 4096, "a bounded stderr tail is kept");
+      const { tree } = await Promise.race([snapshotWorktreeTree(dir), bail]);
+      assert.ok(tree && /^[0-9a-f]{40}$/.test(tree), "the snapshot path survives a chatty git");
+    } finally {
+      clearTimeout(timer);
+    }
+    rm(dir);
+  });
+
+  it("REFUSES to revert when the recovery pin cannot be built (nothing destroyed)", async () => {
+    const dir = makeRepo();
+    commit(dir, "f.txt", "v1");
+    const cp = (await captureCheckpoint(dir, 1))!;
+    writeFileSync(join(dir, "f.txt"), "v2-unsaved");
+    // A required clean filter that always fails makes the worktree snapshot (`add -A`) fail, so the
+    // pre-revert state can't be pinned. Reverting anyway would discard v2-unsaved with no recovery ref.
+    git(dir, "config", "filter.broken.clean", "false");
+    git(dir, "config", "filter.broken.required", "true");
+    writeFileSync(join(dir, ".gitattributes"), "*.txt filter=broken\n");
+
+    const r = await restoreCheckpoint(dir, cp);
+    assert.equal(r.reverted, false);
+    assert.match(r.note, /recovery/i);
+    assert.match(r.note, /broken/, "the note carries git's own stderr (the failing filter's name)");
+    assert.equal(readFileSync(join(dir, "f.txt"), "utf8"), "v2-unsaved", "unsaved work untouched");
+    rm(dir);
+  });
+
+  it("a timed-out deadline yields no checkpoint at capture and a refused (non-destructive) restore", async () => {
+    const dir = makeRepo();
+    commit(dir, "f.txt", "v1");
+    writeFileSync(join(dir, "pre.txt"), "pre-existing untracked");
+    const expired = new AbortController();
+    expired.abort(); // stands in for the operation deadline having fired
+    assert.equal(await repoRoot(dir, expired.signal), null);
+    assert.equal(await listUntracked(dir, expired.signal), null, "a failed listing is null, never 'no files'");
+    // Capture under the expired deadline records nothing — recording untracked:[] would make a later
+    // restore delete pre.txt as "task-created".
+    assert.equal(await captureCheckpoint(dir, 1, undefined, { signal: expired.signal }), null);
+
+    const cp = (await captureCheckpoint(dir, 1))!;
+    writeFileSync(join(dir, "f.txt"), "v2");
+    const r = await restoreCheckpoint(dir, cp, { signal: expired.signal });
+    assert.equal(r.reverted, false);
+    assert.match(r.note, /timed out/);
+    assert.equal(readFileSync(join(dir, "f.txt"), "utf8"), "v2", "nothing touched under an expired deadline");
+    assert.equal(existsSync(join(dir, "pre.txt")), true);
     rm(dir);
   });
 });

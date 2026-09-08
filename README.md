@@ -493,7 +493,8 @@ The manual rollback is destructive, so it's **safe by construction** ([src/check
   the revert refuses rather than silently half-restoring or orphaning a commit (`--force` /
   `force:true` overrides the HEAD-moved check).
 - **Recoverable** — the pre-revert state is pinned to a `refs/bob/recovery/<sha>` ref first, so
-  discarded work is never truly lost (the command prints the ref).
+  discarded work is never truly lost (the command prints the ref). If that pin cannot be built
+  (the worktree snapshot fails or times out), the revert is refused rather than run unrecoverably.
 - **HEAD-preserving** — tracked files are restored with `git read-tree` (HEAD/branch untouched);
   only files the task *created* are removed (emptied dirs pruned). Pre-task edits and
   pre-existing untracked files are left intact.
@@ -501,7 +502,9 @@ The manual rollback is destructive, so it's **safe by construction** ([src/check
 No-op outside a git repo. Gitignored files a task creates aren't auto-removed (they're not the
 tracked snapshot's concern). Deleting a task also drops its checkpoint ref; `refs/bob/recovery/<sha>`
 refs from past reverts are kept as a safety net and can be pruned by hand once you're sure you don't
-need them.
+need them. Every capture and restore runs under one two-minute deadline shared by all of its git
+calls, and git's stderr is always drained, so a wedged or chatty git parks the task with a note
+instead of stalling the drainer behind a live heartbeat.
 
 **Idle / blocked-on-ask watchdog.** A dispatch that makes no progress for `--idle-timeout` (180s
 default) — or wedges on a prompt the headless worker can't answer (e.g. a command-permission ask) —

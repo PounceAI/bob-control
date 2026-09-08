@@ -1,7 +1,7 @@
 {
   "identifier": "pounceai-bob-control",
   "name": "Bob Control",
-  "version": "2.4.1",
+  "version": "2.4.2",
   "description": "Bob Control: MCP server + CLI + worker that runs IBM Bob (and any MCP-capable agent) unattended against a SQLite task board. The board path can be configured via environment variables such as BOB_TASKS_DB, BOB_TASKS_PORTABLE, or BOB_TASKS_WORKTREE_SHARED.",
   "author": "PounceAI",
   "authorUrl": "https://github.com/PounceAI",
