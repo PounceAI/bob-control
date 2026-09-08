@@ -3,6 +3,32 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
+## [2.5.0] — 2026-09-07 — Drained, bounded git on the checkpoint path
+
+### Fixed
+
+- **A chatty git can no longer wedge the worker's finalize.** `runGit` read only stdout, so a `git add -A`
+  that wrote more than the pipe buffer to stderr (250 KB of CRLF warnings on one repo) blocked forever
+  inside checkpoint-before-death, between the heartbeat stamp and the status write: the task stayed
+  `in_progress` behind a live heartbeat and nothing else was pulled. stderr is now drained; a 4 KB tail is
+  kept and surfaced in failure notes.
+- **A failed untracked-file listing no longer reads as "no untracked files".** `listUntracked` returns null
+  on failure. No checkpoint is captured without a listing (a restore deletes whatever is untracked and
+  absent from it), and the judge claims no created files without one (they become cleanup-removable
+  artifacts).
+- **A failed `stash create` no longer baselines a checkpoint at HEAD**, which would have let a later revert
+  discard pre-task edits.
+
+### Changed
+
+- **Every checkpoint operation runs under one 120 s deadline** shared by its git calls; post-restore
+  bookkeeping (task branch, pin release) gets its own so an exhausted one can't skip it. The judge's
+  per-dispatch captures share a 60 s deadline, with the cleanup `reset` on a fresh one.
+- **A restore refuses when the pre-revert recovery pin cannot be built** or the deadline fired, instead of
+  reverting with no recovery ref; the note carries git's stderr.
+- The worker logs a refused restore distinctly from "nothing to preserve" and notes on the task when a
+  checkpoint could not be captured in a git repo.
+
 ## [2.4.1] — 2026-09-07 — ACP: no stray task per worker start
 
 ### Fixed
