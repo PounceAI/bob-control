@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
-## [2.5.0] — 2026-09-07 — Drained, bounded git on the checkpoint path
+## [2.4.2] — 2026-09-07 — Drained, bounded git on the checkpoint path
 
 ### Fixed
 
