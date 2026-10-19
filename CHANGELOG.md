@@ -21,8 +21,15 @@ All notable changes to this project are documented here. Format loosely follows
 - **The overlay no longer wipes the user's own approval settings.** It used to replace the whole `approval`
   block. It now keeps `deniedCommands`, `permissionOptions`, other executors and unknown keys, and replaces
   only `approvedCommands` and the keys it sets.
+- **A repo's settings can no longer choose what the extension runs.** `bobTasks.connectorPath`, `nodePath` and
+  `classifierCliPath` are user-level only, so a workspace value is ignored. The extension declares itself off
+  in untrusted workspaces. Connector auto-detect (an open folder with `dist/worker.js`) runs only in a trusted
+  one, and the legacy `projectRoot` fallback reads only the user-level value.
 
 ### Upgrade notes
+
+- If you set `bobTasks.connectorPath`, `nodePath` or `classifierCliPath` in a workspace's
+  `.vscode/settings.json`, move it to user settings.
 
 - The file is user-global, so these auto-runs apply to interactive Bob chats in every project. It is written
   on each in-process connect, and an ACP-only setup keeps whatever is already there. Uninstalling doesn't
