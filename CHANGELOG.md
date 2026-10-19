@@ -14,9 +14,10 @@ All notable changes to this project are documented here. Format loosely follows
   non-destructive git (`status`, `diff`, `log`, `add`, `commit`, …) and `ls`/`dir`/`pwd`/`cd`, all allowed by
   the command policy too. Shell readers, interpreters and work-discarding git still prompt: Bob can't express
   the policy's deny rules, and this file applies to every Bob session.
-- **`bobTasks.allowCommands` reaches Bob too**, but only entries that name a subcommand and pass the deny
-  rules (`bobTasks.denyCommands` included). A bare `git` would make Bob auto-run `git push`; skipped entries
-  are logged.
+- **`bobTasks.allowCommands` reaches Bob too**, but only its user-level value, and only entries that name a
+  subcommand (not a flag, launcher, `exec` or `dlx`) and pass the deny rules (`bobTasks.denyCommands`
+  included). A bare `git` would make Bob auto-run `git push`, and `sh -c` or `python -c` anything; skipped
+  entries are logged. A workspace setting can turn `bobTasks.autoApproveGlobal` off but not on.
 - **The overlay no longer wipes the user's own approval settings.** It used to replace the whole `approval`
   block. It now keeps `deniedCommands`, `permissionOptions`, other executors and unknown keys, and replaces
   only `approvedCommands` and the keys it sets.

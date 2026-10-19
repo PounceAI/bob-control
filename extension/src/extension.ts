@@ -454,13 +454,15 @@ function makeWriteHooks(connector: string, mods: ConnectorModules): () => void {
  */
 function makeWriteApproval(mods: ConnectorModules): () => void {
   return () => {
-    if (cfg().get<boolean>("autoApproveGlobal") === false) {
+    // This writes USER-global state, so a workspace's settings (a cloned repo's .vscode/settings.json) may turn it
+    // off but never on, and never add commands: only the user-level value of allowCommands counts.
+    if (cfg().get<boolean>("autoApproveGlobal") === false || cfg().inspect<boolean>("autoApproveGlobal")?.globalValue === false) {
       out.appendLine("[approve] autoApproveGlobal is off — skipping the global auto-approve write (Bob will prompt).");
       return;
     }
     // Comma lists, as the worker parses --allow-commands / --deny-commands.
     const list = (key: string) =>
-      (cfg().get<string>(key) ?? "")
+      (cfg().inspect<string>(key)?.globalValue ?? "")
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);

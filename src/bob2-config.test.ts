@@ -116,6 +116,35 @@ test("headlessCommands keeps vetted extras and drops bare verbs and policy-denie
   for (const d of dropped) assert.ok(!approved.includes(d), d);
 });
 
+test("headlessCommands refuses extras that would auto-run arbitrary code as a Bob prefix", () => {
+  const bypasses = [
+    "sh -c",
+    "bash script.sh",
+    "powershell -Command",
+    "pwsh -c",
+    "cmd /c",
+    "python -c",
+    "git -c",
+    "git -C",
+    "npx foo",
+    "npm exec foo",
+    "pnpm dlx foo",
+    "env FOO=1",
+    "xargs rm",
+    "C:\\Windows\\System32\\cmd.exe /c",
+    "/bin/bash script.sh",
+    "bash.exe script.sh",
+    "wsl ls",
+    "timeout 10",
+    "find .",
+    "uv run",
+    "npm x foo",
+  ];
+  const { approved, dropped } = headlessCommands({ allow: bypasses });
+  assert.deepEqual(dropped, bypasses);
+  assert.deepEqual(approved, [...BOB_HEADLESS_COMMANDS]);
+});
+
 test("mergeAutoApprove keeps foreign keys, the user's approval extras and denies; replaces what we own", () => {
   const merged = mergeAutoApprove({
     auth: { token: "keep-me" },

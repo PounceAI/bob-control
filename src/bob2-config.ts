@@ -50,7 +50,9 @@ export const AUTO_APPROVE_VERSION = 2;
  * and this file governs every Bob session, interactive ones too, so it's a narrow subset of command-policy's
  * allowlist (pinned by a test). Omitted on purpose: shell readers (read_file covers the workspace; these only
  * reach outside it), interpreters (inline `-e`/`-c` can't be fenced with token prefixes), and git that discards
- * work. Residual: `git diff --no-index` reads any file.
+ * work. Residual, since one-token flags like `--output=x` are invisible to token prefixes: `git diff --no-index`
+ * reads any file, and `git diff/log --output=` or `tsc --outDir` write outside the workspace (stock Bob
+ * auto-runs `git diff`/`git log` the same way).
  */
 export const BOB_HEADLESS_COMMANDS: readonly string[] = [
   "ls", "dir", "pwd", "cd",
@@ -67,15 +69,31 @@ export interface AutoApproveOptions {
   deny?: readonly string[];
 }
 
-/** approvedCommands plus the refused extras. An extra must name a subcommand (a bare `git` would auto-run
- *  `git push`) and pass the policy with the user's denies applied. */
+/** Launchers whose argument is itself a command, so any pattern starting with them runs arbitrary code. */
+const WRAPPERS = new Set([
+  "sh", "bash", "zsh", "fish", "cmd", "powershell", "pwsh", "iex", "invoke-expression", "start-process", "start",
+  "env", "exec", "eval", "xargs", "sudo", "npx", "pnpx", "bunx", "wsl", "busybox", "nohup", "timeout", "time",
+  "nice", "find", "uv", "bun", "deno",
+]); // prettier-ignore
+
+/** approvedCommands plus the refused extras. An extra must name a subcommand, not a flag (a bare `git` would
+ *  auto-run `git push`; `git -c`, `python -c`, `cmd /c` run arbitrary code), must not start with a command
+ *  launcher (path and extension ignored) or `exec`/`dlx`/`x`, and must pass the policy with the user's
+ *  denies applied. Extras are user-level settings only, so this guards mistakes, not an attacker. */
 export function headlessCommands(opts: AutoApproveOptions = {}): { approved: string[]; dropped: string[] } {
   const kept: string[] = [];
   const dropped: string[] = [];
   for (const raw of opts.allow ?? []) {
     const p = raw.trim().split(/\s+/).join(" ");
     if (!p) continue;
-    const ok = p.includes(" ") && evaluateCommand(p, { allow: [p], deny: [...(opts.deny ?? [])] }).decision === "allow";
+    const [first, sub] = p.toLowerCase().split(" ");
+    const verb = (first.split(/[\\/]/).pop() ?? "").replace(/\.(exe|cmd|bat|ps1)$/, ""); // C:\…\bash.exe → bash
+    const ok =
+      sub !== undefined &&
+      !/^[-/]/.test(sub) &&
+      !WRAPPERS.has(verb) &&
+      !["exec", "dlx", "x"].includes(sub) &&
+      evaluateCommand(p, { allow: [p], deny: [...(opts.deny ?? [])] }).decision === "allow";
     (ok ? kept : dropped).push(p);
   }
   return { approved: [...new Set([...BOB_HEADLESS_COMMANDS, ...kept])], dropped };
