@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [2.4.3] — 2026-10-19 — Bob 2.x command auto-approve that works
 
 ### Fixed
 
