@@ -3,6 +3,7 @@ import { join, dirname } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { mergeHooks, type HookCommands } from "./hooks.js";
+import { evaluateCommand } from "./command-policy.js";
 
 // Bob 2.0's auto-approve config. Replaces the 1.x set-bob-autoapprove.mjs (which wrote state.vscdb
 // globalState keys that no longer exist). 2.0's source of truth is ~/.bob/settings/settings.json
@@ -41,42 +42,106 @@ export const ALL_PERMISSIONS = [
   "mode",
 ] as const;
 
+/** Marks a connector whose writeAutoApprove takes AutoApproveOptions; an older one writes the no-op `["*"]`. */
+export const AUTO_APPROVE_VERSION = 2;
+
 /**
- * The config that makes Bob 2.0 run unattended: auto-approve every permission, allow any command via
- * the executor wildcard, permit out-of-workspace writes, AND disable the command security gate
- * (`isCommandSecurityEnabled`) — which otherwise refuses "dangerous" commands BEFORE the allow-list
- * is consulted. Residual wedge: a command Bob's parser can't verify still prompts even with `["*"]`.
+ * Commands Bob 2.x auto-runs. Bob matches whole tokens from the command's start (case-sensitive, no wildcard)
+ * and this file governs every Bob session, interactive ones too, so it's a narrow subset of command-policy's
+ * allowlist (pinned by a test). Omitted on purpose: shell readers (read_file covers the workspace; these only
+ * reach outside it), interpreters (inline `-e`/`-c` can't be fenced with token prefixes), and git that discards
+ * work. Residual: `git diff --no-index` reads any file.
  */
-export function autoApproveSettings(): Record<string, unknown> {
+export const BOB_HEADLESS_COMMANDS: readonly string[] = [
+  "ls", "dir", "pwd", "cd",
+  "git status", "git diff", "git log", "git rev-parse", "git ls-files", "git add", "git commit",
+  "tsc", "npm test", "npm run", "pnpm test", "pnpm run", "yarn test", "yarn run",
+  "pytest", "python -m pytest", "python3 -m pytest", "uv run pytest", "uv run python -m pytest",
+  "make test", "make lint", "make check",
+]; // prettier-ignore
+
+export interface AutoApproveOptions {
+  /** `bobTasks.allowCommands` / `--allow-commands` extras. */
+  allow?: readonly string[];
+  /** `bobTasks.denyCommands` / `--deny-commands`, used only to vet the extras. */
+  deny?: readonly string[];
+}
+
+/** approvedCommands plus the refused extras. An extra must name a subcommand (a bare `git` would auto-run
+ *  `git push`) and pass the policy with the user's denies applied. */
+export function headlessCommands(opts: AutoApproveOptions = {}): { approved: string[]; dropped: string[] } {
+  const kept: string[] = [];
+  const dropped: string[] = [];
+  for (const raw of opts.allow ?? []) {
+    const p = raw.trim().split(/\s+/).join(" ");
+    if (!p) continue;
+    const ok = p.includes(" ") && evaluateCommand(p, { allow: [p], deny: [...(opts.deny ?? [])] }).decision === "allow";
+    (ok ? kept : dropped).push(p);
+  }
+  return { approved: [...new Set([...BOB_HEADLESS_COMMANDS, ...kept])], dropped };
+}
+
+/**
+ * The config that runs Bob 2.x unattended: every permission group inside the workspace, headlessCommands(),
+ * and no LLM "dangerous command" check (`isCommandSecurityEnabled`). Outside-workspace calls still prompt.
+ * Config can't fix `a && b` on Windows: powershell.exe 5.1 fails to parse it, so it always prompts.
+ */
+export function autoApproveSettings(opts: AutoApproveOptions = {}): Record<string, unknown> {
   return {
     isCommandSecurityEnabled: false,
     approval: {
       autoApprovalEnabled: true,
       outsideWorkspaceAllowed: true,
       allowed_permissions: [...ALL_PERMISSIONS],
-      permissionOptions: [],
-      allowedExecutors: [{ toolId: "execute_command", approvedCommands: ["*"], deniedCommands: [] }],
+      allowedExecutors: [
+        { toolId: "execute_command", approvedCommands: headlessCommands(opts).approved, deniedCommands: [] },
+      ],
     },
   };
 }
 
-/**
- * Overlay the auto-approve config onto an existing settings object, preserving keys we don't own
- * (Bob keeps auth/telemetry/modes there). `approval` and `isCommandSecurityEnabled` are OUR policy,
- * so they're replaced wholesale. Pure; file I/O lives in writeAutoApprove.
- */
-export function mergeAutoApprove(current: Record<string, unknown>): Record<string, unknown> {
-  return { ...current, ...autoApproveSettings() };
+const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+/** Overlay our config onto existing settings. We replace only the keys autoApproveSettings writes and
+ *  execute_command's approvedCommands; the user's other approval keys, executors and deniedCommands survive,
+ *  so a deny they added never becomes an auto-run. Pure. */
+export function mergeAutoApprove(
+  current: Record<string, unknown>,
+  opts: AutoApproveOptions = {},
+): Record<string, unknown> {
+  const ours = autoApproveSettings(opts);
+  const ourApproval = ours.approval as Record<string, unknown>;
+  const [ourExec] = ourApproval.allowedExecutors as Record<string, unknown>[];
+  const prev = isRecord(current.approval) ? current.approval : {};
+  const prevExecs = (Array.isArray(prev.allowedExecutors) ? prev.allowedExecutors : []).filter(isRecord);
+  const prevExec = prevExecs.find((e) => e.toolId === "execute_command");
+  const userDenied = Array.isArray(prevExec?.deniedCommands)
+    ? prevExec.deniedCommands.filter((s): s is string => typeof s === "string")
+    : [];
+  return {
+    ...current,
+    ...ours,
+    approval: {
+      ...prev,
+      ...ourApproval,
+      allowedExecutors: [
+        ...prevExecs.filter((e) => e !== prevExec),
+        { ...ourExec, deniedCommands: [...new Set(userDenied)] },
+      ],
+    },
+  };
 }
 
 /** Write the auto-approve config into settings.json (default: the global file), keeping other keys.
- *  WARNING — blast radius: this edits Bob's USER-GLOBAL settings (`~/.bob/settings/settings.json`), so it
- *  makes EVERY Bob window/project for this user headless for command execution (`approvedCommands:["*"]` +
- *  `isCommandSecurityEnabled:false`) and PERSISTS after the connector stops / is uninstalled — nothing
- *  reverts it (unlike the 1.x window-scoped globalState). The extension gates this behind the
- *  `bobTasks.autoApproveGlobal` setting and shows a one-time notice on the first write. */
-export function writeAutoApprove(path = bob2SettingsPath()): { path: string; created: boolean } {
-  return updateSettings(path, mergeAutoApprove);
+ *  Blast radius: user-global, so every Bob window and project (interactive chats too) auto-runs
+ *  headlessCommands(), and nothing reverts it on stop or uninstall. The extension gates it behind
+ *  `bobTasks.autoApproveGlobal` and a one-time notice. */
+export function writeAutoApprove(
+  path = bob2SettingsPath(),
+  opts: AutoApproveOptions = {},
+): { path: string; created: boolean; approved: number; dropped: string[] } {
+  const { approved, dropped } = headlessCommands(opts);
+  return { ...updateSettings(path, (current) => mergeAutoApprove(current, opts)), approved: approved.length, dropped };
 }
 
 /** Install (or remove, per null) our lifecycle hooks in settings.json — same file, same atomic write and
