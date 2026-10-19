@@ -24,9 +24,9 @@ All settings are under the `bobTasks.*` namespace:
 
 ### Core Settings
 
-- **`bobTasks.connectorPath`** — Absolute path to the Bob Control connector install (the folder containing `dist/worker.js`). Set it once (User scope) so the worker can start regardless of which project Bob has open. Empty = auto-detect: any open workspace folder that contains `dist/worker.js`, else the legacy `bobTasks.projectRoot` if it still points at the install.
+- **`bobTasks.connectorPath`** — Absolute path to the Bob Control connector install (the folder containing `dist/worker.js`). User settings only (a workspace value is ignored), so the worker can start regardless of which project Bob has open. Empty = auto-detect in a trusted workspace: any open workspace folder that contains `dist/worker.js`, else the user-level legacy `bobTasks.projectRoot` if it still points at the install.
 - **`bobTasks.projectRoot`** — Working directory the worker runs in — the project Bob operates on (verify/judge run git here). Empty = the first workspace folder. To locate `dist/worker.js`, use `bobTasks.connectorPath` instead.
-- **`bobTasks.nodePath`** — Node executable used to run the worker. Must be Node >= 22.5 (for `node:sqlite`). Set an absolute path if `node` on PATH is older.
+- **`bobTasks.nodePath`** — Node executable used to run the worker (user settings only). Must be Node >= 22.5 (for `node:sqlite`). Set an absolute path if `node` on PATH is older.
 - **`bobTasks.dbPath`** — SQLite task DB (`BOB_TASKS_DB`). Empty = the project's `data/tasks.db`. Must match the MCP server's DB.
 - **`bobTasks.worktreeShared`** — Share ONE board across all linked git worktrees of a repo: this worktree's worker drains the **main** worktree's `data/tasks.db`. Governs the worker only — to also make a Claude session running *inside* a linked worktree file to the shared board, set `BOB_TASKS_WORKTREE_SHARED=1` in the environment (every consumer reads it). Ignored when `bobTasks.dbPath` is set; a no-op for non-worktree projects.
 - **`bobTasks.pipe`** *(Bob 1.x only — no effect on Bob 2.0, which has no IPC pipe)* — Bob IPC named pipe. Blank = auto-detect this instance's own pipe from `ROO_CODE_IPC_SOCKET_PATH` (needed when multiple Bob instances run at once); set only to override. Fallback: `\\.\pipe\pipe\bob-ipc`.
@@ -74,7 +74,7 @@ All settings are under the `bobTasks.*` namespace:
 - **`bobTasks.reviewPlans`** *(Bob 1.x only)* — Escalate plan/design-approval questions to you for review, while auto-answering mechanical clarifications (file paths, flag names, etc.). Only applies when `answerFollowups` is on. Takes precedence over `escalateAll` when both are on. Default: `false`.
 - **`bobTasks.classifierBackend`** — How the classifier/judge reach Claude. Options: `cli` (run the installed `claude` CLI headless), `api` (one raw Anthropic API call). Default: `cli`. *(Used by the 2.0 verify judge too.)*
 - **`bobTasks.classifierModel`** — Model the classifier/judge uses. Empty = per-backend default (`cli`→`claude-sonnet-4-6`, `api`→`claude-haiku-4-5`).
-- **`bobTasks.classifierCliPath`** — Path to the `claude` executable for the cli backend. Empty = resolve `claude` on PATH.
+- **`bobTasks.classifierCliPath`** — Path to the `claude` executable for the cli backend (user settings only). Empty = resolve `claude` on PATH.
 
 ### Verify-and-Continue
 

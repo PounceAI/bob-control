@@ -95,10 +95,13 @@ function connectorRoot(): string | undefined {
   };
   const explicit = cfg().get<string>("connectorPath");
   if (explicit && explicit.trim()) return explicit.trim(); // honored even if missing, so the error names it
+  // Loading code from a workspace folder is only for a trusted one (the manifest also opts out of Restricted Mode),
+  // and the legacy fallback takes the user-level value only, so a repo's settings can't point it elsewhere.
+  if (!vscode.workspace.isTrusted) return undefined;
   for (const f of vscode.workspace.workspaceFolders ?? []) {
     if (hasWorker(f.uri.fsPath)) return f.uri.fsPath;
   }
-  const legacy = cfg().get<string>("projectRoot");
+  const legacy = cfg().inspect<string>("projectRoot")?.globalValue;
   if (legacy && legacy.trim() && hasWorker(legacy.trim())) return legacy.trim();
   return undefined;
 }
