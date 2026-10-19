@@ -5,6 +5,12 @@
   "version": "2.4.2",
   "publisher": "local",
   "license": "Apache-2.0",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Runs a worker, loads connector code and edits Bob's global settings."
+    }
+  },
   "engines": {
     "vscode": "^1.94.0"
   },
@@ -25,7 +31,7 @@
           "scope": "machine",
           "type": "string",
           "default": "",
-          "description": "Absolute path to the Bob Control connector install (the folder containing dist/worker.js). User settings only (a workspace value is ignored), so the worker can start regardless of which project Bob has open. Empty = auto-detect: any open workspace folder that contains dist/worker.js, else the legacy bobTasks.projectRoot if it still points at the install."
+          "description": "Absolute path to the Bob Control connector install (the folder containing dist/worker.js). User settings only (a workspace value is ignored), so the worker can start regardless of which project Bob has open. Empty = auto-detect in a trusted workspace: any open workspace folder that contains dist/worker.js, else the user-level legacy bobTasks.projectRoot if it still points at the install."
         },
         "bobTasks.projectRoot": {
           "type": "string",

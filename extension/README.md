@@ -24,7 +24,7 @@ All settings are under the `bobTasks.*` namespace:
 
 ### Core Settings
 
-- **`bobTasks.connectorPath`** — Absolute path to the Bob Control connector install (the folder containing `dist/worker.js`). User settings only (a workspace value is ignored), so the worker can start regardless of which project Bob has open. Empty = auto-detect: any open workspace folder that contains `dist/worker.js`, else the legacy `bobTasks.projectRoot` if it still points at the install.
+- **`bobTasks.connectorPath`** — Absolute path to the Bob Control connector install (the folder containing `dist/worker.js`). User settings only (a workspace value is ignored), so the worker can start regardless of which project Bob has open. Empty = auto-detect in a trusted workspace: any open workspace folder that contains `dist/worker.js`, else the user-level legacy `bobTasks.projectRoot` if it still points at the install.
 - **`bobTasks.projectRoot`** — Working directory the worker runs in — the project Bob operates on (verify/judge run git here). Empty = the first workspace folder. To locate `dist/worker.js`, use `bobTasks.connectorPath` instead.
 - **`bobTasks.nodePath`** — Node executable used to run the worker (user settings only). Must be Node >= 22.5 (for `node:sqlite`). Set an absolute path if `node` on PATH is older.
 - **`bobTasks.dbPath`** — SQLite task DB (`BOB_TASKS_DB`). Empty = the project's `data/tasks.db`. Must match the MCP server's DB.
