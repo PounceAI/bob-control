@@ -3,6 +3,34 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Bob 2.x headless auto-approve now auto-runs commands.** The global settings overlay wrote
+  `approvedCommands: ["*"]`, but Bob matches whole words from the start of the command with no wildcard, so
+  `"*"` matched nothing and every command prompted. An in-process dispatch has no reply channel, so it would
+  stall. The overlay now lists build/test runners (`npm test`, `npm run`, `tsc`, `pytest`, …), local
+  non-destructive git (`status`, `diff`, `log`, `add`, `commit`, …) and `ls`/`dir`/`pwd`/`cd`, all allowed by
+  the command policy too. Shell readers, interpreters and work-discarding git still prompt: Bob can't express
+  the policy's deny rules, and this file applies to every Bob session.
+- **`bobTasks.allowCommands` reaches Bob too**, but only its user-level value, and only entries that name a
+  subcommand (not a flag, launcher, `exec` or `dlx`) and pass the deny rules (`bobTasks.denyCommands`
+  included). A bare `git` would make Bob auto-run `git push`, and `sh -c` or `python -c` anything; skipped
+  entries are logged. A workspace setting can turn `bobTasks.autoApproveGlobal` off but not on.
+- **The overlay no longer wipes the user's own approval settings.** It used to replace the whole `approval`
+  block. It now keeps `deniedCommands`, `permissionOptions`, other executors and unknown keys, and replaces
+  only `approvedCommands` and the keys it sets.
+
+### Upgrade notes
+
+- The file is user-global, so these auto-runs apply to interactive Bob chats in every project. It is written
+  on each in-process connect, and an ACP-only setup keeps whatever is already there. Uninstalling doesn't
+  revert it: turn off `bobTasks.autoApproveGlobal` and edit `~/.bob/settings/settings.json` by hand.
+- Bob Shell 2.0.2 ignores these settings over ACP and asks the client about every non-read tool call. Bob
+  Shell 2.0.6+ applies them, so upgrading it means the ACP worker auto-runs the same list without consulting
+  the permission gate.
+
 ## [2.4.2] — 2026-09-07 — Drained, bounded git on the checkpoint path
 
 ### Fixed

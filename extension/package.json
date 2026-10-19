@@ -135,7 +135,7 @@
         "bobTasks.autoApproveGlobal": {
           "type": "boolean",
           "default": true,
-          "description": "On the first 2.0 dispatch, write Bob's headless auto-approve into its GLOBAL settings (~/.bob/settings/settings.json) so queued tasks run unattended. This disables Bob's command security for every Bob window/project for your user and persists until changed (a one-time notice is shown the first time). Turn off to keep Bob's normal approval prompts — auto-dispatch will then stall on the first prompt."
+          "description": "On each 2.x in-process connect, write Bob's headless auto-approve into its GLOBAL settings (~/.bob/settings/settings.json) so queued tasks run unattended: every permission group inside the workspace, plus build/test runners and local non-destructive git commands. It applies to EVERY Bob window and project for your user, interactive chats included, disables Bob's command security check, and persists after uninstall (a one-time notice is shown the first time). Other commands and outside-workspace access still prompt. Turn off to keep Bob's normal approval prompts; auto-dispatch will then stall on the first prompt."
         },
         "bobTasks.notify.enabled": {
           "type": "boolean",
@@ -243,7 +243,7 @@
         "bobTasks.allowCommands": {
           "type": "string",
           "default": "",
-          "description": "Comma-separated command prefixes to extend the safe allowlist for advanced mode (e.g., 'git,npm test'). Empty = use built-in allowlist only."
+          "description": "Comma-separated command prefixes to extend the safe allowlist (e.g., 'npm test,cargo build'). Empty = built-in allowlist only. The permission gate matches these case-insensitively. Bob 2.x's own auto-approve (bobTasks.autoApproveGlobal) takes only entries that name a subcommand and pass the deny rules (a bare 'git' is ignored there), matches them as whole, case-sensitive words, and picks up changes on the next connect."
         }
       }
     },

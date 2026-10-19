@@ -382,7 +382,12 @@ interface ConnectorModules {
   parseOpts: (argv: string[]) => unknown;
   /** Writes Bob's headless auto-approve into global settings.json; we inject a gated wrapper (the setting +
    *  one-time notice live in the extension, keeping the driver vscode-free). Returns the path written. */
-  writeAutoApprove: (path?: string) => { path: string; created: boolean };
+  writeAutoApprove: (
+    path?: string,
+    opts?: { allow?: string[]; deny?: string[] },
+  ) => { path: string; created: boolean; approved?: number; dropped?: string[] };
+  /** Set (≥2) when writeAutoApprove takes {allow, deny}; an older connector writes Bob's no-op `["*"]`. */
+  autoApproveVersion?: number;
   /** Installs/removes our Bob 2.1 lifecycle hooks in global settings.json (absent in an older connector). */
   writeHooks?: (cmds: { stop?: string | null; preToolUse?: string | null }, path?: string) => unknown;
   /** Builds a hook command line (`<node> <script> [args]`) with the quoting Bob's exec needs. */
@@ -409,6 +414,7 @@ async function loadConnector(connector: string): Promise<ConnectorModules> {
     runDriverLoop: loopMod.runDriverLoop as ConnectorModules["runDriverLoop"],
     parseOpts: workerMod.parseOpts as ConnectorModules["parseOpts"],
     writeAutoApprove: configMod.writeAutoApprove as ConnectorModules["writeAutoApprove"],
+    autoApproveVersion: configMod.AUTO_APPROVE_VERSION as number | undefined,
     writeHooks: configMod.writeHooks as ConnectorModules["writeHooks"],
     hookCommand: hooksMod.hookCommand as ConnectorModules["hookCommand"],
   };
@@ -449,21 +455,37 @@ function makeWriteHooks(connector: string, mods: ConnectorModules): () => void {
  * one-time notice — because it's a user-global, persistent change that disables Bob's command security
  * across every window/project. Injected via the driver's `writeApproval` seam so the driver stays vscode-free.
  */
-function makeWriteApproval(writeAutoApprove: ConnectorModules["writeAutoApprove"]): () => void {
+function makeWriteApproval(mods: ConnectorModules): () => void {
   return () => {
-    if (cfg().get<boolean>("autoApproveGlobal") === false) {
+    // A user-global write: a workspace setting (a cloned repo's .vscode/settings.json) may turn it off, never on,
+    // and can't add commands.
+    if (cfg().get<boolean>("autoApproveGlobal") === false || cfg().inspect<boolean>("autoApproveGlobal")?.globalValue === false) {
       out.appendLine("[approve] autoApproveGlobal is off — skipping the global auto-approve write (Bob will prompt).");
       return;
     }
-    const { path: written } = writeAutoApprove();
-    out.appendLine(`[approve] wrote headless auto-approve to ${written}`);
+    // Comma lists, as the worker parses --allow-commands / --deny-commands.
+    const list = (key: string) =>
+      (cfg().inspect<string>(key)?.globalValue ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    const r = mods.writeAutoApprove(undefined, { allow: list("allowCommands"), deny: list("denyCommands") });
+    if ((mods.autoApproveVersion ?? 0) < 2) {
+      out.appendLine(
+        `[approve] ⚠ wrote ${r.path} with an older connector: its approvedCommands ["*"] matches nothing in ` +
+          `Bob 2.x, so every command prompts. Update the connector (bobTasks.connectorPath).`,
+      );
+    } else {
+      const dropped = r.dropped?.length ? `; ignored allowCommands ${r.dropped.join(", ")} (need a subcommand, or denied)` : "";
+      out.appendLine(`[approve] wrote headless auto-approve to ${r.path} (${r.approved} command patterns${dropped})`);
+    }
     if (memento && !memento.get<boolean>(AUTO_APPROVE_NOTICE_KEY)) {
       void memento.update(AUTO_APPROVE_NOTICE_KEY, true);
       void vscode.window
         .showInformationMessage(
-          `Bob Tasks enabled headless auto-approve in ${written} — this disables Bob's command security ` +
-            `globally (every window/project) so queued tasks run unattended. Turn it off with the ` +
-            `'bobTasks.autoApproveGlobal' setting.`,
+          `Bob Tasks enabled headless auto-approve in ${r.path}. It disables Bob's command security check and ` +
+            `auto-runs build/test and local git commands in EVERY Bob window and project, interactive chats ` +
+            `included, and stays after uninstall. Turn it off with the 'bobTasks.autoApproveGlobal' setting.`,
           "Open Setting",
         )
         .then((pick) => {
@@ -516,7 +538,7 @@ function startInProcessLoop(connector: string, mods: ConnectorModules, host: unk
   if (c.get<boolean>("verifyAndContinue") && c.get<boolean>("verifyJudge")) args.push(...classifierBackendArgs(c));
   const opts = mods.parseOpts(args);
   const driver = new mods.InProcessDriver(host, {
-    writeApproval: makeWriteApproval(mods.writeAutoApprove),
+    writeApproval: makeWriteApproval(mods),
     writeHooks: makeWriteHooks(connector, mods),
     // Rollback: a stopped loop leaves nothing of ours in Bob's global settings (see makeWriteHooks).
     removeHooks: () => {
