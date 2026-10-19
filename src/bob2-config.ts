@@ -50,9 +50,8 @@ export const AUTO_APPROVE_VERSION = 2;
  * and this file governs every Bob session, interactive ones too, so it's a narrow subset of command-policy's
  * allowlist (pinned by a test). Omitted on purpose: shell readers (read_file covers the workspace; these only
  * reach outside it), interpreters (inline `-e`/`-c` can't be fenced with token prefixes), and git that discards
- * work. Residual, since one-token flags like `--output=x` are invisible to token prefixes: `git diff --no-index`
- * reads any file, and `git diff/log --output=` or `tsc --outDir` write outside the workspace (stock Bob
- * auto-runs `git diff`/`git log` the same way).
+ * work. Residual (token prefixes can't see `--output=x`): `git diff --no-index` reads any file, and
+ * `git diff/log --output=` or `tsc --outDir` write outside the workspace, as in stock Bob.
  */
 export const BOB_HEADLESS_COMMANDS: readonly string[] = [
   "ls", "dir", "pwd", "cd",
@@ -76,10 +75,9 @@ const WRAPPERS = new Set([
   "nice", "find", "uv", "bun", "deno",
 ]); // prettier-ignore
 
-/** approvedCommands plus the refused extras. An extra must name a subcommand, not a flag (a bare `git` would
- *  auto-run `git push`; `git -c`, `python -c`, `cmd /c` run arbitrary code), must not start with a command
- *  launcher (path and extension ignored) or `exec`/`dlx`/`x`, and must pass the policy with the user's
- *  denies applied. Extras are user-level settings only, so this guards mistakes, not an attacker. */
+/** approvedCommands plus the refused extras. An extra needs a subcommand, not a flag (bare `git` would auto-run
+ *  `git push`; `python -c` anything), no launcher first word, no `exec`/`dlx`/`x`, and must pass the policy with
+ *  the user's denies. Extras are user-level only, so this guards mistakes, not an attacker. */
 export function headlessCommands(opts: AutoApproveOptions = {}): { approved: string[]; dropped: string[] } {
   const kept: string[] = [];
   const dropped: string[] = [];
