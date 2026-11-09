@@ -35,10 +35,11 @@ import { notify } from "./notify.js";
 import { createWebhookSink, validateWebhookUrl, redactUrl, type WebhookSink, type WorkerEvent } from "./webhook.js";
 import { shouldRetry, executeRetry } from "./retry-policy.js";
 import { buildJudgeVerifier, captureGitBaseline, captureChangedFiles, type GitBaseline } from "./judge.js";
-import { captureCheckpoint, preserveWipToBranch, releaseCheckpoint } from "./checkpoint.js";
+import { captureCheckpoint, preserveWipForMode, releaseCheckpoint } from "./checkpoint.js";
 import { isInsideWorkTree } from "./git.js";
 import { computeCeiling } from "./budget.js";
 import type { Task } from "./types.js";
+import { buildTaskPrompt } from "./prompt.js";
 import { isCompleted } from "./types.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -310,11 +311,11 @@ export function parseOpts(argv: string[]): Opts {
  * --no-checkpoint) or when HEAD moved (the work is already committed). Best-effort: never throws into
  * the worker's terminal handling. Returns the branch name when work was preserved.
  */
-async function checkpointBeforeDeath(opts: Opts, taskId: number): Promise<string | undefined> {
+async function checkpointBeforeDeath(opts: Opts, taskId: number, mode: string): Promise<string | undefined> {
   if (!opts.checkpoint) return undefined;
   try {
-    const r = await preserveWipToBranch(process.cwd(), taskId, "worker");
-    if (r.branch) console.log(`  ✓ #${taskId} partial work preserved to ${r.branch}; main restored clean`);
+    const r = await preserveWipForMode(process.cwd(), taskId, "worker", mode);
+    if (r.preserved) console.log(`  ✓ #${taskId} partial work preserved to ${r.branch}; main restored clean`);
     else if (r.outcome && !r.outcome.reverted) console.log(`  ⚠ #${taskId} working tree NOT restored: ${r.note}`);
     else if (r.note) console.log(`  ↩ #${taskId} ${r.note}`);
     return r.branch;
@@ -339,6 +340,9 @@ const TERMINAL_CAUSE: Record<DispatchResult["status"], string> = {
  * Returns the task plus counts of tasks skipped due to risk gate or blocked dependencies.
  */
 export function pickEligible(opts: Opts): { task: Task | null; gated: number; blocked: number } {
+  // Recover tasks an older CLI/MCP server's answer left in_progress (both loops pull through here).
+  const orphans = repo.requeueOrphanedAnswers(opts.assignee, opts.tag);
+  if (orphans) console.log(`bob-worker: re-queued ${orphans} answered-but-orphaned task(s).`);
   const max = RISK_RANK[opts.maxRisk];
   const pending = repo.listTasks({ status: "pending", tag: opts.tag });
   let gated = 0;
@@ -367,12 +371,6 @@ export function pickEligible(opts: Opts): { task: Task | null; gated: number; bl
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-function buildPrompt(task: Task): string {
-  const header = `Task #${task.id}: ${task.title}`;
-  const body = task.description?.trim() ? `\n\n${task.description.trim()}` : "";
-  return header + body;
-}
 
 let webhookSink: WebhookSink | null = null; // set at startup when --webhook is passed
 
@@ -407,7 +405,7 @@ async function parkWorkspaceMismatch(task: Task, opts: Opts, m: WorkspaceMismatc
     return;
   }
   const question = workspaceMismatchQuestion(m);
-  const q = repo.askQuestion(task.id, question);
+  const q = repo.askQuestion(task.id, question, [], undefined, { resume: "requeue", kind: "workspace" });
   if (q) {
     console.log(
       `  ✗ #${task.id} refused — wrong Bob ("${m.reported}"); parked needs_input (question ${q.question_id}).`,
@@ -450,10 +448,11 @@ async function runOne(
   const { doDispatch, getSeenAsk } = createDispatchSession(client, task, opts, { mode, profile, pressesLand }, apiKey);
 
   const { planStopBaseline, evidenceBaseline } = await prepareDispatch(task, opts);
-  const pollLoop = buildPollLoop(task, opts, mode, doDispatch, evidenceBaseline, apiKey);
+  const prompt = buildTaskPrompt(task, mode, repo.listOperatorAnswers(task.id));
+  const pollLoop = buildPollLoop(task, opts, mode, prompt, doDispatch, evidenceBaseline, apiKey);
 
   // Initial dispatch, then the verify-and-continue loop (a no-op when the feature is off).
-  const initialRes = await doDispatch(buildPrompt(task));
+  const initialRes = await doDispatch(prompt);
   const res = await pollLoop(initialRes, planStopBaseline);
 
   // Stamp the outcome onto the heartbeat before terminal handling — the 1.x analog of finalize()'s
@@ -599,7 +598,7 @@ function createDispatchSession(
       const question =
         `Bob needs to run a command the permission policy will not auto-approve (${reason}): ` +
         `\`${short}\` (in ${cwd}). Approve it and re-queue the task, or add it to --allow-commands.`;
-      const q = repo.askQuestion(task.id, question);
+      const q = repo.askQuestion(task.id, question, [], undefined, { resume: "requeue", kind: "command" });
       if (q) {
         console.log(`  ❓ #${task.id} command needs approval → needs_input (question ${q.question_id})`);
         emit(opts, "question", { id: task.id, title: task.title, question, command });
@@ -748,6 +747,7 @@ function buildPollLoop(
   task: Task,
   opts: Opts,
   mode: string,
+  taskPrompt: string,
   doDispatch: (text: string) => Promise<DispatchResult>,
   evidenceBaseline: GitBaseline,
   apiKey: string | undefined,
@@ -757,7 +757,7 @@ function buildPollLoop(
   const verify = opts.verifyJudge
     ? buildJudgeVerifier({
         mode,
-        taskPrompt: buildPrompt(task),
+        taskPrompt,
         evidenceBaseline,
         judge: {
           backend: opts.classifierBackend,
@@ -782,7 +782,7 @@ function buildPollLoop(
     verifyCommand: opts.verifyCommand,
     maxContinues: opts.maxContinues,
     cwd: process.cwd(),
-    taskPrompt: buildPrompt(task),
+    taskPrompt,
     task: { id: task.id, title: task.title },
     addNote: repo.addNote,
     log: (m) => console.log(m),
@@ -867,6 +867,14 @@ async function finalizeDispatch(
   seenAsk: { kind: string; text: string } | undefined,
   evidenceBaseline: GitBaseline,
 ): Promise<void> {
+  if (res.rejectedWrites) {
+    repo.addNote(
+      task.id,
+      `✗ Rejected ${res.rejectedWrites} file write(s) in read-only ${mode} (first: ${res.rejectedWritePath ?? "?"}); ` +
+        "the first write's content is appended to the result.",
+      "worker",
+    );
+  }
   // If Bob parked this task awaiting a human answer on the board (called ask_question →
   // needs_input), the dispatch ending is NOT a failure — leave it awaiting; the question's
   // own deadline + the board sweeper govern it. Don't clobber needs_input to blocked/done.
@@ -888,10 +896,10 @@ async function finalizeDispatch(
   // stall (neither set) falls through to the normal terminal handling (park blocked) below.
   const pendingAskKind = res.pendingAsk ?? seenAsk?.kind;
   if (res.status === "idle" && !res.result.trim() && pendingAskKind) {
-    const branch = await checkpointBeforeDeath(opts, task.id);
+    const branch = await checkpointBeforeDeath(opts, task.id, mode);
     const rawAskText = (res.pendingAskText ?? "").trim() || seenAsk?.text || "";
     const question = buildIdleAskQuestion({ askKind: pendingAskKind, rawAskText, branch });
-    const q = repo.askQuestion(task.id, question);
+    const q = repo.askQuestion(task.id, question, [], undefined, { resume: "requeue", kind: pendingAskKind });
     if (q) {
       console.log(`  ❓ #${task.id} idle on '${pendingAskKind}' → needs_input (question ${q.question_id})`);
       emit(opts, "question", { id: task.id, title: task.title, question });
@@ -964,7 +972,7 @@ async function finalizeDispatch(
     });
     if (opts.notify) notify(`Bob finished #${task.id} (${finalStatus})`, `${task.title} — ${result}`);
   } else if (verifyGaveUp) {
-    const branch = await checkpointBeforeDeath(opts, task.id);
+    const branch = await checkpointBeforeDeath(opts, task.id, mode);
     repo.updateStatus(task.id, "blocked");
     const branchNote = branch ? ` Partial work preserved to branch ${branch}.` : "";
     repo.addNote(
@@ -1014,7 +1022,7 @@ async function finalizeDispatch(
         console.log(`  ⓧ sent cancel to Bob task ${res.taskId}`);
       }
 
-      const branch = await checkpointBeforeDeath(opts, task.id);
+      const branch = await checkpointBeforeDeath(opts, task.id, mode);
       repo.updateStatus(task.id, "blocked");
       const lastText = res.lastText.trim().replace(/\s+/g, " ").slice(0, 140);
       const lastNote = lastText ? ` Last activity: ${lastText}.` : "";
@@ -1398,6 +1406,13 @@ export async function main(): Promise<void> {
       process.exit(1);
     }
     pollStatus.enter("active");
+    // Resolved outside the catch below so it can't throw there; "" falls back to the writing-mode preserve.
+    let dispatchMode = "";
+    try {
+      dispatchMode = resolveRouting(task, patchPresent).mode;
+    } catch {
+      /* runOne will surface the same error */
+    }
     try {
       await runOne(client, task, opts, patchPresent, workerId);
     } catch (err) {
@@ -1409,7 +1424,7 @@ export async function main(): Promise<void> {
       // when the error is thrown after completion/parking.
       const cur = repo.getTask(task.id)?.status;
       if (!cur || (!isCompleted(cur) && cur !== "needs_input")) {
-        const branch = await checkpointBeforeDeath(opts, task.id);
+        const branch = await checkpointBeforeDeath(opts, task.id, dispatchMode);
         repo.updateStatus(task.id, "blocked");
         const branchNote = branch ? ` Partial work preserved to branch ${branch}.` : "";
         repo.addNote(task.id, `Worker error: ${(err as Error).message}.${branchNote}`, "worker");

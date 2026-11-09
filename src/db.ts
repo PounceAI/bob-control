@@ -208,6 +208,8 @@ function migrate(d: DatabaseSync): void {
   addColumnIfMissing(d, "tasks", "estimated_tokens", "INTEGER");
   addColumnIfMissing(d, "worker_heartbeats", "worktree", "TEXT"); // T7 worktree lease
   addColumnIfMissing(d, "worker_heartbeats", "tag", "TEXT"); // the worker's --tag pin, surfaced in worker_draining
+  addColumnIfMissing(d, "task_questions", "resume", "TEXT"); // NULL = 'live' (QuestionResume)
+  addColumnIfMissing(d, "task_questions", "ask_kind", "TEXT"); // worker-raised question kind (requeue cap)
   addColumnIfMissing(d, "worker_heartbeats", "last_dispatch_status", "TEXT"); // most recent dispatch outcome (health signal)
   addColumnIfMissing(d, "worker_heartbeats", "last_dispatch_detail", "TEXT"); // short reason, e.g. a provider/auth error
   addColumnIfMissing(d, "worker_heartbeats", "last_dispatch_at", "TEXT"); // when that dispatch settled (freshness)

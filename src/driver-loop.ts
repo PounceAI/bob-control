@@ -4,12 +4,13 @@ import type { DispatchResult } from "./bob-ipc.js";
 import { type Opts, pickEligible, pidAlive, persistReviewFindings } from "./worker.js";
 import * as repo from "./db.js";
 import { resolveMode, profileFor, isReadOnlyMode } from "./modes.js";
-import { preserveWipToBranch } from "./checkpoint.js";
+import { preserveWipForMode } from "./checkpoint.js";
 import { buildJudgeVerifier, captureGitBaseline, captureChangedFiles, type GitBaseline } from "./judge.js";
 import { shouldRetry, executeRetry } from "./retry-policy.js";
 import { createPollLoop, defaultCaptureSnapshot } from "./bob-polls.js";
 import type { LlmDeps } from "./llm.js";
 import type { Task } from "./types.js";
+import { buildTaskPrompt } from "./prompt.js";
 
 // The transport-agnostic board-drain loop the EXTENSION HOST runs in-process for Bob 2.0 (the 2.0 driver
 // can't be a child process — see docs/bob-2-inprocess.md). It drives any BobDriver, so the same loop
@@ -35,12 +36,6 @@ export interface DriverLoopConfig {
   /** This loop's heartbeat id — set by runDriverLoop so finalize() can stamp each dispatch outcome onto the
    *  heartbeat (board_status health signal). Absent in a direct driveOnce() test → outcome recording no-ops. */
   workerId?: string;
-}
-
-function buildPrompt(task: Task): string {
-  const header = `Task #${task.id}: ${task.title}`;
-  const body = task.description?.trim() ? `\n\n${task.description.trim()}` : "";
-  return header + body;
 }
 
 /** Board note for Bob's run cost + stall telemetry, or "" if neither is known. `maxIdleMs` (the worst
@@ -85,14 +80,15 @@ export async function driveOnce(cfg: DriverLoopConfig): Promise<boolean> {
   // Plan-stop baseline: a working-tree snapshot taken BEFORE the dispatch, so the poll loop can tell a
   // plan-only completion (no new changes) from real work. Only needed when verify-and-continue runs it.
   const planStopBaseline = opts.verifyAndContinue && opts.detectPlanStop ? await snapshot(cwd) : undefined;
+  const prompt = buildTaskPrompt(task, mode, repo.listOperatorAnswers(task.id));
   let res: DispatchResult;
   try {
-    res = await driver.dispatch({ text: buildPrompt(task), mode, timeoutMs: opts.timeoutMs });
+    res = await driver.dispatch({ text: prompt, mode, timeoutMs: opts.timeoutMs });
   } catch (e) {
     // BobDriver.dispatch is contracted never to reject; stay defensive for a third-party driver.
     res = { taskId: null, result: "", lastText: (e as Error).message, status: "aborted", tokensUsed: 0, turns: 0 };
   }
-  res = await verifyAndContinue(cfg, task, mode, res, planStopBaseline, baseline);
+  res = await verifyAndContinue(cfg, task, mode, prompt, res, planStopBaseline, baseline);
   await finalize(cfg, task, mode, res, baseline);
   return true;
 }
@@ -108,6 +104,7 @@ async function verifyAndContinue(
   cfg: DriverLoopConfig,
   task: Task,
   mode: string,
+  taskPrompt: string,
   initial: DispatchResult,
   planStopBaseline: string | undefined,
   evidenceBaseline: GitBaseline | undefined,
@@ -121,7 +118,7 @@ async function verifyAndContinue(
   const verify = opts.verifyJudge
     ? buildJudgeVerifier({
         mode,
-        taskPrompt: buildPrompt(task),
+        taskPrompt,
         evidenceBaseline,
         judge: {
           backend: opts.classifierBackend,
@@ -142,7 +139,7 @@ async function verifyAndContinue(
     verifyCommand: opts.verifyCommand,
     maxContinues: opts.maxContinues,
     cwd,
-    taskPrompt: buildPrompt(task),
+    taskPrompt,
     task: { id: task.id, title: task.title },
     addNote: repo.addNote,
     log,
@@ -209,7 +206,7 @@ async function finalize(
     cfg.emit?.("taskRetry", { id: task.id, title: task.title, attempt: task.retry_attempts + 1 });
     return;
   }
-  const branch = await preserveWip(opts, cwd, task.id);
+  const branch = await preserveWip(opts, cwd, task.id, mode);
   repo.updateStatus(task.id, "blocked");
   const branchNote = branch ? ` Partial work preserved to ${branch}.` : "";
   const detail = res.lastText.trim() ? `: ${res.lastText.trim().replace(/\s+/g, " ").slice(0, 140)}` : "";
@@ -350,10 +347,10 @@ async function changedFiles(cwd: string, baseline?: GitBaseline) {
     return { created: [], modified: [], diffstat: "", count: 0, gitAvailable: false };
   }
 }
-async function preserveWip(opts: Opts, cwd: string, taskId: number): Promise<string | undefined> {
+async function preserveWip(opts: Opts, cwd: string, taskId: number, mode: string): Promise<string | undefined> {
   if (!opts.checkpoint) return undefined;
   try {
-    return (await preserveWipToBranch(cwd, taskId, "worker")).branch;
+    return (await preserveWipForMode(cwd, taskId, "worker", mode)).branch;
   } catch {
     return undefined;
   }

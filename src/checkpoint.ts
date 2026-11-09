@@ -11,6 +11,7 @@ import { resolve, dirname, sep } from "node:path";
 import { runGit, repoRoot, headSha, refExists, listUntracked, snapshotWorktreeTree, gitFailure } from "./git.js";
 import * as repo from "./db.js";
 import type { TaskCheckpoint } from "./types.js";
+import { isReadOnlyMode } from "./modes.js";
 
 const CHECKPOINT_REF = (taskId: number) => `refs/bob/checkpoint/${taskId}`;
 const RECOVERY_REF = (sha: string) => `refs/bob/recovery/${sha}`;
@@ -288,6 +289,39 @@ export async function preserveWipToBranch(
   }
   repo.addNote(taskId, "↩ No partial work to preserve; working tree was already at the pre-task state.", actor);
   return { preserved: false, note: "no WIP to preserve", outcome: r };
+}
+
+/**
+ * preserveWipToBranch, except in a read-only mode: there any diff is likely another session's work in a
+ * shared checkout, so snapshot it to bob/task-<id> but never revert it (pounce #277).
+ */
+export async function preserveWipForMode(
+  cwd: string,
+  taskId: number,
+  actor: string,
+  mode: string,
+): Promise<PreserveOutcome> {
+  if (!isReadOnlyMode(mode)) return preserveWipToBranch(cwd, taskId, actor);
+  const cp = repo.getCheckpoint(taskId);
+  const repoCwd = cp?.root || cwd;
+  const signal = deadline();
+  // Still snapshot: a read-only run can write via an allowed command or a non-ACP transport.
+  const pin = await pinRecoverySnapshot(repoCwd, await headSha(repoCwd, signal), signal);
+  const branch = pin.ok && pin.ref ? await createTaskBranch(repoCwd, taskId, pin.ref) : undefined;
+  await releaseCheckpoint(taskId, repoCwd);
+  const base = cp?.head ? cp.head.slice(0, 8) : "the pre-task HEAD";
+  const detail = branch
+    ? `snapshot saved to ${branch} (diff it against ${base}; it can include changes made before the task)`
+    : pin.ok
+      ? "the tree matched HEAD"
+      : `no snapshot: ${pin.reason}`;
+  repo.addNote(
+    taskId,
+    `↩ Read-only ${mode} dispatch: working tree NOT rolled back (any diff may be another session's work); ${detail}. ` +
+      "`bob revert` is no longer available for this task.",
+    actor,
+  );
+  return { preserved: false, branch, note: `read-only dispatch: tree left untouched; ${detail}` };
 }
 
 /**

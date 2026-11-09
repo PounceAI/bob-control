@@ -97,7 +97,7 @@ Commands:
   next                                     show the next pending task the worker would pull, and its routed mode
   note <id> <text> [--author <name>]
   questions                                list open questions awaiting a human answer
-  answer <id> <question_id> <text>         answer a worker's board question (resumes the worker)
+  answer <id> <question_id> <text>         answer a board question (resumes or re-queues the task)
   result <id> <text> [--open]
   delete <id> [--force] [--cleanup]        refuses if the task recorded artifacts; --force deletes anyway, --cleanup also removes files
   revert <id> [--force]                    roll the working tree back to a task's pre-task checkpoint, while one still exists (--force if HEAD moved)
@@ -343,11 +343,13 @@ async function main(): Promise<void> {
       if (!questionId || !text) die("answer requires <task_id> <question_id> <text>");
       const res = repo.answerQuestion(id, questionId, text);
       if (!res.ok) die(res.error);
-      console.log(
-        res.alreadyAnswered
-          ? `question [${questionId}] was already answered`
-          : `answered [${questionId}] on #${id} — waiting worker resumes`,
-      );
+      const status = repo.getTask(id)?.status ?? "gone";
+      if (res.resumedTo) console.log(`answered [${questionId}] on #${id} — task now ${res.resumedTo}`);
+      else if (res.alreadyAnswered) console.log(`question [${questionId}] was already answered (task ${status})`);
+      else
+        console.error(
+          `warning: answer recorded on #${id}, but the task was not parked on it (now '${status}') — nothing resumed or re-queued`,
+        );
       break;
     }
 

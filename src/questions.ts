@@ -3,7 +3,7 @@
 // times out fail-safe (parking the task `blocked` — never fabricating an answer). Extracted from
 // db.ts as a self-contained subsystem; it reuses db's connection + low-level helpers.
 import { randomUUID } from "node:crypto";
-import type { TaskQuestion, QuestionState } from "./types.js";
+import type { TaskQuestion, QuestionState, QuestionResume } from "./types.js";
 import { isFinished } from "./types.js";
 import { getDb, transaction, nowIso, parseTags, getTask, updateStatus, addNote } from "./db.js";
 
@@ -23,6 +23,8 @@ function rowToQuestion(r: Record<string, unknown>): TaskQuestion {
     asked_at: String(r.asked_at),
     answered_at: (r.answered_at as string) ?? null,
     deadline_at: String(r.deadline_at),
+    resume: r.resume === "requeue" ? "requeue" : "live",
+    ask_kind: (r.ask_kind as string) ?? null,
   };
 }
 
@@ -36,7 +38,10 @@ export function askQuestion(
   text: string,
   options: string[] = [],
   timeoutMs: number = DEFAULT_QUESTION_TIMEOUT_MS,
+  /** Worker-raised questions pass {resume:'requeue', kind} (see TaskQuestion.resume / ask_kind). */
+  meta: { resume?: QuestionResume; kind?: string } = {},
 ): TaskQuestion | null {
+  const resume = meta.resume ?? "live";
   const task = getTask(taskId);
   if (!task) return null;
   // Only a task actively being worked can raise a question — prevents a stale/duplicate ask
@@ -55,10 +60,10 @@ export function askQuestion(
     supersedeOpenQuestions(taskId);
     getDb()
       .prepare(
-        `INSERT INTO task_questions (question_id, task_id, text, options, status, asked_at, deadline_at)
-       VALUES (?, ?, ?, ?, 'open', ?, ?)`,
+        `INSERT INTO task_questions (question_id, task_id, text, options, status, asked_at, deadline_at, resume, ask_kind)
+       VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?)`,
       )
-      .run(id, taskId, text, JSON.stringify(options), asked, deadline);
+      .run(id, taskId, text, JSON.stringify(options), asked, deadline, resume, meta.kind ?? null);
     updateStatus(taskId, "needs_input");
     const optStr = options.length ? `\nOptions: ${options.join(" | ")}` : "";
     addNote(taskId, `❓ Awaiting answer [${id}]: ${text}${optStr}`, "worker");
@@ -118,13 +123,57 @@ export function closeOpenQuestions(taskId: number, reason: string): number {
   return n;
 }
 
-export type AnswerResult = { ok: true; alreadyAnswered: boolean } | { ok: false; error: string };
+export type AnswerResult =
+  | {
+      ok: true;
+      alreadyAnswered: boolean;
+      /** Where the answer moved the task; null when it wasn't parked needs_input (nothing resumed). */
+      resumedTo: "in_progress" | "pending" | "blocked" | null;
+    }
+  | { ok: false; error: string };
+
+/** Answers to the same kind of worker-raised question after which re-queuing again is futile: the answer
+ *  can't change what raised it (a denied command, the wrong Bob), so the task parks blocked instead. */
+export const MAX_REQUEUE_ANSWERS = 2;
+
+/** Move a parked (needs_input) task on after its question was answered — conditional on still being parked,
+ *  so a concurrent timeout/cancel can't be clobbered. Must run inside the caller's transaction. */
+function resumeParkedTask(q: TaskQuestion): "in_progress" | "pending" | "blocked" | null {
+  let to: "in_progress" | "pending" | "blocked" = "in_progress";
+  if (q.resume === "requeue") {
+    const n = (
+      getDb()
+        .prepare(
+          `SELECT COUNT(*) AS n FROM task_questions WHERE task_id = ? AND status = 'answered'
+           AND resume = 'requeue' AND COALESCE(ask_kind, '') = ?`,
+        )
+        .get(q.task_id, q.ask_kind ?? "") as { n: number }
+    ).n;
+    to = n > MAX_REQUEUE_ANSWERS ? "blocked" : "pending";
+  }
+  const info = getDb()
+    .prepare("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = 'needs_input'")
+    .run(to, nowIso(), q.task_id);
+  if (Number(info.changes) === 0) return null;
+  if (to === "pending") {
+    addNote(q.task_id, "↻ Re-queued with the answer; the next dispatch carries it in the prompt.", "worker");
+  } else if (to === "blocked") {
+    addNote(
+      q.task_id,
+      `⛔ Blocked: answered ${MAX_REQUEUE_ANSWERS + 1} '${q.ask_kind ?? "?"}' questions and it re-asked each time — ` +
+        "an answer can't fix this (e.g. allow the command with --allow-commands, or run the task by hand), then re-queue it.",
+      "worker",
+    );
+  }
+  return to;
+}
 
 /**
  * Answer a question, matched by its unique question_id (so a stale answer can't apply to a
- * different/new question). Records the answer, clears the open state, and resumes the task
- * (needs_input -> in_progress) so the waiting worker continues. Idempotent on an already
- * answered question; rejects unknown / wrong-task / timed-out ids.
+ * different/new question). Records the answer and resumes the task in one transaction: a 'live'
+ * question resumes its waiter (in_progress); a 'requeue' one re-queues it (pending), or parks it
+ * blocked once re-queuing has proven futile. Idempotent on an already answered question (and repairs
+ * a requeue task a crash left parked); rejects unknown / wrong-task / timed-out ids.
  */
 export function answerQuestion(taskId: number, questionId: string, answer: string): AnswerResult {
   const q = getQuestion(questionId);
@@ -139,28 +188,80 @@ export function answerQuestion(taskId: number, questionId: string, answer: strin
   const taskNow = getTask(taskId);
   if (taskNow && isFinished(taskNow.status)) {
     closeOpenQuestions(taskId, `answer arrived after the task settled '${taskNow.status}'`);
-    return { ok: true, alreadyAnswered: true };
+    return { ok: true, alreadyAnswered: true, resumedTo: null };
   }
-  if (q.status === "answered") return { ok: true, alreadyAnswered: true }; // idempotent
+  if (q.status === "answered") {
+    // Idempotent. Repair: a requeue answer whose task is still parked with no newer open question
+    // (answered by a pre-requeue binary, or a crash) gets the transition it missed.
+    const repaired =
+      q.resume === "requeue" && taskNow?.status === "needs_input" && !getOpenQuestion(taskId)
+        ? transaction(() => resumeParkedTask(q))
+        : null;
+    return { ok: true, alreadyAnswered: true, resumedTo: repaired };
+  }
   if (q.status === "timed_out") {
     return { ok: false, error: `question '${questionId}' timed out; re-ask before answering` };
   }
-  // Conditional on still-open so a concurrent timeout (another process) can't be clobbered:
-  // exactly one of answer/timeout wins (SQLite serializes the writes). changes===0 => lost.
-  const info = getDb()
+  return transaction((): AnswerResult => {
+    // Conditional on still-open so a concurrent timeout (another process) can't be clobbered:
+    // exactly one of answer/timeout wins (SQLite serializes the writes). changes===0 => lost.
+    const info = getDb()
+      .prepare(
+        "UPDATE task_questions SET status = 'answered', answer = ?, answered_at = ? WHERE question_id = ? AND status = 'open'",
+      )
+      .run(answer, nowIso(), questionId);
+    if (Number(info.changes) === 0) {
+      const fresh = getQuestion(questionId);
+      if (fresh?.status === "answered") return { ok: true, alreadyAnswered: true, resumedTo: null };
+      return { ok: false, error: `question '${questionId}' is now '${fresh?.status ?? "gone"}' — cannot answer` };
+    }
+    addNote(taskId, `✅ Answered [${questionId}]: ${answer}`, "human");
+    return { ok: true, alreadyAnswered: false, resumedTo: resumeParkedTask(q) };
+  });
+}
+
+/** The task's operator answers to worker-raised ('requeue') questions — newest `limit`, oldest first —
+ *  carried into the re-dispatch prompt. 'live' answers already reached Bob in-run, so they're excluded. */
+export function listOperatorAnswers(taskId: number, limit = 3): TaskQuestion[] {
+  return (
+    getDb()
+      .prepare(
+        `SELECT * FROM task_questions WHERE task_id = ? AND status = 'answered' AND resume = 'requeue'
+         ORDER BY answered_at DESC, rowid DESC LIMIT ?`,
+      )
+      .all(taskId, limit) as Record<string, unknown>[]
+  )
+    .map(rowToQuestion)
+    .reverse();
+}
+
+/**
+ * Re-queue tasks an older CLI/MCP server answered by flipping to in_progress with nothing driving them:
+ * latest question an answered 'requeue' one, no "Auto-dispatched" note since. Scoped by assignee + tag like
+ * reclaimStaleInProgress. Returns the count.
+ */
+export function requeueOrphanedAnswers(assignee: string, tag?: string): number {
+  const rows = getDb()
     .prepare(
-      "UPDATE task_questions SET status = 'answered', answer = ?, answered_at = ? WHERE question_id = ? AND status = 'open'",
+      `SELECT t.id, t.tags, q.answered_at FROM tasks t
+       JOIN task_questions q ON q.task_id = t.id
+       WHERE t.status = 'in_progress' AND t.assignee = ? AND q.status = 'answered' AND q.resume = 'requeue'
+         AND q.rowid = (SELECT MAX(rowid) FROM task_questions WHERE task_id = t.id)
+         AND NOT EXISTS (SELECT 1 FROM task_notes n WHERE n.task_id = t.id
+                         AND n.note LIKE 'Auto-dispatched%' AND n.created_at >= q.answered_at)`,
     )
-    .run(answer, nowIso(), questionId);
-  if (Number(info.changes) === 0) {
-    const fresh = getQuestion(questionId);
-    if (fresh?.status === "answered") return { ok: true, alreadyAnswered: true };
-    return { ok: false, error: `question '${questionId}' is now '${fresh?.status ?? "gone"}' — cannot answer` };
+    .all(assignee) as { id: number; tags: unknown }[];
+  let n = 0;
+  for (const r of rows) {
+    if (tag && !parseTags(r.tags).includes(tag)) continue;
+    const info = getDb()
+      .prepare("UPDATE tasks SET status = 'pending', updated_at = ? WHERE id = ? AND status = 'in_progress'")
+      .run(nowIso(), r.id);
+    if (Number(info.changes) === 0) continue;
+    addNote(r.id, "↻ Re-queued: answered but left in_progress with no dispatch (orphaned answer).", "worker");
+    n++;
   }
-  // Resume the waiting worker (only if still parked on this question).
-  if (getTask(taskId)?.status === "needs_input") updateStatus(taskId, "in_progress");
-  addNote(taskId, `✅ Answered [${questionId}]: ${answer}`, "human");
-  return { ok: true, alreadyAnswered: false };
+  return n;
 }
 
 /**

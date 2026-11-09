@@ -170,7 +170,16 @@ interface Active {
   usage: { mode: "unknown" | "cumulative" | "perRequest"; lastOut: number; n: number };
   /** Prompt turns sent on this session (the initial task + each followup answer). */
   prompts: number;
+  /** Policy-rejected writes (read-only modes). The first one's content is salvaged into the result: Bob's plan
+   *  skill writes the whole plan there. */
+  rejectedWrites: number;
+  firstRejectedWrite?: { path: string; content?: string };
 }
+
+/** Rejected writes that end a read-only dispatch as an unanswerable ask, so a fast retry loop can't run out
+ *  the wall clock. */
+export const MAX_REJECTED_WRITES = 3;
+const SALVAGE_MAX_CHARS = 50_000;
 
 /** Read a followup question from Bob's `ask_followup_question` args ({question, follow_up:[…]}). */
 export function parseFollowupArgs(
@@ -220,9 +229,10 @@ export function classifyPermission(tc: AcpToolCall): {
   };
 }
 
-/** The policy a mode profile's auto-approve flags imply: edits need alwaysAllowWrite, MCP/fetch alwaysAllowMcp,
- *  commands only `allowAllCommands` (else the gates decide). "ask" for a tool nobody answers headless → the
- *  watchdog's short grace ends the dispatch as needs_input, as under the 1.x pipe. */
+/** The policy a mode profile's auto-approve flags imply: MCP/fetch need alwaysAllowMcp, commands only
+ *  `allowAllCommands` (else the gates decide). Edits are allowed with alwaysAllowWrite, else REJECTED: that
+ *  flag is off only in read-only modes, and an "ask" there wedges the dispatch (Bob's plan skill always
+ *  writes a *-plan.md). Any other "ask" nobody answers headless → the watchdog parks it needs_input. */
 export function permissionPolicyFor(
   auto: { alwaysAllowWrite: boolean; alwaysAllowMcp: boolean; alwaysAllowBrowser: boolean },
   allowAllCommands = false,
@@ -239,7 +249,7 @@ export function permissionPolicyFor(
       case "edit":
       case "delete":
       case "move":
-        return auto.alwaysAllowWrite ? "allow" : "ask";
+        return auto.alwaysAllowWrite ? "allow" : "reject";
       case "fetch":
         return auto.alwaysAllowMcp || auto.alwaysAllowBrowser ? "allow" : "ask";
       default:
@@ -362,6 +372,7 @@ export class AcpDriver implements WorkerClient {
         pendingFollowup: null,
         toolCalls: new Map(),
         usage: { mode: "unknown", lastOut: 0, n: 0 },
+        rejectedWrites: 0,
         prompts: 0,
       };
       if (opts.idleMs && opts.idleMs > 0) {
@@ -583,7 +594,8 @@ export class AcpDriver implements WorkerClient {
       rawInput: params?.toolCall?.rawInput,
     };
     const options: AcpPermissionOption[] = Array.isArray(params?.options) ? params.options : [];
-    if (a.done) return Promise.resolve({ outcome: { outcome: "cancelled" } });
+    // Ended, or ending (endWith set pendingStatus and is waiting out the cancel grace): nothing more to settle.
+    if (a.done || a.pendingStatus) return Promise.resolve({ outcome: { outcome: "cancelled" } });
     const { ask, text, modeSwitch } = classifyPermission(tc);
     let decision: PermissionDecision = "ask";
     if (ask === "followup")
@@ -595,10 +607,30 @@ export class AcpDriver implements WorkerClient {
       // A command is never policy-REJECTED here: the permission gate owns denies (and surfaces them).
       decision = ask === "command" && d === "reject" ? "ask" : d;
     }
-    if (decision !== "ask") {
-      this.log(`  ${decision === "allow" ? "✓" : "✗"} ${decision} (policy) ${tc.title ?? tc.kind ?? "tool"}`);
+    if (decision === "allow") {
+      this.log(`  ✓ allow (policy) ${tc.title ?? tc.kind ?? "tool"}`);
       this.progress(a); // a policy-settled prompt is progress too, else a burst of allowed tools reads as idle
-      return Promise.resolve(selectOption(options, decision === "allow" ? "allow_once" : "reject_once"));
+      return Promise.resolve(selectOption(options, "allow_once"));
+    }
+    if (decision === "reject") {
+      // A rejected write is NOT progress (a Bob retrying it must still read as idle), and is capped.
+      this.log(`  ✗ reject (policy) ${tc.title ?? tc.kind ?? "tool"}`);
+      a.rejectedWrites++;
+      if (!a.firstRejectedWrite) {
+        const raw = tc.rawInput ?? {};
+        a.firstRejectedWrite = {
+          path: typeof raw.path === "string" ? raw.path : (tc.title ?? "?"),
+          content: typeof raw.content === "string" ? raw.content : undefined,
+        };
+      }
+      const reply = selectOption(options, "reject_once");
+      if (a.rejectedWrites >= MAX_REJECTED_WRITES) {
+        a.pendingAsk = ask;
+        a.pendingAskText = text;
+        // End after the reply is on the wire, the same way the idle watchdog's trip does.
+        queueMicrotask(() => this.endWith("idle"));
+      }
+      return Promise.resolve(reply);
     }
     return new Promise((resolve) => {
       // Only one prompt is outstanding at a time (ACP serializes tool calls); a stray second one is cancelled.
@@ -697,7 +729,15 @@ export class AcpDriver implements WorkerClient {
       });
     }
     // Only a completed turn's text counts as the result; a captured attempt_completion survives any ending.
-    const result = a.lastCompletion || (status === "completed" ? a.turnText.trim() : "");
+    let result = a.lastCompletion || (status === "completed" ? a.turnText.trim() : "");
+    // A rejected write may hold the run's whole work product (the plan skill's *-plan.md): keep it.
+    const salvage = a.firstRejectedWrite?.content?.trim();
+    if (salvage && !result.includes(salvage)) {
+      const body =
+        salvage.length > SALVAGE_MAX_CHARS ? `${salvage.slice(0, SALVAGE_MAX_CHARS)}\n…(truncated)` : salvage;
+      const head = `## Content of Bob's rejected write to ${a.firstRejectedWrite!.path} (read-only dispatch)`;
+      result = result ? `${result}\n\n---\n\n${head}\n\n${body}` : `${head}\n\n${body}`;
+    }
     a.settle({
       taskId: a.sessionId,
       result,
@@ -708,6 +748,7 @@ export class AcpDriver implements WorkerClient {
       tokensUsed: a.budget.outputTokens,
       // Prompt turns when Bob sent no usage (2.0.2), so a run never reads as 0 tokens AND 0 turns.
       turns: a.usage.n || a.prompts,
+      ...(a.rejectedWrites ? { rejectedWrites: a.rejectedWrites, rejectedWritePath: a.firstRejectedWrite?.path } : {}),
     });
     // A permission reply settled above is written on a microtask; close after it lands, not before.
     setImmediate(() => a.conn.close());

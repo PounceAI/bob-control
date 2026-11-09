@@ -20,6 +20,8 @@ import {
   expireOverdueQuestions,
   closeOpenQuestions,
   completeTask,
+  listOperatorAnswers,
+  requeueOrphanedAnswers,
 } from "./db.js";
 import { buildReport } from "./report.js";
 
@@ -141,7 +143,7 @@ describe("board question round-trip (needs_input)", () => {
     assert.equal(getTask(id)?.status, "analysis_done");
 
     const res = answerQuestion(id, q.question_id, "proceed (late, via foreman/MCP)");
-    assert.deepEqual(res, { ok: true, alreadyAnswered: true }); // <-- not {alreadyAnswered:false}
+    assert.deepEqual(res, { ok: true, alreadyAnswered: true, resumedTo: null }); // <-- not {alreadyAnswered:false}
     assert.equal(getTask(id)?.status, "analysis_done"); // NOT resumed to in_progress → no re-dispatch
   });
 
@@ -151,7 +153,7 @@ describe("board question round-trip (needs_input)", () => {
     updateStatus(id, "cancelled"); // low-level cancel: leaves the question open
     assert.equal(getOpenQuestion(id)?.question_id, q.question_id); // still open here
     const res = answerQuestion(id, q.question_id, "yes");
-    assert.deepEqual(res, { ok: true, alreadyAnswered: true });
+    assert.deepEqual(res, { ok: true, alreadyAnswered: true, resumedTo: null });
     assert.equal(getTask(id)?.status, "cancelled"); // not resurrected
     assert.equal(getQuestion(q.question_id)?.status, "timed_out"); // guard closed it
   });
@@ -209,6 +211,108 @@ describe("board question round-trip (needs_input)", () => {
     const q = askQuestion(id, "x", [], Number.MAX_SAFE_INTEGER);
     assert.ok(q);
     assert.ok(Number.isFinite(Date.parse(q!.deadline_at))); // valid ISO, not Invalid Date
+  });
+
+  /** Raise a worker-style ('requeue') question of \`kind\` on a worked task. */
+  const requeueAsk = (id: number, kind = "tool") =>
+    askQuestion(id, `Bob stalled on a '${kind}' prompt`, [], undefined, { resume: "requeue", kind })!;
+
+  it("a 'requeue' question (dispatch already ended) re-queues the task pending on answer", () => {
+    const id = workedTask("idle-parked plan");
+    const q = requeueAsk(id);
+    assert.equal(q.resume, "requeue");
+    assert.equal(q.ask_kind, "tool");
+    const res = answerQuestion(id, q.question_id, "don't write files");
+    assert.deepEqual(res, { ok: true, alreadyAnswered: false, resumedTo: "pending" });
+    assert.equal(getTask(id)?.status, "pending", "re-queued for the worker, not orphaned in_progress");
+    assert.ok(getNotes(id).some((n) => /Re-queued with the answer/.test(n.note)));
+    assert.deepEqual(
+      listOperatorAnswers(id).map((a) => a.answer),
+      ["don't write files"],
+    );
+  });
+
+  it("a default ('live') question still resumes in_progress and isn't carried as an operator answer", () => {
+    const id = workedTask("live ask");
+    const q = askQuestion(id, "which port?")!;
+    assert.equal(q.resume, "live");
+    assert.equal((answerQuestion(id, q.question_id, "8080") as { resumedTo: unknown }).resumedTo, "in_progress");
+    assert.equal(getTask(id)?.status, "in_progress");
+    assert.equal(
+      getNotes(id).some((n) => /Re-queued/.test(n.note)),
+      false,
+    );
+    assert.deepEqual(listOperatorAnswers(id), []);
+  });
+
+  it("re-queuing is capped per kind: the 3rd answered same-kind question parks blocked", () => {
+    const id = workedTask("denied command loop");
+    const statuses: unknown[] = [];
+    for (let i = 0; i < 3; i++) {
+      if (i > 0) updateStatus(id, "in_progress"); // the worker re-pulled it and hit the same wall
+      const q = requeueAsk(id, "command");
+      statuses.push((answerQuestion(id, q.question_id, `approve ${i}`) as { resumedTo: unknown }).resumedTo);
+    }
+    assert.deepEqual(statuses, ["pending", "pending", "blocked"]);
+    assert.ok(getNotes(id).some((n) => /an answer can't fix this/.test(n.note)));
+    assert.equal(listOperatorAnswers(id).length, 3, "operator answers capped at the last 3");
+  });
+
+  it("the requeue cap counts per kind (a different kind doesn't spend it)", () => {
+    const id = workedTask("mixed kinds");
+    for (const kind of ["command", "command", "tool"]) {
+      updateStatus(id, "in_progress");
+      const q = requeueAsk(id, kind);
+      assert.equal((answerQuestion(id, q.question_id, "ok") as { resumedTo: unknown }).resumedTo, "pending");
+    }
+  });
+
+  it("an answer on a task no longer parked records it but resumes nothing (no clobber)", () => {
+    const id = workedTask("raced");
+    const q = requeueAsk(id);
+    updateStatus(id, "cancelled"); // a concurrent cancel won the race
+    const res = answerQuestion(id, q.question_id, "late");
+    assert.equal(getTask(id)?.status, "cancelled", "never flipped back to pending");
+    assert.equal(res.ok && res.resumedTo, null);
+  });
+
+  it("re-answering repairs a requeue task left parked by an answer that missed the transition", () => {
+    const id = workedTask("repair");
+    const q = requeueAsk(id);
+    // Simulate a pre-requeue binary / crash: question answered, task still parked needs_input.
+    getDb()
+      .prepare("UPDATE task_questions SET status = 'answered', answer = 'x', answered_at = ? WHERE question_id = ?")
+      .run(new Date().toISOString(), q.question_id);
+    const res = answerQuestion(id, q.question_id, "x");
+    assert.deepEqual(res, { ok: true, alreadyAnswered: true, resumedTo: "pending" });
+    assert.equal(getTask(id)?.status, "pending");
+  });
+
+  it("requeueOrphanedAnswers re-queues an answered task an old binary left in_progress — only when undispatched", () => {
+    const orphan = workedTask("orphan");
+    getDb()
+      .prepare("UPDATE tasks SET tags = ? WHERE id = ?")
+      .run(JSON.stringify(["slice-a"]), orphan);
+    const q = requeueAsk(orphan);
+    // Old answer path: question answered, task flipped to in_progress, nothing dispatched since.
+    getDb()
+      .prepare("UPDATE task_questions SET status = 'answered', answer = 'go', answered_at = ? WHERE question_id = ?")
+      .run(new Date(Date.now() - 1000).toISOString(), q.question_id);
+    updateStatus(orphan, "in_progress");
+
+    const live = workedTask("re-dispatched");
+    getDb()
+      .prepare("UPDATE tasks SET tags = ? WHERE id = ?")
+      .run(JSON.stringify(["slice-a"]), live);
+    const q2 = requeueAsk(live);
+    answerQuestion(live, q2.question_id, "go"); // → pending
+    claimTask(live, "worker"); // a worker re-pulled it
+    addNote(live, "Auto-dispatched in mode {code} (explicit, risk:standard).", "worker");
+
+    assert.equal(requeueOrphanedAnswers("worker", "other-slice"), 0, "tag-scoped");
+    assert.equal(requeueOrphanedAnswers("worker", "slice-a"), 1);
+    assert.equal(getTask(orphan)?.status, "pending");
+    assert.equal(getTask(live)?.status, "in_progress", "an in-flight re-dispatch is left alone");
   });
 
   it("listOpenQuestions surfaces only still-open questions", () => {

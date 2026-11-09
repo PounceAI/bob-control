@@ -3,6 +3,29 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Headless plan/review/ask dispatches no longer stall on a file write.** Bob's plan mode writes a
+  `*-plan.md` (a built-in create-plan skill); over ACP the read-only profile turned that into a permission
+  prompt nobody could answer, parking the task `needs_input`. Read-only modes now reject writes and tell Bob
+  to put the plan or findings in the result. A rejected write's content is appended to the result, and three
+  rejections end the dispatch.
+- **Answering a question raised after the dispatch ended re-runs the task.** Idle-park, denied-command and
+  wrong-Bob answers used to flip the task to `in_progress` with nothing driving it, and the answer never
+  reached Bob. They now re-queue it `pending`, with the last three answers in the prompt under
+  `## Operator answers`. The third answer to the same kind of question parks it `blocked` instead of looping.
+  The answer and the status change are one transaction and never overwrite a task that has moved on.
+  `bob answer` and `answer_task_question` report where the task went (`resumedTo`).
+- **A read-only dispatch that dies no longer rolls back the checkout.** The diff may be another session's work
+  in the same checkout; it's now snapshotted to `bob/task-<id>` but not reverted.
+
+### Upgrading
+
+- Upgrade the worker, CLI and MCP server (including the Claude Code plugin's cached copy) together. An older
+  CLI or MCP server still answers the old way; the new worker re-queues those orphaned tasks before each pull.
+
 ## [2.4.3] — 2026-10-19 — Bob 2.x command auto-approve that works
 
 ### Fixed

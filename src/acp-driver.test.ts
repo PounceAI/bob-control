@@ -7,6 +7,7 @@ import {
   classifyPermission,
   parseFollowupArgs,
   permissionPolicyFor,
+  MAX_REJECTED_WRITES,
   resolveBobLaunch,
   selectOption,
 } from "./acp-driver.js";
@@ -318,6 +319,73 @@ test("the permission policy settles non-command tools without a gate; a switch_m
   ]);
 });
 
+test("a read-only profile rejects Bob's plan-file write without raising an ask (pounce #277)", async () => {
+  let outcome: any;
+  const agent = new FakeAgent({
+    onPrompt: async (p, ag) => {
+      outcome = await ag.permission(p.sessionId, {
+        toolCallId: "w1",
+        title: "Writing file d23-plan.md",
+        kind: "edit",
+        rawInput: { path: "d23-plan.md", content: "# plan" },
+      });
+      return { stopReason: "end_turn" };
+    },
+  });
+  const d = driverFor(agent);
+  const asks: string[] = [];
+  await d.dispatch({
+    text: "x",
+    permissionPolicy: permissionPolicyFor({ alwaysAllowWrite: false, alwaysAllowMcp: true, alwaysAllowBrowser: false }),
+    onEvent: (_n, det) => {
+      if (det.ask) asks.push(det.ask);
+    },
+  });
+  assert.equal(outcome.outcome.optionId, "reject");
+  assert.deepEqual(asks, []);
+});
+
+const READ_ONLY = permissionPolicyFor({ alwaysAllowWrite: false, alwaysAllowMcp: true, alwaysAllowBrowser: false });
+const planWrite = (n: number) => ({
+  toolCallId: `w${n}`,
+  title: "Writing file d23-plan.md",
+  kind: "edit",
+  rawInput: { path: "d23-plan.md", content: "# The plan\n\n1. hash-lock" },
+});
+
+test("a rejected plan write's content is salvaged into the result (and reported)", async () => {
+  const agent = new FakeAgent({
+    onPrompt: async (p, ag) => {
+      await ag.permission(p.sessionId, planWrite(1));
+      ag.update(p.sessionId, {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Plan written." },
+      });
+      return { stopReason: "end_turn" };
+    },
+  });
+  const res = await driverFor(agent).dispatch({ text: "x", permissionPolicy: READ_ONLY });
+  assert.equal(res.status, "completed");
+  assert.match(res.result, /^Plan written\./);
+  assert.match(res.result, /rejected write to d23-plan\.md[\s\S]*# The plan\n\n1\. hash-lock/);
+  assert.equal(res.rejectedWrites, 1);
+  assert.equal(res.rejectedWritePath, "d23-plan.md");
+});
+
+test("repeated rejected writes end the dispatch as an idle ask, keeping the salvaged content", async () => {
+  const agent = new FakeAgent({
+    onPrompt: async (p, ag) => {
+      for (let i = 1; i <= 5; i++) await ag.permission(p.sessionId, planWrite(i));
+      return { stopReason: "end_turn" };
+    },
+  });
+  const res = await driverFor(agent).dispatch({ text: "x", permissionPolicy: READ_ONLY });
+  assert.equal(res.status, "idle");
+  assert.equal(res.rejectedWrites, MAX_REJECTED_WRITES);
+  assert.equal(res.pendingAsk, "tool");
+  assert.match(res.result, /# The plan/);
+});
+
 test("a followup question yields the turn as ask:'followup'; sendMessage answers it on the same session", async () => {
   const prompts: string[] = [];
   const agent = new FakeAgent({
@@ -504,7 +572,8 @@ test("pure helpers: classifyPermission, permissionPolicyFor, parseFollowupArgs, 
   );
   const policy = permissionPolicyFor({ alwaysAllowWrite: false, alwaysAllowMcp: true, alwaysAllowBrowser: false });
   assert.equal(policy({ toolCallId: "1", kind: "read" }), "allow");
-  assert.equal(policy({ toolCallId: "1", kind: "edit" }), "ask");
+  // Read-only profile: a write is rejected outright (an "ask" would wedge the headless dispatch).
+  for (const kind of ["edit", "delete", "move"]) assert.equal(policy({ toolCallId: "1", kind }), "reject");
   assert.equal(policy({ toolCallId: "1", kind: "other", title: "mcp_x" }), "allow");
   assert.equal(policy({ toolCallId: "1", kind: "execute", rawInput: { command: "ls" } }), "ask");
   assert.equal(
