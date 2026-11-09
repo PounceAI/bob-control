@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [2.4.4] — 2026-11-09 — Headless plan dispatches and re-queued answers
 
 ### Fixed
 
