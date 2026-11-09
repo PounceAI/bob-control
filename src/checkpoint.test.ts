@@ -10,6 +10,7 @@ import {
   revertTaskToCheckpoint,
   deleteTaskAndCheckpoint,
   preserveWipToBranch,
+  preserveWipForMode,
   releaseCheckpoint,
 } from "./checkpoint.js";
 import { runGit, repoRoot, listUntracked, snapshotWorktreeTree, snapshotWorktreeTreeBounded } from "./git.js";
@@ -378,6 +379,50 @@ describe("checkpoint orchestration + persistence (db)", () => {
     );
     assert.equal(getCheckpoint(t.id), null, "checkpoint consumed after preserve");
     assert.ok(getNotes(t.id).some((n) => /Preserved partial work to branch/.test(n.note)));
+    rm(dir);
+  });
+
+  it("preserveWipForMode leaves a read-only dispatch's tree alone (the diff is someone else's work)", async () => {
+    const dir = makeRepo();
+    commit(dir, "f.txt", "v1");
+    const t = createTask({ title: "plan task in a shared checkout" });
+    setCheckpoint(t.id, (await captureCheckpoint(dir, t.id))!);
+    // Another session edits the shared checkout while the read-only dispatch runs.
+    writeFileSync(join(dir, "f.txt"), "other-session-edit");
+    writeFileSync(join(dir, "theirs.txt"), "concurrent work");
+
+    const r = await preserveWipForMode(dir, t.id, "worker", "plan");
+    assert.equal(r.preserved, false);
+    assert.equal(readFileSync(join(dir, "f.txt"), "utf8"), "other-session-edit", "not reverted");
+    assert.equal(existsSync(join(dir, "theirs.txt")), true, "untracked file kept");
+    // ...but the state is still snapshotted to the task branch, so a stray write stays recoverable.
+    assert.equal(r.branch, `bob/task-${t.id}`);
+    assert.equal(git(dir, "show", `bob/task-${t.id}:theirs.txt`), "concurrent work");
+    assert.equal(getCheckpoint(t.id), null, "checkpoint pin released");
+    assert.ok(getNotes(t.id).some((n) => /Read-only plan dispatch: working tree NOT rolled back/.test(n.note)));
+    rm(dir);
+  });
+
+  it("preserveWipForMode on a clean read-only exit makes no branch", async () => {
+    const dir = makeRepo();
+    commit(dir, "f.txt", "v1");
+    const t = createTask({ title: "clean plan" });
+    setCheckpoint(t.id, (await captureCheckpoint(dir, t.id))!);
+    const r = await preserveWipForMode(dir, t.id, "worker", "review");
+    assert.equal(r.branch, undefined);
+    assert.equal(refPresent(dir, `refs/heads/bob/task-${t.id}`), false);
+    rm(dir);
+  });
+
+  it("preserveWipForMode still preserves WIP for a writing mode", async () => {
+    const dir = makeRepo();
+    commit(dir, "f.txt", "v1");
+    const t = createTask({ title: "code task" });
+    setCheckpoint(t.id, (await captureCheckpoint(dir, t.id))!);
+    writeFileSync(join(dir, "f.txt"), "v2-partial");
+    const r = await preserveWipForMode(dir, t.id, "worker", "code");
+    assert.equal(r.preserved, true);
+    assert.equal(readFileSync(join(dir, "f.txt"), "utf8"), "v1");
     rm(dir);
   });
 

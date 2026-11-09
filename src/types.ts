@@ -127,4 +127,12 @@ export interface TaskQuestion {
   answered_at: string | null;
   /** ISO deadline; past this an unanswered question times out and the task parks blocked. */
   deadline_at: string;
+  /** What an answer does: 'live' resumes a waiter still on the line (in_progress); 'requeue' re-queues a
+   *  task whose dispatch already ended (pending), so the next run carries the answer in its prompt. */
+  resume: QuestionResume;
+  /** What raised a worker question ('command' | 'tool' | 'followup' | 'workspace'); the requeue cap counts
+   *  per kind, so answering one kind can't spend another's allowance. Null for Bob's own questions. */
+  ask_kind: string | null;
 }
+
+export type QuestionResume = "live" | "requeue";

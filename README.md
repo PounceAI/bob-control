@@ -609,7 +609,11 @@ optional multiple-choice `options`) where any board client can see it: `get_task
 it's been waiting. The worker then blocks on `await_answer` (a poll of the shared board).
 
 Anyone answers with one call — `answer_task_question(task_id, question_id, answer)` over MCP, or
-`bob answer <id> <question_id> <text>` from a terminal — and the waiting worker resumes. Answers
+`bob answer <id> <question_id> <text>` from a terminal — and the waiting worker resumes. A question the
+worker raised after its dispatch ended (a denied command, a stalled prompt) has no one waiting: answering
+re-queues the task `pending`, and the re-run's prompt carries the answer under `## Operator answers`. An
+answer can't approve a denied command, so the third answer to the same kind of question parks the task
+`blocked` (fix the cause, e.g. `--allow-commands`, then re-queue it). Answers
 are matched by a unique `question_id`, so a stale answer can't apply to a new question. Fail-safe:
 a question unanswered past its deadline times out and the task parks `blocked` (a board-activity
 sweep fires this even if the asking worker died) — never a fabricated answer, never a silent

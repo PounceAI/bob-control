@@ -392,7 +392,8 @@ server.registerTool(
     description:
       "Answer a question a worker raised (see needs_input tasks / board_report). Matched by " +
       "question_id so a stale answer can't apply to a new question. Records the answer and resumes " +
-      "the waiting worker (task returns to in_progress).",
+      "the task: in_progress when a worker is still waiting, or pending (re-dispatched with the answer " +
+      "in its prompt) when the question was raised after its dispatch ended.",
     inputSchema: {
       task_id: z.number().int(),
       question_id: z.string().describe("The question_id from get_task.pending_question / board_report"),
@@ -402,7 +403,18 @@ server.registerTool(
   async ({ task_id, question_id, answer }) => {
     const res = repo.answerQuestion(task_id, question_id, answer);
     if (!res.ok) return fail(res.error);
-    return json({ task_id, question_id, recorded: true, alreadyAnswered: res.alreadyAnswered });
+    return json({
+      task_id,
+      question_id,
+      recorded: true,
+      alreadyAnswered: res.alreadyAnswered,
+      // Where the answer moved the task (in_progress | pending | blocked), or null if it moved nothing.
+      resumedTo: res.resumedTo,
+      status: repo.getTask(task_id)?.status,
+      ...(res.resumedTo || res.alreadyAnswered
+        ? {}
+        : { warning: "the task was not parked on this question; nothing resumed or re-queued" }),
+    });
   },
 );
 

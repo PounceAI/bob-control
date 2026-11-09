@@ -140,6 +140,9 @@ export interface DispatchResult {
   /** Bob2 only: max gap (ms) between task-row `updated_at` bumps while running — telemetry for picking a
    *  safe stall-watchdog threshold (the worst-case "Bob silent but working" we must not false-kill). */
   maxIdleMs?: number;
+  /** ACP only: writes the read-only permission policy rejected, and the first one's path (board note). */
+  rejectedWrites?: number;
+  rejectedWritePath?: string;
 }
 
 export interface TaskLifecycleEvent {
